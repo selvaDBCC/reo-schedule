@@ -242,7 +242,9 @@ function parseReoText(pageOneText, allText){
 
   // Ctrl Code fallback 1 — tolerant label, then Aus-Reo-shaped 4-char code in nearby window
   if(!e.ctrlCode){
-    const labelRe=/C[a-z]{2,4}\s*C[a-z]{2,4}\s*[:;.]?/i;
+    // \b + \s+ (not \s*) between the two words — prevents matching "Concrete Construction"
+    // (which contains C+...+C pattern). "Ctrl Code", "Ctri Code", "Cirl Code" still match.
+    const labelRe=/\bC[a-z]{2,4}\s+C[a-z]{2,4}\s*[:;.]?/i;
     const lm=a.match(labelRe);
     if(lm){
       const idx=a.indexOf(lm[0]);
@@ -268,7 +270,9 @@ function parseReoText(pageOneText, allText){
   }
   // Ship Date fallback — tolerant label
   if(!e.shipDate){
-    const labelRe=/S[a-z]{2,4}\s*D[a-z]{2,4}\s*[:;.]?/i;
+    // \b + \s+ between the two words — prevents matching "Schedule" (a single word that
+    // happens to contain S+...+d). "Ship Date", "Shlp Date", "Shio Dote" still match.
+    const labelRe=/\bS[a-z]{2,4}\s+D[a-z]{2,4}\s*[:;.]?/i;
     const lm=a.match(labelRe);
     if(lm){
       const idx=a.indexOf(lm[0]);
@@ -277,12 +281,33 @@ function parseReoText(pageOneText, allText){
       if(sm)e.shipDate=sm[1];
     }
   }
+  // Ship Date fallback 2 — no recognisable label. Only if doc smells like Aus Reo.
+  // Find dates in pageOneText, excluding "Last Activity" timestamp at the bottom of page 1
+  // (Aus Reo's footer always shows Last Activity dd/mm/yyyy after delivery date in reading order).
+  if(!e.shipDate&&looksLikeAusReo(a)){
+    // Look for dates in page-one text only (not subsequent pages)
+    const headText=t||a.slice(0,2000);
+    // Strip "Last Activity ..." substrings since those aren't ship dates
+    const cleaned=headText.replace(/Last\s*Activity[\s\S]{0,80}/gi,' ');
+    const dm=cleaned.match(/\b(\d{1,2}\/\d{1,2}\/\d{2,4})\b/);
+    if(dm)e.shipDate=dm[1];
+  }
   // Weight fallback — allow space inside "W t" (OCR artefact) and "We" as tesseract misread
   if(e.weight==null){
     m=a.match(/\bW\s*[te]\s*:?\s*([\d.,]+)\s*T(?:onne)?\b/i);
     if(m){const v=parseReoNum(m[1]);if(!isNaN(v))e.weight=v}}
-  // Not an Aus Reo schedule — skip deeper extraction silently
-  if(!e.ctrlCode)return e;
+  // Not an Aus Reo schedule — skip deeper extraction silently (but log diagnostic)
+  if(!e.ctrlCode){
+    if(typeof console!=='undefined'&&console.log){
+      console.log('[REO PARSE] no ctrl code — skipping',{
+        textLen:a.length,
+        hasCtrlLabel:/Ctrl\s*Code/i.test(a),
+        hasAusReo:/AUS\s*REO|ausreo/i.test(a),
+        first300:a.slice(0,300)
+      });
+    }
+    return e;
+  }
   // ── BAR SUMMARY TOTAL ──
   // Native PDF: "TOTAL items pieces tonne" appears on a single line. Strict same-line match works.
   // OCR PDF: Tesseract often reads the row labels first ("N12, N16, TOTAL") then dumps all data
@@ -331,6 +356,19 @@ function parseReoText(pageOneText, allText){
     if(!isNaN(qty)&&!isNaN(aa)&&!isNaN(bb)){trenchLm+=qty*Math.max(aa,bb);trenchFound=true}}
   if(meshFound)e.meshSqm=Math.round(meshSqm*100)/100;
   if(trenchFound)e.trenchLm=Math.round(trenchLm*100)/100;
+  // Diagnostic — logs the final extraction state. Helps debug when browser Tesseract
+  // produces different output than expected. Safe to leave on; trivial overhead.
+  if(typeof console!=='undefined'&&console.log){
+    console.log('[REO PARSE]',{
+      ctrl:e.ctrlCode||null,date:e.shipDate||null,wt:e.weight??null,
+      bar:e.barWeight??null,mesh:e.meshSqm??null,trench:e.trenchLm??null,
+      textLen:a.length,
+      hasShipLabel:/Ship\s*Date/i.test(a),
+      hasTolerantShipLabel:/\bS[a-z]{2,4}\s+D[a-z]{2,4}/i.test(a),
+      allDates:(a.match(/\d{1,2}\/\d{1,2}\/\d{2,4}/g)||[]).slice(0,8),
+      first400:a.slice(0,400)
+    });
+  }
   return e}
 
 // Get text from a PDF using its native text layer. Returns {pageOneText, allText, hasText, numPages}.
