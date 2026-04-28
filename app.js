@@ -463,32 +463,21 @@ async function extractPdfData(file){
   const info=$('extractInfo');info.innerHTML='<div class="info-msg">Reading PDF...</div>';
   try{
     const ext=await doPdfExtract(file);
-    // Image-only PDF — show educational warning, then auto-run OCR
+    // Image-only PDF — REJECT. We used to auto-OCR these, but browser Tesseract is too unreliable
+    // for the steel-fixers extraction we need (bar weight, mesh, trench mesh). Force the user to
+    // re-export from their scheduling software using "Save As PDF" / "Export as PDF" instead of
+    // "Print to PDF". Aus Reo's scheduling software supports both — they just need to use the right one.
     if(ext._needsOcr){
-      const numPages=ext._numPages||1;
-      const estSec=Math.max(8,numPages*12);
       info.innerHTML=`
-<div class="warn-msg" style="margin-top:8px;line-height:1.5">
-  <div style="font-weight:700;margin-bottom:4px">⚠ This PDF has no readable text</div>
-  <div style="font-size:12px;color:var(--gray-dk);margin-bottom:6px">Looks like it was created with <b>"Print to PDF"</b> instead of saved directly from your scheduling software. Print-to-PDF turns each page into an image, which makes auto-extraction unreliable.</div>
-  <div style="font-size:12px;color:var(--gray-dk);margin-bottom:8px"><b>For future uploads:</b> use <b>"Save As PDF"</b> or <b>"Export as PDF"</b> from your scheduling software, not "Print to PDF".</div>
-  <div style="font-size:12px;color:var(--accent-dk);font-weight:600;display:flex;align-items:center;gap:8px"><span class="spinner" style="display:inline-block;width:14px;height:14px;border:2px solid var(--accent-lt);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite"></span><span id="ocrStatus">Reading text from images using OCR (~${estSec}s)...</span></div>
+<div class="error-msg" style="margin-top:8px;line-height:1.5">
+  <div style="font-weight:700;margin-bottom:6px">⚠ This PDF can't be used — it's an image, not a real PDF</div>
+  <div style="font-size:13px;margin-bottom:8px">It looks like this file was made using <b>"Print to PDF"</b>, which turns each page into an image. We can't reliably extract bar weight, mesh, or trench mesh data from image-only PDFs.</div>
+  <div style="font-size:13px;margin-bottom:8px"><b>Please re-export the schedule from your scheduling software using "Save As PDF" or "Export as PDF"</b> (not "Print to PDF"), and upload that version instead.</div>
+  <div style="font-size:12px;color:var(--gray-dk)">If you're not sure how to do this, ask your IT support or check your scheduling software's export options.</div>
 </div>`;
-      const ocrExt=await doPdfOcrExtract(file,(page,total,stage)=>{
-        const el=$('ocrStatus');if(!el)return;
-        if(stage==='init')el.textContent=`Loading OCR engine...`;
-        else if(stage==='render')el.textContent=`Reading page ${page} of ${total}...`;
-        else if(stage==='ocr')el.textContent=`OCR processing page ${page} of ${total}...`});
-      applyExtractedToForm(ocrExt);
-      // Stop the spinner — OCR is finished
-      const spinEl=document.querySelector('#extractInfo .spinner');if(spinEl)spinEl.style.display='none';
-      const statusEl=$('ocrStatus');if(statusEl)statusEl.textContent='✓ OCR finished';
-      const ff=buildExtractionSummary(ocrExt);
-      const summary=ff.length
-        ? `<div class="success-msg" style="margin-top:8px"><b>🔍 OCR complete.</b> Please double-check these values: ${ff.join(' · ')}</div>`
-        : '<div class="warn-msg" style="margin-top:8px"><b>OCR didn\'t find recognisable schedule data.</b> Please fill in fields manually.</div>';
-      info.innerHTML+=summary;
-      pendingFile._extracted=ocrExt;
+      // Clear the pending file so the user can't proceed with this upload
+      pendingFile=null;renderFile();
+      $('scheduleSection').style.display='none';$('markupSection').style.display='none';
       return}
     // Native text extraction succeeded
     applyExtractedToForm(ext);
@@ -667,30 +656,18 @@ async function runAttachExtraction(file){
   info.innerHTML='<div class="info-msg">Reading PDF...</div>';
   try{
     const ext=await doPdfExtract(file);
+    // Image-only PDF — REJECT (see comment in extractPdfData for rationale).
     if(ext._needsOcr){
-      const numPages=ext._numPages||1;const estSec=Math.max(8,numPages*12);
       info.innerHTML=`
-<div class="warn-msg" style="margin-top:8px;line-height:1.5">
-  <div style="font-weight:700;margin-bottom:4px">⚠ This PDF has no readable text</div>
-  <div style="font-size:12px;color:var(--gray-dk);margin-bottom:6px">Looks like it was created with <b>"Print to PDF"</b> instead of saved directly from your scheduling software. Print-to-PDF turns each page into an image, which makes auto-extraction unreliable.</div>
-  <div style="font-size:12px;color:var(--gray-dk);margin-bottom:8px"><b>For future uploads:</b> use <b>"Save As PDF"</b> or <b>"Export as PDF"</b> from your scheduling software, not "Print to PDF".</div>
-  <div style="font-size:12px;color:var(--accent-dk);font-weight:600;display:flex;align-items:center;gap:8px"><span style="display:inline-block;width:14px;height:14px;border:2px solid var(--accent-lt);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite"></span><span id="attOcrStatus">Reading text from images using OCR (~${estSec}s)...</span></div>
+<div class="error-msg" style="margin-top:8px;line-height:1.5">
+  <div style="font-weight:700;margin-bottom:6px">⚠ This PDF can't be used — it's an image, not a real PDF</div>
+  <div style="font-size:13px;margin-bottom:8px">It looks like this file was made using <b>"Print to PDF"</b>, which turns each page into an image. We can't reliably extract bar weight, mesh, or trench mesh data from image-only PDFs.</div>
+  <div style="font-size:13px;margin-bottom:8px"><b>Please re-export the schedule from your scheduling software using "Save As PDF" or "Export as PDF"</b> (not "Print to PDF"), and upload that version instead.</div>
+  <div style="font-size:12px;color:var(--gray-dk)">Close this dialog, re-export the file properly, and try attaching again.</div>
 </div>`;
-      const ocrExt=await doPdfOcrExtract(file,(page,total,stage)=>{
-        const el=$('attOcrStatus');if(!el)return;
-        if(stage==='init')el.textContent=`Loading OCR engine...`;
-        else if(stage==='render')el.textContent=`Reading page ${page} of ${total}...`;
-        else if(stage==='ocr')el.textContent=`OCR processing page ${page} of ${total}...`});
-      window._attExt=ocrExt;
-      applyExtractedToAttach(ocrExt);
-      // Stop the spinner — OCR is finished
-      const spinEl=document.querySelector('#att_info .spinner');if(spinEl)spinEl.style.display='none';
-      const statusEl=$('attOcrStatus');if(statusEl)statusEl.textContent='✓ OCR finished';
-      const ff=buildExtractionSummary(ocrExt);
-      const summary=ff.length
-        ? `<div class="success-msg" style="margin-top:8px"><b>🔍 OCR complete.</b> Please double-check: ${ff.join(' · ')}</div>`
-        : '<div class="warn-msg" style="margin-top:8px"><b>OCR didn\'t find recognisable schedule data.</b> Please fill in fields manually.</div>';
-      info.innerHTML+=summary;
+      // Disable the Attach button so user cannot save with this image-only file
+      window._attFile=null;window._attExt={};
+      const btn=$('att_btn');if(btn){btn.disabled=true;btn.textContent='Re-export PDF first'}
       return}
     window._attExt=ext;
     applyExtractedToAttach(ext);
@@ -710,6 +687,7 @@ function applyExtractedToAttach(ext){
 
 async function confirmAttach(id){
   const err=$('att_err');err.innerHTML='';
+  if(!window._attFile)return err.innerHTML='<div class="error-msg">No valid file to attach. Please re-export your PDF and try again.</div>';
   const s=$('att_sched').value.trim(),sd=$('att_supD').value,sub=$('att_subD').value,wt=$('att_wt').value,dr=$('att_draw').value.trim();
   if(!s)return err.innerHTML='<div class="error-msg">Schedule required</div>';
   if(!sd)return err.innerHTML='<div class="error-msg">Supplier date required</div>';
