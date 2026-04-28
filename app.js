@@ -201,7 +201,12 @@ function parseReoText(pageOneText, allText){
     if(/^(NSW|VIC|QLD|WA|SA|TAS|NT|ACT)\d+$/.test(v))return false;
     if(/^ABN\d+$/.test(v))return false;
     return true};
-  const looksLikeAusReo=s=>/AUS\s*REO|ausreo|Reinforcement\s*Schedule|Reo\s*Schedule|Ctrl\s*Code|Ship\s*Date/i.test(s);
+  // Anchor signals for an Aus Reo schedule. Used to gate the most aggressive (label-less) fallbacks.
+  // Browser Tesseract garbles small labels more aggressively than CLI Tesseract, so we anchor on
+  // multiple distinctive strings — generic Aus Reo / template strings, not data that varies per job
+  // and not generic terms (e.g. "Sunshine North" — a real Melbourne suburb; "Total Weight: X Tonne"
+  // — a generic format any rebar supplier could use). Any one of these suffices.
+  const looksLikeAusReo=s=>/AUS\s*REO|ausreo|Reinforcement\s*Schedule|Reo\s*Schedule|Ctrl\s*Code|Ship\s*Date|Build\s*with\s*confidence|Bunnett\s*Street|Bar\s*Mark|BAR\s*SUMMARY|MISCELLANEOUS\s*PRODUCT\s*SUMMARY|Multiplier:/i.test(s);
 
   // Ctrl Code — strict label-adjacent (allows all-letter codes like UQYH/UXEH).
   m=t.match(/Ctrl\s*Code:\s*([A-Za-z0-9]+)/i);
@@ -281,19 +286,18 @@ function parseReoText(pageOneText, allText){
       if(sm)e.shipDate=sm[1];
     }
   }
-  // Ship Date fallback 2 — no recognisable label. Only if doc smells like Aus Reo.
-  // Find dates in pageOneText, excluding "Last Activity" timestamp at the bottom of page 1
-  // (Aus Reo's footer always shows Last Activity dd/mm/yyyy after delivery date in reading order).
+  // Ship Date fallback 2 — no recognisable label. Only run if doc smells like Aus Reo (gates it
+  // away from non-Aus-Reo PDFs that happen to contain dates).
+  // Excludes "Last Activity" timestamp at the bottom of page 1 (Aus Reo footer).
   if(!e.shipDate&&looksLikeAusReo(a)){
-    // Look for dates in page-one text only (not subsequent pages)
     const headText=t||a.slice(0,2000);
-    // Strip "Last Activity ..." substrings since those aren't ship dates
     const cleaned=headText.replace(/Last\s*Activity[\s\S]{0,80}/gi,' ');
     const dm=cleaned.match(/\b(\d{1,2}\/\d{1,2}\/\d{2,4})\b/);
     if(dm)e.shipDate=dm[1];
   }
-  // Weight fallback — allow space inside "W t" (OCR artefact) and "We" as tesseract misread
-  if(e.weight==null){
+  // Weight fallback — allow space inside "W t" (OCR artefact) and "We" as Tesseract misread.
+  // Also gated on Aus Reo signal: OneSteel/competitor schedules can contain "Wt: X T" too.
+  if(e.weight==null&&looksLikeAusReo(a)){
     m=a.match(/\bW\s*[te]\s*:?\s*([\d.,]+)\s*T(?:onne)?\b/i);
     if(m){const v=parseReoNum(m[1]);if(!isNaN(v))e.weight=v}}
   // Not an Aus Reo schedule — skip deeper extraction silently (but log diagnostic)
