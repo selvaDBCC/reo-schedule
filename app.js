@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b4.0';
+const APP_VERSION='b4.1';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const ADMIN_PIN='7519', BUCKET='schedules';
@@ -84,7 +84,7 @@ async function checkForNewVersion(){
 
 async function init(){
   // Show the version in the footer badge so anyone can verify what's running.
-  const vb=$('versionBadge');if(vb)vb.textContent='v'+APP_VERSION;
+  const vb=$('versionBadge');if(vb)vb.textContent=APP_VERSION;
   // Check for new version FIRST, before doing anything else.
   // If a newer version is deployed, force-reload to bypass cache.
   // Has built-in loop protection: if we've already reloaded once this session and still
