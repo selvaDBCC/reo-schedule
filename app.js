@@ -200,6 +200,12 @@ function parseReoText(pageOneText, allText){
     if(FALSE_POS.has(v))return false;
     if(/^(NSW|VIC|QLD|WA|SA|TAS|NT|ACT)\d+$/.test(v))return false;
     if(/^ABN\d+$/.test(v))return false;
+    // Reject Aus Reo product codes — they share the 4-char letter+digit pattern with Ctrl Codes.
+    // RL57, RL58 (mesh / RL elevations), SL72/82/92/102 (square mesh), L8TM, 8TM3 (trench mesh).
+    // None of the 13 known Aus Reo Ctrl Codes follow these patterns, so this is safe.
+    if(/^RL\d/.test(v))return false;        // RL57, RL58, RL72, RL92, RL102 etc
+    if(/^SL\d/.test(v))return false;        // SL52, SL62, SL72, SL82, SL92, SL102
+    if(/TM\d/.test(v))return false;         // L8TM, 8TM3, L11TM, etc
     return true};
   // Anchor signals for an Aus Reo schedule. Used to gate the most aggressive (label-less) fallbacks.
   // Browser Tesseract garbles small labels more aggressively than CLI Tesseract, so we anchor on
@@ -229,6 +235,11 @@ function parseReoText(pageOneText, allText){
         if(FALSE_POS.has(v))continue;
         if(/^(NSW|VIC|QLD|WA|SA|TAS|NT|ACT)\d+$/.test(v))continue;
         if(/^ABN\d+$/.test(v))continue;
+        // Reject Aus Reo product codes (rectangular mesh, square mesh, trench mesh) so we
+        // don't pick up "RL57" from a "Description: CC6. START RL57.700" elevation reference.
+        if(/^RL\d/.test(v))continue;
+        if(/^SL\d/.test(v))continue;
+        if(/TM\d/.test(v))continue;
         if(v.length===4&&/\d/.test(v)&&/[A-Z]/.test(v)){e.ctrlCode=v;break}
         if(!e.ctrlCode)e.ctrlCode=v;
       }
@@ -300,14 +311,18 @@ function parseReoText(pageOneText, allText){
   if(e.weight==null&&looksLikeAusReo(a)){
     m=a.match(/\bW\s*[te]\s*:?\s*([\d.,]+)\s*T(?:onne)?\b/i);
     if(m){const v=parseReoNum(m[1]);if(!isNaN(v))e.weight=v}}
-  // Not an Aus Reo schedule — skip deeper extraction silently (but log diagnostic)
-  if(!e.ctrlCode){
+  // Decide whether to continue with deeper extraction (BAR SUMMARY / mesh / trench).
+  // Continue if: (a) we found a Ctrl Code, OR (b) the doc clearly smells like Aus Reo via
+  // distinctive anchors. The (b) path lets us still extract bar weight / mesh / dates from
+  // OCR'd schedules even when browser Tesseract garbles the actual Ctrl Code text.
+  if(!e.ctrlCode&&!looksLikeAusReo(a)){
     if(typeof console!=='undefined'&&console.log){
-      console.log('[REO PARSE] no ctrl code — skipping',{
+      console.log('[REO PARSE] no ctrl code, no Aus Reo signal — skipping',{
         textLen:a.length,
         hasCtrlLabel:/Ctrl\s*Code/i.test(a),
-        hasAusReo:/AUS\s*REO|ausreo/i.test(a),
-        first300:a.slice(0,300)
+        hasAusReoSignal:looksLikeAusReo(a),
+        allDates:(a.match(/\d{1,2}\/\d{1,2}\/\d{2,4}/g)||[]).slice(0,8),
+        first400:a.slice(0,400)
       });
     }
     return e;
