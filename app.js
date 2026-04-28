@@ -1,4 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
+const APP_VERSION='b4.0';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const ADMIN_PIN='7519', BUCKET='schedules';
@@ -40,7 +41,55 @@ function confirmDialog(title,msg,okLabel,okClass,onOk){
 /* ═══ INIT ═══ */
 async function waitForSupabase(maxMs=8000){const start=Date.now();while(typeof supabase==='undefined'){if(Date.now()-start>maxMs)throw new Error('Supabase client library failed to load. Check your internet connection.');await new Promise(r=>setTimeout(r,100))}}
 function isSiteViewMode(){try{return new URLSearchParams(location.search).get('view')==='site'}catch(_){return false}}
+// Fetch version.json from the server with cache busting. If a newer version is available,
+// force-reload the page with a cache-bypass query string so the browser fetches fresh app.js
+// and index.html. This solves the "users have stale cached app.js" problem after a deploy.
+//
+// Loop protection: we set a sessionStorage flag before reloading. If the flag is already
+// set and we STILL see a version mismatch, give up — something is misconfigured (e.g. CDN
+// cache hasn't propagated, or version.json hasn't been updated). Better to load the stale
+// version than to trap the user in an infinite reload.
+async function checkForNewVersion(){
+  // If we just reloaded for a version mismatch, don't loop. Clear the flag once we get past
+  // the check successfully or once we've already retried once.
+  if(sessionStorage.getItem('reo_version_reload_attempted')==='1'){
+    sessionStorage.removeItem('reo_version_reload_attempted');
+    return;
+  }
+  try{
+    // Race a fetch against a 3-second timeout — we don't want to block the app on a slow network.
+    const ctrl=new AbortController();
+    const timeoutId=setTimeout(()=>ctrl.abort(),3000);
+    const res=await fetch('version.json?_='+Date.now(),{cache:'no-store',signal:ctrl.signal});
+    clearTimeout(timeoutId);
+    if(!res.ok)return;
+    const data=await res.json();
+    if(!data||!data.version)return;
+    if(data.version===APP_VERSION)return;
+    // Version mismatch — set loop guard and reload with cache-bust query strings.
+    console.log('[REO] Version mismatch. Have',APP_VERSION,'— server has',data.version,'— reloading.');
+    sessionStorage.setItem('reo_version_reload_attempted','1');
+    // Strip any existing ?v= or ?_= params and add a fresh cache-bust
+    const url=new URL(location.href);
+    url.searchParams.set('_v',data.version);
+    url.searchParams.set('_t',Date.now());
+    location.replace(url.toString());
+    // Block here so the rest of init() doesn't run while we reload
+    await new Promise(()=>{});
+  }catch(e){
+    // Network error, timeout, JSON parse error — fail silent. App still works on cached version.
+    console.log('[REO] Version check skipped:',e.message);
+  }
+}
+
 async function init(){
+  // Show the version in the footer badge so anyone can verify what's running.
+  const vb=$('versionBadge');if(vb)vb.textContent='v'+APP_VERSION;
+  // Check for new version FIRST, before doing anything else.
+  // If a newer version is deployed, force-reload to bypass cache.
+  // Has built-in loop protection: if we've already reloaded once this session and still
+  // see a mismatch, give up and continue (something else is wrong, don't trap the user).
+  await checkForNewVersion();
   try{await waitForSupabase();initSupabase()}catch(e){$('loadingScreen').innerHTML='<div style="text-align:center;padding:20px"><h2 style="color:var(--err)">Setup Error</h2><p style="color:var(--muted);font-size:13px">'+esc(e.message)+'</p><button class="btn btn-sm" onclick="location.reload()" style="width:auto;margin-top:12px">Retry</button></div>';return}
   // Site View (steel fixers — read-only, no login)
   if(isSiteViewMode()){
