@@ -190,54 +190,133 @@ function parseReoText(pageOneText, allText){
   const e={};let m;
   const t=pageOneText||'';
   const a=allText||pageOneText||'';
-  // ── HEADER FIELDS (page 1 — strict regex first) ──
+  // ── HEADER FIELDS — strict label-adjacent first, OCR-tolerant fallbacks after ──
+  // Words that show up in Aus Reo letterheads but are NOT Ctrl Codes — guard against
+  // OCR placing address text right after the "Ctrl Code:" colon.
+  const FALSE_POS=new Set(['AUS','REO','PTY','LTD','ABN','NSW','VIC','QLD','TAS','ACT','PDF','GFB','REV','REF','PROJ','UNIT','PHONE','FAX','BOX','GST','TOTAL','EACH','MESH','BAR']);
+  const looksLikeReoCodeFallback=v=>{
+    if(v.length!==4)return false;
+    if(!/[A-Z]/.test(v)||!/\d/.test(v))return false;
+    if(FALSE_POS.has(v))return false;
+    if(/^(NSW|VIC|QLD|WA|SA|TAS|NT|ACT)\d+$/.test(v))return false;
+    if(/^ABN\d+$/.test(v))return false;
+    return true};
+  const looksLikeAusReo=s=>/AUS\s*REO|ausreo|Reinforcement\s*Schedule|Reo\s*Schedule|Ctrl\s*Code|Ship\s*Date/i.test(s);
+
+  // Ctrl Code — strict label-adjacent (allows all-letter codes like UQYH/UXEH).
   m=t.match(/Ctrl\s*Code:\s*([A-Za-z0-9]+)/i);
-  // Reject "123" etc. — Aus Reo Ctrl Codes are always 3-5 chars with at least one letter AND digit
-  if(m&&/[A-Z]/i.test(m[1])&&/\d/.test(m[1])&&m[1].length>=3&&m[1].length<=5)e.ctrlCode=m[1].trim();
+  if(m&&/[A-Za-z]/.test(m[1])&&m[1].length>=3&&m[1].length<=5){
+    const v=m[1].trim().toUpperCase();
+    if(!FALSE_POS.has(v))e.ctrlCode=v;
+  }
+  // If strict regex hit a false-positive (OCR put address after colon), look further in same window.
+  if(!e.ctrlCode){
+    const idx=t.search(/Ctrl\s*Code:/i);
+    if(idx>=0){
+      const labelM=t.slice(idx).match(/Ctrl\s*Code:/i);
+      const startAfter=idx+(labelM?labelM[0].length:10);
+      const searchWindow=t.slice(startAfter,startAfter+300);
+      const tokenRe=/\b([A-Za-z0-9]{3,5})\b/g;
+      let cm;
+      while((cm=tokenRe.exec(searchWindow))!==null){
+        const v=cm[1].toUpperCase();
+        if(!/[A-Za-z]/.test(cm[1]))continue;
+        if(FALSE_POS.has(v))continue;
+        if(/^(NSW|VIC|QLD|WA|SA|TAS|NT|ACT)\d+$/.test(v))continue;
+        if(/^ABN\d+$/.test(v))continue;
+        if(v.length===4&&/\d/.test(v)&&/[A-Z]/.test(v)){e.ctrlCode=v;break}
+        if(!e.ctrlCode)e.ctrlCode=v;
+      }
+    }
+  }
+  // Ship Date — strict
   m=t.match(/Ship\s*Date:\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i);if(m)e.shipDate=m[1].trim();
   m=t.match(/Drawing:\s*([A-Za-z0-9\-\s]+?)(?=\s{2,}|Bar|Desc|$)/i);if(m)e.drawing=m[1].trim();
-  // Total weight: "Wt: 10,014 T" then fallback "Total Weight: X Tonne"
+  // Weight — "Wt: 10,014 T" then fallback "Total Weight: X Tonne"
   m=t.match(/Wt:\s*([\d.,]+)\s*T/i);if(m){const v=parseReoNum(m[1]);if(!isNaN(v))e.weight=v}
   if(e.weight==null){m=a.match(/Total\s*Weight:\s*([\d.,]+)\s*Tonne/i);if(m){const v=parseReoNum(m[1]);if(!isNaN(v))e.weight=v}}
+
   // ── OCR-FRIENDLY FALLBACKS ──
-  // OCR flattens layout, so labels and values can be 30-100 chars apart.
-  // For Ctrl Code: search a 250-char window after the label, skip past common false-positives,
-  // require BOTH a letter and a digit in the candidate (excludes "123", "REO", "GFB", "PDF", etc).
+  // OCR can garble labels ("Ctri Code" instead of "Ctrl Code") or scatter values across the page.
+  // These fallbacks use tolerant label-matching and Aus-Reo-shaped code detection.
+
+  // Ctrl Code fallback 1 — tolerant label, then Aus-Reo-shaped 4-char code in nearby window
   if(!e.ctrlCode){
-    const idx=a.search(/Ctrl\s*Code:?/i);
-    if(idx>=0){
-      // Skip past the "Ctrl Code:" label itself
-      const labelMatch=a.slice(idx).match(/Ctrl\s*Code:?/i);
-      const startAfter=idx+(labelMatch?labelMatch[0].length:10);
-      const searchWindow=a.slice(startAfter,startAfter+250);
-      const candidateRe=/\b([A-Z0-9]{3,5})\b/g;
+    const labelRe=/C[a-z]{2,4}\s*C[a-z]{2,4}\s*[:;.]?/i;
+    const lm=a.match(labelRe);
+    if(lm){
+      const idx=a.indexOf(lm[0]);
+      const startAfter=idx+lm[0].length;
+      const searchWindow=a.slice(startAfter,startAfter+300);
+      const tokenRe=/\b([A-Z0-9]{4})\b/g;
       let cm;
-      while((cm=candidateRe.exec(searchWindow))!==null){
-        const v=cm[1];
-        // Must contain at least one letter AND one digit
-        if(/[A-Z]/.test(v)&&/\d/.test(v)){e.ctrlCode=v;break}}}}
-  // Ship Date: search within 200 chars of the label for the first date pattern
+      while((cm=tokenRe.exec(searchWindow))!==null){
+        const v=cm[1].toUpperCase();
+        if(looksLikeReoCodeFallback(v)){e.ctrlCode=v;break}
+      }
+    }
+  }
+  // Ctrl Code fallback 2 — no recognisable label. Only if doc smells like Aus Reo.
+  if(!e.ctrlCode&&looksLikeAusReo(a)){
+    const head=a.slice(0,1500);
+    const tokenRe=/\b([A-Z0-9]{4})\b/g;
+    let cm;
+    while((cm=tokenRe.exec(head))!==null){
+      const v=cm[1].toUpperCase();
+      if(looksLikeReoCodeFallback(v)){e.ctrlCode=v;break}
+    }
+  }
+  // Ship Date fallback — tolerant label
   if(!e.shipDate){
-    const idx=a.search(/Ship\s*Date:?/i);
-    if(idx>=0){
-      const searchWindow=a.slice(idx,idx+250);
+    const labelRe=/S[a-z]{2,4}\s*D[a-z]{2,4}\s*[:;.]?/i;
+    const lm=a.match(labelRe);
+    if(lm){
+      const idx=a.indexOf(lm[0]);
+      const searchWindow=a.slice(idx,idx+300);
       const sm=searchWindow.match(/(\d{1,2}\/\d{1,2}\/\d{2,4})/);
-      if(sm)e.shipDate=sm[1]}}
-  // Weight: try "Wt:" with letter tolerance for OCR mistakes (e.g. "We" instead of "Wt")
+      if(sm)e.shipDate=sm[1];
+    }
+  }
+  // Weight fallback — allow space inside "W t" (OCR artefact) and "We" as tesseract misread
   if(e.weight==null){
-    m=a.match(/W[te]:?\s*([\d.,]+)\s*T(?:onne)?/i);
+    m=a.match(/\bW\s*[te]\s*:?\s*([\d.,]+)\s*T(?:onne)?\b/i);
     if(m){const v=parseReoNum(m[1]);if(!isNaN(v))e.weight=v}}
   // Not an Aus Reo schedule — skip deeper extraction silently
   if(!e.ctrlCode)return e;
   // ── BAR SUMMARY TOTAL ──
-  // Format: "BAR SUMMARY ... TOTAL items pieces tonne" where tonne is the LAST col.
+  // Native PDF: "TOTAL items pieces tonne" appears on a single line. Strict same-line match works.
+  // OCR PDF: Tesseract often reads the row labels first ("N12, N16, TOTAL") then dumps all data
+  // rows beneath, so a greedy "TOTAL\s+\d+\s+\d+\s+\d+" picks up the FIRST data row, not the total.
+  // Fix: prefer same-line strict match; otherwise scan all 3-number rows in scope and use the last.
   const bsIdx=a.search(/BAR\s*SUMMARY/i);
   if(bsIdx>=0){
     const slice=a.slice(bsIdx);
     const endIdx=slice.search(/MISCELLANEOUS\s*PRODUCT\s*SUMMARY/i);
     const scope=endIdx>0?slice.slice(0,endIdx):slice;
-    const tm=scope.match(/TOTAL\s+(\d+)\s+([\d.,]+)\s+([\d.,]+)/i);
-    if(tm){const v=parseReoNum(tm[3]);if(!isNaN(v))e.barWeight=v}}
+    // Strict same-line TOTAL (uses [ \t]+ instead of \s+ to NOT cross newlines)
+    let bw=null;
+    const strictTm=scope.match(/TOTAL[ \t]+(\d+)[ \t]+([\d.,]+)[ \t]+([\d.,]+)/i);
+    if(strictTm){const v=parseReoNum(strictTm[3]);if(!isNaN(v))bw=v}
+    if(bw===null){
+      // OCR fallback: collect all (items, pieces, tonne) rows in scope; the last is the total.
+      const rowRe=/(?:^|\s)(\d{1,3})\s+([\d,]+)\s+([\d.]+)(?=\s|$)/g;
+      const rows=[];let rm;
+      while((rm=rowRe.exec(scope))!==null){
+        const items=parseInt(rm[1],10);
+        // Use parseReoInt for pieces — it strips commas without treating "2,794" as "2.794"
+        const pieces=parseReoInt(rm[2]);
+        const tonne=parseReoNum(rm[3]);
+        if(isNaN(items)||isNaN(pieces)||isNaN(tonne))continue;
+        if(items<1||items>999)continue;
+        if(pieces<items)continue;
+        if(!/\./.test(rm[3]))continue;
+        if(tonne<0.001||tonne>9999)continue;
+        rows.push(tonne);
+      }
+      if(rows.length)bw=rows[rows.length-1];
+    }
+    if(bw!=null)e.barWeight=bw;
+  }
   // ── MESH (SL/RL codes) sum of qty × width × length ──
   let meshSqm=0,meshFound=false;
   const meshRe=/\b((?:SL|RL)\d+[A-Z]*)\s+([\d.,]+)\s+Each\s+(?:Square|Rectangular|Reinforcing)?\s*Mesh\s+(?:(?:SL|RL)\d+[A-Z]*\s+)?effective\s*area\s*([\d.,]+)\s*[xX]\s*([\d.,]+)\s*m/gi;
