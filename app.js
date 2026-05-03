@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b4.2';
+const APP_VERSION='b4.3';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const ADMIN_PIN='7519', BUCKET='schedules';
@@ -1052,7 +1052,7 @@ function deleteProj(id){const p=projects.find(pr=>pr.id===id);if(!p)return;
 
 /* ═══ ADMIN: DELIVERY PROGRAM ═══ */
 function renderAdminProgram(){
-  $('adminProgram').innerHTML=`<div class="card" style="margin-bottom:20px"><div class="fg"><label>Select Project</label><select id="dpProj" onchange="onDpProjChange()"><option value="">Choose...</option>${projects.map(p=>`<option>${esc(p.name)}</option>`).join('')}</select></div></div><div id="dpContent" style="display:none"><div class="card" style="margin-bottom:20px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px"><div><h3 style="font-size:15px;font-weight:700;color:var(--gray-dk);margin-bottom:2px">Level / Area Grid</h3><p style="font-size:12px;color:var(--muted)">Tick to create placeholders. Green = exists.</p></div><div style="display:flex;gap:6px"><button class="btn btn-ghost btn-sm" onclick="dpSelectAll()">Select All</button><button class="btn btn-ghost btn-sm" onclick="dpClearAll()">Clear</button></div></div><div class="grid-wrap" id="dpGridWrap"></div></div><div id="dpSelArea" style="display:none"><div class="card"><h3 style="font-size:15px;font-weight:700;color:var(--gray-dk);margin-bottom:4px">Selected (<span id="dpSelCount">0</span>)</h3><p style="font-size:12px;color:var(--muted);margin-bottom:14px">Set splits and per-delivery dates.</p><div id="dpSelList"></div><button class="btn" onclick="dpCreate()" id="dpCreateBtn">Create Placeholder Entries</button><div id="dpErr"></div><div id="dpSuc"></div></div></div></div>`}
+  $('adminProgram').innerHTML=`<div class="card" style="margin-bottom:20px"><div class="fg"><label>Select Project</label><select id="dpProj" onchange="onDpProjChange()"><option value="">Choose...</option>${projects.map(p=>`<option>${esc(p.name)}</option>`).join('')}</select></div></div><div id="dpContent" style="display:none"><div class="card" style="margin-bottom:20px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px"><div><h3 style="font-size:15px;font-weight:700;color:var(--gray-dk);margin-bottom:2px">Level / Area Grid</h3><p style="font-size:12px;color:var(--muted)">Tick empty cells to create placeholders. Click a green cell with a number to add another (e.g. for split pours).</p></div><div style="display:flex;gap:6px"><button class="btn btn-ghost btn-sm" onclick="dpSelectAll()">Select All</button><button class="btn btn-ghost btn-sm" onclick="dpClearAll()">Clear</button></div></div><div class="grid-wrap" id="dpGridWrap"></div></div><div id="dpSelArea" style="display:none"><div class="card"><h3 style="font-size:15px;font-weight:700;color:var(--gray-dk);margin-bottom:4px">Selected (<span id="dpSelCount">0</span>)</h3><p style="font-size:12px;color:var(--muted);margin-bottom:14px">Set splits and per-delivery dates.</p><div id="dpSelList"></div><button class="btn" onclick="dpCreate()" id="dpCreateBtn">Create Placeholder Entries</button><div id="dpErr"></div><div id="dpSuc"></div></div></div></div>`}
 
 function onDpProjChange(){dpSelected={};const p=$('dpProj').value;$('dpContent').style.display=p?'block':'none';if(p)renderDpGrid()}
 function renderDpGrid(){const pn=$('dpProj').value,proj=projects.find(p=>p.name===pn);if(!proj)return;
@@ -1062,7 +1062,22 @@ function renderDpGrid(){const pn=$('dpProj').value,proj=projects.find(p=>p.name=
   h+='</tr></thead><tbody>';
   proj.levels.forEach(lv=>{h+=`<tr><td class="level-td">${esc(lv)}</td>`;
     proj.areas.forEach(ar=>{const k=lv+'||'+ar,ex=pe.filter(e=>e.level===lv&&e.area===ar),ck=dpSelected[k];
-      h+=ex.length?`<td><div class="grid-cell has-entry" title="${ex.length} exist">${ex.length}</div></td>`:`<td><div class="grid-cell${ck?' checked':''}" onclick="toggleDp('${k.replace(/'/g,"\\'")}')"</div></td>`});h+='</tr>'});
+      // Existing cell — clickable to ADD MORE placeholders (split pours, additional parts).
+      // Empty cell — clickable to create FIRST placeholder.
+      // 'add-more' class layered on 'has-entry' shows that the user is adding another to existing.
+      let cls='grid-cell';
+      let inner='';
+      let title='';
+      if(ex.length){
+        cls+=' has-entry';
+        if(ck)cls+=' add-more';
+        inner=ck?String(ex.length+ck.splits.length):String(ex.length);
+        title=ck?`${ex.length} exist · adding ${ck.splits.length} more`:`${ex.length} placeholder${ex.length>1?'s':''} exist · click to add another`;
+      }else{
+        if(ck)cls+=' checked';
+        title=ck?'Selected — click to deselect':'Click to create a placeholder';
+      }
+      h+=`<td><div class="${cls}" onclick="toggleDp('${k.replace(/'/g,"\\'")}')" title="${esc(title)}">${inner}</div></td>`});h+='</tr>'});
   h+='</tbody></table>';$('dpGridWrap').innerHTML=h;renderDpSel()}
 
 function toggleDp(k){if(dpSelected[k])delete dpSelected[k];else dpSelected[k]={splits:[{label:'',date:''}]};renderDpGrid()}
@@ -1072,9 +1087,16 @@ function dpClearAll(){dpSelected={};renderDpGrid()}
 
 function renderDpSel(){const keys=Object.keys(dpSelected);$('dpSelArea').style.display=keys.length?'block':'none';
   if(!keys.length)return;const total=keys.reduce((s,k)=>s+dpSelected[k].splits.length,0);$('dpSelCount').textContent=total;
+  const pn=$('dpProj').value,pe=entries.filter(e=>e.project===pn);
   let html='';keys.sort().forEach(k=>{const[lv,ar]=k.split('||'),sel=dpSelected[k];
-    html+=`<div class="sel-item"><div class="sel-item-header"><div class="sel-item-title">${esc(lv)} / ${esc(ar)}</div><div class="sel-item-controls"><button onclick="dpRemSplit('${k.replace(/'/g,"\\'")}')">−</button><span>${sel.splits.length}</span><button onclick="dpAddSplit('${k.replace(/'/g,"\\'")}')">+</button><button onclick="delete dpSelected['${k.replace(/'/g,"\\'")}'];renderDpGrid()" style="color:var(--err);border-color:#f5c6c6">×</button></div></div>`;
-    sel.splits.forEach((sp,i)=>{const ph=sel.splits.length>1?'Part '+(i+1):'No split';
+    // How many placeholders already exist for this Level/Area? Used to show a hint and to
+    // suggest sensible default split labels for the new ones being added.
+    const existCount=pe.filter(e=>e.level===lv&&e.area===ar).length;
+    const titleSuffix=existCount?` <span style="font-size:11px;color:var(--accent-dk);font-weight:600">(adding to ${existCount} existing)</span>`:'';
+    html+=`<div class="sel-item"><div class="sel-item-header"><div class="sel-item-title">${esc(lv)} / ${esc(ar)}${titleSuffix}</div><div class="sel-item-controls"><button onclick="dpRemSplit('${k.replace(/'/g,"\\'")}')">−</button><span>${sel.splits.length}</span><button onclick="dpAddSplit('${k.replace(/'/g,"\\'")}')">+</button><button onclick="delete dpSelected['${k.replace(/'/g,"\\'")}'];renderDpGrid()" style="color:var(--err);border-color:#f5c6c6">×</button></div></div>`;
+    sel.splits.forEach((sp,i)=>{
+      // Placeholder text for the label input. If we're adding to existing, suggest the next Part number.
+      const ph=existCount>0?'Part '+(existCount+i+1)+' (recommended)':(sel.splits.length>1?'Part '+(i+1):'No split');
       html+=`<div class="split-row"><input type="text" value="${esc(sp.label)}" placeholder="${ph}" onchange="dpSelected['${k.replace(/'/g,"\\'")}'].splits[${i}].label=this.value"><input type="date" value="${sp.date||''}" onchange="dpSelected['${k.replace(/'/g,"\\'")}'].splits[${i}].date=this.value">${sel.splits.length>1?`<button class="remove-split" onclick="dpSelected['${k.replace(/'/g,"\\'")}'].splits.splice(${i},1);renderDpSel()">×</button>`:'<span style="width:24px"></span>'}</div>`});
     html+='</div>'});$('dpSelList').innerHTML=html}
 

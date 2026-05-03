@@ -213,11 +213,14 @@ tr.drag-over td{background:var(--accent-lt)!important;outline:2px dashed var(--a
 .grid-table th.corner-th{position:sticky;left:0;top:0;z-index:4;background:#FAFAF8;min-width:130px}
 .grid-table td{padding:6px 8px;border:1px solid var(--border);text-align:center;vertical-align:middle}
 .grid-table td.level-td{font-weight:600;font-size:11px;color:var(--text);text-align:left;white-space:nowrap;background:#FAFAF8;position:sticky;left:0;z-index:1;min-width:130px}
-.grid-cell{width:34px;height:34px;border-radius:6px;border:2px solid var(--border);background:var(--input);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;transition:all .15s;font-size:12px}
+.grid-cell{width:34px;height:34px;border-radius:6px;border:2px solid var(--border);background:var(--input);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;transition:all .15s;font-size:12px;position:relative}
 .grid-cell:hover{border-color:var(--accent);background:var(--accent-lt)}
 .grid-cell.checked{border-color:var(--accent);background:var(--accent);color:#fff}
 .grid-cell.checked::after{content:'✓';font-size:14px;font-weight:700}
-.grid-cell.has-entry{border-color:var(--success);background:var(--success-lt);cursor:default;opacity:.7}
+.grid-cell.has-entry{border-color:var(--success);background:var(--success-lt);color:var(--success);font-weight:700}
+.grid-cell.has-entry:hover{border-color:var(--accent);background:var(--accent-lt);color:var(--accent-dk)}
+.grid-cell.has-entry.add-more{border-color:var(--accent);background:var(--accent-lt);color:var(--accent-dk);box-shadow:0 0 0 2px var(--accent-lt2)}
+.grid-cell.has-entry.add-more::before{content:'+';position:absolute;top:-7px;right:-7px;background:var(--accent);color:#fff;border-radius:50%;width:16px;height:16px;font-size:11px;line-height:14px;font-weight:700;display:flex;align-items:center;justify-content:center;border:2px solid var(--card)}
 
 /* SPLIT ITEMS */
 .sel-item{padding:14px;background:var(--input);border:1px solid var(--border);border-radius:10px;margin-bottom:10px}
