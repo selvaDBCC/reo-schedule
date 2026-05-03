@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b4.1';
+const APP_VERSION='b4.2';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const ADMIN_PIN='7519', BUCKET='schedules';
@@ -1120,7 +1120,7 @@ function renderAdminFixers(){
   $('adminFixers').innerHTML=`
 <div class="card" style="margin-bottom:14px">
   <h3 style="font-size:15px;font-weight:700;margin-bottom:10px;color:var(--gray-dk)">Steel Fixers</h3>
-  <p style="font-size:12px;color:var(--muted);margin-bottom:14px">Processed bar weight, mesh, and trench mesh extracted from each schedule. Values are editable if the PDF extraction missed anything.</p>
+  <p style="font-size:12px;color:var(--muted);margin-bottom:14px">Processed bar weight, mesh, and trench mesh extracted from each schedule. Values are editable if the PDF extraction missed anything. Use the Comment column for notes, and click the Dispute Raised cell to cycle through ✓ resolved / ✗ disputed / — N/A.</p>
   <div class="filters" style="margin-bottom:0">
     <select id="sfProj" onchange="renderSfTable()"><option value="">All Projects</option>${proj.map(p=>`<option>${esc(p)}</option>`).join('')}</select>
     <select id="sfLevel" onchange="renderSfTable()"><option value="">All Levels</option>${levels.map(l=>`<option>${esc(l)}</option>`).join('')}</select>
@@ -1142,6 +1142,12 @@ function getSfFiltered(){
   list.sort((a,b)=>{let va=a[sfSort.col],vb=b[sfSort.col];
     if(['our_delivery_date','installed_date'].includes(sfSort.col)){va=new Date(va||0);vb=new Date(vb||0);return sfSort.asc?va-vb:vb-va}
     if(['bar_weight','mesh_sqm','trench_mesh_lm','total_weight'].includes(sfSort.col)){va=parseFloat(va)||0;vb=parseFloat(vb)||0;return sfSort.asc?va-vb:vb-va}
+    if(sfSort.col==='sf_dispute'){
+      // Sort order: cross (most urgent) → tick → dash → null (empty). Reversed if asc=false.
+      const rank={cross:0,tick:1,dash:2};
+      const ra=va in rank?rank[va]:3,rb=vb in rank?rank[vb]:3;
+      return sfSort.asc?ra-rb:rb-ra;
+    }
     return sfSort.asc?String(va||'').localeCompare(String(vb||'')):String(vb||'').localeCompare(String(va||''))});
   return list}
 
@@ -1150,8 +1156,8 @@ function renderSfTable(){
   const w=$('sfTable');if(!w)return;
   if(!list.length){w.innerHTML='<div class="empty"><p>No entries with schedules attached yet.</p></div>';return}
   const ar=c=>sfSort.col===c?(sfSort.asc?' ▲':' ▼'):'';
-  let sumBar=0,sumMesh=0,sumTr=0,sumInstalled=0;
-  list.forEach(e=>{sumBar+=parseFloat(e.bar_weight)||0;sumMesh+=parseFloat(e.mesh_sqm)||0;sumTr+=parseFloat(e.trench_mesh_lm)||0;if(e.installed_date)sumInstalled++});
+  let sumBar=0,sumMesh=0,sumTr=0,sumInstalled=0,sumDisputes=0;
+  list.forEach(e=>{sumBar+=parseFloat(e.bar_weight)||0;sumMesh+=parseFloat(e.mesh_sqm)||0;sumTr+=parseFloat(e.trench_mesh_lm)||0;if(e.installed_date)sumInstalled++;if(e.sf_dispute==='cross')sumDisputes++});
   w.innerHTML=`<table><thead><tr>
 <th onclick="sfTSort('project')">Project${ar('project')}</th>
 <th onclick="sfTSort('level')">Level${ar('level')}</th>
@@ -1164,6 +1170,8 @@ function renderSfTable(){
 <th class="no-sort">Schedule File</th>
 <th class="no-sort">Markup Plans</th>
 <th onclick="sfTSort('installed_date')">Installed Date${ar('installed_date')}</th>
+<th class="no-sort">Comments</th>
+<th onclick="sfTSort('sf_dispute')" style="text-align:center">Dispute Raised${ar('sf_dispute')}</th>
 </tr></thead><tbody>${list.map(e=>{
   const mp=e.markup_plans?JSON.parse(e.markup_plans):[];
   const mpCell=mp.length
@@ -1172,6 +1180,13 @@ function renderSfTable(){
   const instDate=e.installed_date
     ? `<span class="weight-td" onclick="sfEditInstalled(${e.id})" style="white-space:nowrap;font-size:11px">${fmtDate(e.installed_date)}</span>`
     : `<span class="weight-td" onclick="sfEditInstalled(${e.id})" style="color:#ccc;font-size:11px">Set date</span>`;
+  // Comment cell — click to edit. Truncate long text with title tooltip.
+  const cmt=e.sf_comment||'';
+  const cmtDisplay=cmt
+    ? `<span class="weight-td" onclick="sfEditComment(${e.id})" title="${esc(cmt)}" style="font-size:11px;color:var(--mid);max-width:140px;display:inline-block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle">${esc(cmt)}</span>`
+    : `<span class="weight-td" onclick="sfEditComment(${e.id})" style="color:#ccc;font-size:11px">Add note</span>`;
+  // Dispute cell — click to cycle through 4 states: null → tick → cross → dash → null.
+  const disp=sfDisputeCell(e);
   return `<tr>
 <td class="proj-td" title="${esc(e.project)}">${esc(e.project)}${e.extraction_method==='ocr'?' <span class="ocr-badge" title="This entry was extracted using OCR — please double-check the values">🔍 OCR</span>':''}</td>
 <td>${esc(e.level||'—')}${e.split_reference?' <span style="font-size:10px;color:var(--accent-dk);font-weight:600">('+esc(e.split_reference)+')</span>':''}</td>
@@ -1184,6 +1199,8 @@ function renderSfTable(){
 <td><a class="att-link" href="${e.file_url}" target="_blank">📄 ${esc((e.file_name||'').slice(0,16))}</a></td>
 <td>${mpCell}</td>
 <td>${instDate}</td>
+<td>${cmtDisplay}</td>
+<td style="text-align:center">${disp}</td>
 </tr>`}).join('')}
 <tr style="background:#FAFAF8;font-weight:700;border-top:2px solid var(--border)">
 <td colspan="5" style="text-align:right;color:var(--gray-dk)">TOTALS (${list.length} entries)</td>
@@ -1193,6 +1210,8 @@ function renderSfTable(){
 <td></td>
 <td></td>
 <td class="sched-td" style="color:var(--accent-dk);font-size:11px">${sumInstalled}/${list.length} installed</td>
+<td></td>
+<td class="sched-td" style="text-align:center;color:var(--accent-dk);font-size:11px">${sumDisputes} disputed</td>
 </tr>
 </tbody></table>`}
 
@@ -1230,13 +1249,56 @@ async function sfClearInstalled(id){
   await auditLog({entry_id:id,action:'UPDATE',field_changed:'installed_date',old_value:String(e.installed_date||''),new_value:''});
   closeOv('weightOv');await loadEntries();renderAdminFixers()}
 
+// ─── Comments column ───
+function sfEditComment(id){
+  const e=entries.find(x=>x.id===id);if(!e)return;
+  const cur=e.sf_comment||'';
+  $('weightModal').innerHTML=`<h3>Comment<button class="modal-close" onclick="closeOv('weightOv')">&times;</button></h3><p style="font-size:12px;color:var(--muted);margin-bottom:10px">${esc(e.project)} / ${esc(e.level||'—')} / ${esc(e.area||'—')} · ${esc(e.schedule||'')}</p><div class="fg"><label style="display:block;margin-bottom:4px">Notes for steel fixers</label><textarea id="sfCmtInp" rows="4" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-family:inherit;font-size:13px;resize:vertical" placeholder="e.g. delivered with shortage, awaiting credit note">${esc(cur)}</textarea></div><div style="display:flex;gap:8px;justify-content:space-between;margin-top:14px"><button class="btn btn-err btn-sm" onclick="sfClearComment(${id})" style="width:auto" ${cur?'':'disabled'}>Clear</button><div style="display:flex;gap:8px"><button class="btn btn-sec btn-sm" onclick="closeOv('weightOv')">Cancel</button><button class="btn btn-sm" onclick="sfSaveComment(${id})" style="width:auto">Save</button></div></div>`;
+  $('weightOv').classList.add('show');
+  setTimeout(()=>{const ta=$('sfCmtInp');if(ta)ta.focus()},50)}
+
+async function sfSaveComment(id){
+  const v=($('sfCmtInp').value||'').trim(),nv=v||null;
+  const e=entries.find(x=>x.id===id);
+  await sb.from('entries').update({sf_comment:nv}).eq('id',id);
+  await auditLog({entry_id:id,action:'UPDATE',field_changed:'sf_comment',old_value:String(e.sf_comment||''),new_value:String(nv||'')});
+  closeOv('weightOv');await loadEntries();renderAdminFixers()}
+
+async function sfClearComment(id){
+  const e=entries.find(x=>x.id===id);
+  await sb.from('entries').update({sf_comment:null}).eq('id',id);
+  await auditLog({entry_id:id,action:'UPDATE',field_changed:'sf_comment',old_value:String(e.sf_comment||''),new_value:''});
+  closeOv('weightOv');await loadEntries();renderAdminFixers()}
+
+// ─── Dispute Raised column ───
+// 4-state cycle on click: null (empty) → tick (resolved/agreed) → cross (disputed) → dash (n/a) → null.
+// Stored as text in column sf_dispute. Sort order: cross, tick, dash, null (so disputed entries surface).
+function sfDisputeCell(e){
+  const v=e.sf_dispute||null;
+  const labels={tick:'Resolved / agreed',cross:'Dispute raised',dash:'N/A — not applicable'};
+  if(v==='tick')return `<span onclick="sfToggleDispute(${e.id})" title="${labels.tick} — click to change" style="cursor:pointer;color:var(--success);font-size:18px;font-weight:700;padding:0 4px;user-select:none">✓</span>`;
+  if(v==='cross')return `<span onclick="sfToggleDispute(${e.id})" title="${labels.cross} — click to change" style="cursor:pointer;color:var(--err);font-size:18px;font-weight:700;padding:0 4px;user-select:none">✗</span>`;
+  if(v==='dash')return `<span onclick="sfToggleDispute(${e.id})" title="${labels.dash} — click to change" style="cursor:pointer;color:#9a9a9a;font-size:18px;font-weight:700;padding:0 4px;user-select:none">—</span>`;
+  return `<span onclick="sfToggleDispute(${e.id})" title="Click to mark this row" style="cursor:pointer;color:#d8d4ce;font-size:14px;padding:1px 6px;border:1px dashed #d8d4ce;border-radius:3px;user-select:none">·</span>`}
+
+async function sfToggleDispute(id){
+  const e=entries.find(x=>x.id===id);if(!e)return;
+  // Cycle: null → tick → cross → dash → null
+  const cur=e.sf_dispute||null;
+  const next=cur===null?'tick':cur==='tick'?'cross':cur==='cross'?'dash':null;
+  await sb.from('entries').update({sf_dispute:next}).eq('id',id);
+  await auditLog({entry_id:id,action:'UPDATE',field_changed:'sf_dispute',old_value:String(cur||''),new_value:String(next||'')});
+  await loadEntries();renderAdminFixers()}
+
 function exportSfCSV(){
   const list=getSfFiltered();if(!list.length)return alert('No data');
-  const h=['Project','Level','Area','Split','Schedule','Ordered Delivery','Bar Weight (T)','Mesh (m²)','Trench Mesh (LM)','Markup Plans','Installed Date','File'];
-  const rows=list.map(e=>{const mp=e.markup_plans?JSON.parse(e.markup_plans):[];return [e.project,e.level||'',e.area||'',e.split_reference||'',e.schedule||'',e.our_delivery_date||'',e.bar_weight??'',e.mesh_sqm??'',e.trench_mesh_lm??'',mp.length,e.installed_date||'',e.file_name||'']});
+  const h=['Project','Level','Area','Split','Schedule','Ordered Delivery','Bar Weight (T)','Mesh (m²)','Trench Mesh (LM)','Markup Plans','Installed Date','File','Comment','Dispute Raised'];
+  // Map dispute state to a clear English label for the CSV
+  const dispLabel=v=>v==='tick'?'Resolved':v==='cross'?'Disputed':v==='dash'?'N/A':'';
+  const rows=list.map(e=>{const mp=e.markup_plans?JSON.parse(e.markup_plans):[];return [e.project,e.level||'',e.area||'',e.split_reference||'',e.schedule||'',e.our_delivery_date||'',e.bar_weight??'',e.mesh_sqm??'',e.trench_mesh_lm??'',mp.length,e.installed_date||'',e.file_name||'',e.sf_comment||'',dispLabel(e.sf_dispute)]});
   // Totals row
-  let sumBar=0,sumMesh=0,sumTr=0,sumInstalled=0;list.forEach(e=>{sumBar+=parseFloat(e.bar_weight)||0;sumMesh+=parseFloat(e.mesh_sqm)||0;sumTr+=parseFloat(e.trench_mesh_lm)||0;if(e.installed_date)sumInstalled++});
-  rows.push(['','','','','','TOTALS',sumBar.toFixed(3),sumMesh.toFixed(2),sumTr.toFixed(2),'',sumInstalled+'/'+list.length+' installed','']);
+  let sumBar=0,sumMesh=0,sumTr=0,sumInstalled=0,sumDisputes=0;list.forEach(e=>{sumBar+=parseFloat(e.bar_weight)||0;sumMesh+=parseFloat(e.mesh_sqm)||0;sumTr+=parseFloat(e.trench_mesh_lm)||0;if(e.installed_date)sumInstalled++;if(e.sf_dispute==='cross')sumDisputes++});
+  rows.push(['','','','','','TOTALS',sumBar.toFixed(3),sumMesh.toFixed(2),sumTr.toFixed(2),'',sumInstalled+'/'+list.length+' installed','','',sumDisputes+' disputed']);
   const csv=[h,...rows].map(r=>r.map(c=>`"${String(c??'').replace(/"/g,'""')}"`).join(',')).join('\n');
   const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download=`steel-fixers-${today()}.csv`;a.click()}
 
