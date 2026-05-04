@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b4.3';
+const APP_VERSION='b4.5';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const ADMIN_PIN='7519', BUCKET='schedules';
@@ -177,7 +177,32 @@ function onLevelAreaChange(){
   matching.forEach(e=>{
     const has=!!e.schedule,can=!has&&e.status!=='Cancelled'&&e.status!=='Delivered';
     html+=`<div class="order-item${selectedOrderId===e.id?' selected':''}${can?'':' disabled'}" ${can?`onclick="selectOrder(${e.id})"`:''}><div class="order-item-info"><div class="oi-title">${esc(e.level||'—')} / ${esc(e.area||'—')}${e.split_reference?' <span style="color:var(--accent-dk)">('+esc(e.split_reference)+')</span>':''}</div><div class="oi-meta">Ordered Delivery: ${fmtDate(e.our_delivery_date)||'Not set'} · ${e.status}${has?' · '+esc(e.schedule):''}</div></div><div>${has?'<span class="pill pill-scheduled">Has Schedule</span>':can?'<span class="pill pill-ordered">Attach →</span>':'<span class="pill pill-cancelled">'+esc(e.status)+'</span>'}</div></div>`});
+  // Always offer an escape hatch: even when matching orders exist (e.g. all "Has Schedule"),
+  // the user might need to create another entry — common case is when a single placeholder was
+  // created but the actual delivery is being split into multiple parts and Aus Reo is uploading
+  // separate schedules for each. This unmatched entry will be flagged with the orange ⚠ icon.
+  if(level&&area){
+    const allDone=matching.every(e=>!!e.schedule||e.status==='Cancelled'||e.status==='Delivered');
+    const hint=allDone
+      ? 'All matching orders already have a schedule. If this is a separate / split delivery, create a new unmatched entry below.'
+      : 'None of these match? Create a new unmatched entry instead.';
+    html+=`<div style="margin-top:14px;padding:12px 14px;background:#FFF8E7;border:1px solid #F0D785;border-radius:8px"><div style="font-size:12px;color:var(--gray-dk);margin-bottom:8px">⚠ ${hint}</div><button class="btn btn-sec btn-sm" onclick="startUnmatchedEntry()" style="width:auto">Create new unmatched entry</button></div>`;
+  }
   content.innerHTML=html}
+
+// Begin upload flow as an unmatched entry (no placeholder selected). Used when:
+//  (a) no matching orders exist for the project/level/area combo, or
+//  (b) matching orders exist but they all have schedules / are unsuitable, and the user
+//      wants to add an additional entry — e.g. a split delivery they didn't pre-plan.
+function startUnmatchedEntry(){
+  selectedOrderId=null;
+  $('uploadSection').style.display='block';$('uploadStepLabel').textContent='② Upload Schedule';
+  $('detailsStepLabel').textContent='③ Schedule Details';
+  $('commentsSection').style.display='block';$('submitBtn').style.display='block';
+  if(pendingFile){$('scheduleSection').style.display='block';$('markupSection').style.display='block'}
+  // Scroll the upload section into view so it's obvious the form has progressed
+  setTimeout(()=>{const u=$('uploadSection');if(u)u.scrollIntoView({behavior:'smooth',block:'center'})},80);
+}
 
 function selectOrder(id){
   selectedOrderId=id;onLevelAreaChange();
@@ -845,9 +870,38 @@ ${adminUnlocked?`<button class="btn btn-err btn-sm" onclick="deleteEntry(${e.id}
 /* ═══ EDIT ═══ */
 function openEditEntry(id){const e=entries.find(x=>x.id===id);if(!e)return;
   const proj=projects.find(p=>p.name===e.project);
-  const removeSchedSection=e.file_url||e.schedule
-    ? `<div style="margin-top:14px;padding:12px 14px;background:#FFF8E7;border:1px solid #F0D785;border-radius:8px"><div style="font-size:12px;font-weight:600;color:var(--gray-dk);margin-bottom:4px">⚠ Remove Attached Schedule</div><p style="font-size:11px;color:var(--muted);margin-bottom:8px;line-height:1.5">Use this if the wrong schedule was uploaded. The schedule file, schedule number, supplier date, drawing reference, and weight breakdown will be cleared. The placeholder entry stays so you can re-attach the correct schedule.</p><button class="btn btn-err btn-sm" onclick="removeScheduleFromEntry(${id})" style="width:auto">Remove Schedule from this Entry</button></div>`
-    : '';
+  // Build the "Danger Zone" section that lets the user surgically delete:
+  //   - the attached schedule only (schedule file + extracted data — keeps markup plans)
+  //   - individual markup plans (one at a time, no impact on schedule)
+  // Both kept separate so you can fix one without nuking the other.
+  const mp=e.markup_plans?JSON.parse(e.markup_plans):[];
+  const hasSchedule=!!(e.file_url||e.schedule);
+  const hasMarkups=mp.length>0;
+  let dangerSection='';
+  if(hasSchedule||hasMarkups){
+    dangerSection=`<div style="margin-top:18px;padding:12px 14px;background:#FFF8E7;border:1px solid #F0D785;border-radius:8px">
+      <div style="font-size:12px;font-weight:700;color:var(--gray-dk);margin-bottom:8px">⚠ Danger Zone</div>`;
+    if(hasSchedule){
+      dangerSection+=`<div style="margin-bottom:${hasMarkups?'12':'0'}px;padding-bottom:${hasMarkups?'12':'0'}px;${hasMarkups?'border-bottom:1px solid #F0D785':''}">
+        <div style="font-size:12px;font-weight:600;color:var(--gray-dk);margin-bottom:4px">Schedule</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:6px">${esc(e.schedule||e.file_name||'attached schedule')}</div>
+        <p style="font-size:11px;color:var(--muted);margin-bottom:8px;line-height:1.4">Clears the schedule file, schedule number, supplier date, drawing reference, and weight breakdown (bar / mesh / trench). Markup plans are NOT affected.</p>
+        <button class="btn btn-err btn-sm" onclick="removeScheduleFromEntry(${id})" style="width:auto">Delete schedule only</button>
+      </div>`;
+    }
+    if(hasMarkups){
+      dangerSection+=`<div>
+        <div style="font-size:12px;font-weight:600;color:var(--gray-dk);margin-bottom:6px">Markup Plans (${mp.length})</div>
+        <p style="font-size:11px;color:var(--muted);margin-bottom:8px;line-height:1.4">Click × to remove a single file. The schedule is NOT affected.</p>
+        ${mp.map((m,i)=>`<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:#fff;border:1px solid #EFE8DA;border-radius:6px;margin-bottom:6px">
+          <a href="${m.url}" target="_blank" style="flex:1;color:var(--info);font-size:12px;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(m.name)}">📐 ${esc(m.name)}</a>
+          <span style="color:var(--muted);font-size:10px;white-space:nowrap">by ${esc(m.uploaded_by||'?')}</span>
+          <button class="btn btn-err btn-sm" onclick="removeMarkupFromEdit(${id},${i})" style="width:auto;padding:3px 9px;font-size:11px;flex-shrink:0" title="Delete this markup file">×</button>
+        </div>`).join('')}
+      </div>`;
+    }
+    dangerSection+='</div>';
+  }
   $('editModal').innerHTML=`<h3>Edit Entry<button class="modal-close" onclick="closeOv('editOv')">&times;</button></h3>
 <div class="fg"><label>Project</label><select id="ed_proj">${projects.map(p=>`<option${p.name===e.project?' selected':''}>${esc(p.name)}</option>`).join('')}</select></div>
 <div class="row2"><div class="fg"><label>Level</label><select id="ed_level"><option value="">None</option>${(proj?proj.levels:[]).map(l=>`<option${l===e.level?' selected':''}>${esc(l)}</option>`).join('')}</select></div><div class="fg"><label>Area</label><select id="ed_area"><option value="">None</option>${(proj?proj.areas:[]).map(a=>`<option${a===e.area?' selected':''}>${esc(a)}</option>`).join('')}</select></div></div>
@@ -856,7 +910,7 @@ function openEditEntry(id){const e=entries.find(x=>x.id===id);if(!e)return;
 <div class="row2"><div class="fg"><label>Drawing Reference</label><input type="text" id="ed_draw" value="${esc(e.drawing_reference||'')}"></div><div class="fg"><label>Weight (T)</label><input type="number" step="0.001" id="ed_wt" value="${e.total_weight||''}" style="font-family:'JetBrains Mono',monospace"></div></div>
 <div class="fg"><label>Split Reference</label><input type="text" id="ed_split" value="${esc(e.split_reference||'')}"></div>
 <div class="fg"><label>Comments</label><textarea id="ed_comm">${esc(e.comments||'')}</textarea></div>
-${removeSchedSection}
+${dangerSection}
 <div id="edErr"></div>
 <div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-sec btn-sm" onclick="closeOv('editOv')">Cancel</button><button class="btn btn-sm" onclick="saveEdit(${id})" style="width:auto">Save</button></div>`;
   $('editOv').classList.add('show');
@@ -866,21 +920,46 @@ function removeScheduleFromEntry(id){
   const e=entries.find(x=>x.id===id);if(!e)return;
   confirmDialog(
     'Remove Schedule?',
-    'This will clear the schedule file, schedule number, supplier date, drawing reference, and weight breakdown for:<br><br><b>'+esc(e.project)+'</b> / '+esc(e.level||'—')+' / '+esc(e.area||'—')+(e.schedule?' · '+esc(e.schedule):'')+'<br><br>The placeholder entry will remain so a new schedule can be attached. Markup plans will also be cleared. This cannot be undone.',
+    'This will clear the schedule file, schedule number, supplier date, drawing reference, and weight breakdown for:<br><br><b>'+esc(e.project)+'</b> / '+esc(e.level||'—')+' / '+esc(e.area||'—')+(e.schedule?' · '+esc(e.schedule):'')+'<br><br>Markup plans, comments, and dispute status will be kept. The placeholder entry will remain so a new schedule can be attached. This cannot be undone.',
     'Remove Schedule',
     'btn-err',
     async()=>{
       const newStatus=e.our_delivery_date?'Ordered':'Not Ordered';
+      // Clear schedule fields and the extraction breakdown. Explicitly DO NOT clear:
+      //   markup_plans, sf_comment, sf_dispute, installed_date — those survive a re-upload.
+      // Also clear extraction_method so the 🔍 OCR badge disappears with the old data.
       const{error}=await sb.from('entries').update({
         schedule:null,file_url:null,file_name:null,
         supplier_delivery_date:null,drawing_reference:null,total_weight:null,
         bar_weight:null,mesh_sqm:null,trench_mesh_lm:null,
-        markup_plans:null,
+        extraction_method:null,
         status:newStatus,mismatch_resolved:true
       }).eq('id',id);
       if(error){alert('Error: '+error.message);return}
       await auditLog({entry_id:id,action:'UPDATE',field_changed:'schedule_removed',old_value:e.schedule||e.file_name||'',new_value:'cleared'});
       closeOv('editOv');await loadEntries();renderDash()})}
+
+// Remove a single markup plan from inside the Edit modal. Re-opens the modal afterwards
+// so the user can continue editing or remove additional markups without re-navigating.
+async function removeMarkupFromEdit(id,idx){
+  const e=entries.find(x=>x.id===id);if(!e)return;
+  const mp=JSON.parse(e.markup_plans||'[]');
+  if(idx<0||idx>=mp.length)return;
+  const fileName=mp[idx].name||'(unnamed)';
+  confirmDialog(
+    'Remove Markup?',
+    'Remove this markup plan?<br><br><b>📐 '+esc(fileName)+'</b><br><br>The schedule and other markup plans will not be affected. This cannot be undone.',
+    'Remove',
+    'btn-err',
+    async()=>{
+      mp.splice(idx,1);
+      const{error}=await sb.from('entries').update({markup_plans:mp.length?JSON.stringify(mp):null}).eq('id',id);
+      if(error){alert('Error: '+error.message);return}
+      await auditLog({entry_id:id,action:'UPDATE',field_changed:'markup_plans',old_value:'Removed: '+fileName,new_value:mp.length+' remaining'});
+      await loadEntries();renderDash();
+      // Re-open the edit modal so further markups can be removed in one go
+      openEditEntry(id);
+    })}
 
 async function saveEdit(id){const e=entries.find(x=>x.id===id);if(!e)return;const err=$('edErr');err.innerHTML='';
   const nv={project:$('ed_proj').value,level:$('ed_level').value||null,area:$('ed_area').value||null,schedule:$('ed_sched').value.trim()||null,entry_date:$('ed_date').value||null,our_delivery_date:$('ed_ourD').value||null,supplier_delivery_date:$('ed_supD').value||null,drawing_reference:$('ed_draw').value.trim()||null,total_weight:$('ed_wt').value?parseFloat($('ed_wt').value):null,split_reference:$('ed_split').value.trim()||null,comments:$('ed_comm').value.trim()||null};
