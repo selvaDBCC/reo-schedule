@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b4.5';
+const APP_VERSION='b5.0';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const ADMIN_PIN='7519', BUCKET='schedules';
@@ -30,6 +30,22 @@ function fmtSize(b){return b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':(b/
 function closeOv(id){document.getElementById(id).classList.remove('show')}
 function $(id){return document.getElementById(id)}
 function hasMismatch(e){return e.our_delivery_date&&e.supplier_delivery_date&&e.our_delivery_date!==e.supplier_delivery_date&&!e.mismatch_resolved}
+
+// Days between a date string (yyyy-mm-dd) and today. Positive = past, negative = future.
+function daysAgo(d){if(!d)return null;const ms=Date.now()-new Date(d).getTime();return Math.floor(ms/86400000)}
+
+// Is the install overdue? Schedule attached, supplier_delivery_date passed by N days,
+// and not yet marked installed and not yet "Delivered"/"Cancelled".
+function isOverdueInstall(e){
+  if(!e.file_url||e.installed_date||e.status==='Cancelled'||e.status==='Delivered')return false;
+  const d=daysAgo(e.supplier_delivery_date);
+  return d!=null&&d>=(appSettings.overdue_install_days||3)}
+
+// Is the delivery late? supplier_delivery_date has passed but status isn't "Delivered".
+function isLateDelivery(e){
+  if(!e.supplier_delivery_date||e.status==='Delivered'||e.status==='Cancelled')return false;
+  const d=daysAgo(e.supplier_delivery_date);
+  return d!=null&&d>0}
 function getStatusPill(s,t,hold){let h='';if(t==='loose')h='<span class="pill pill-loose">Ad Hoc</span> ';h+='<span class="pill '+(ST_CLS[s]||'pill-notordered')+'">'+esc(s)+'</span>';if(hold)h+='<span class="pill pill-onhold">⏸ ON HOLD</span>';return h}
 function parseAusDate(s){const p=s.split('/');if(p.length!==3)return null;let[d,m,y]=p;if(y.length===2)y='20'+y;return`${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`}
 async function auditLog(o){await sb.from('audit_log').insert({...o,user_identifier:userName})}
@@ -107,7 +123,9 @@ async function init(){
   $('userChip').textContent=userName;
   try{
     await loadProjects();if(projects.length===0)await seedProjects();
-    await loadEntries();await loadEmailContacts();populateDropdowns();subscribeRealtime();
+    await loadEntries();await loadEmailContacts();
+    await loadPeople();await loadAssignments();await loadAppSettings();
+    populateDropdowns();subscribeRealtime();
     $('inpDate').value=today();$('inpLooseDate').value=today();
     $('loadingScreen').style.display='none';$('mainApp').style.display='block';
     setupDragDrop();renderDash();renderAdminProj();renderAdminProgram();renderAdminFixers();
@@ -123,6 +141,32 @@ async function loadEntries(){const{data,error}=await sb.from('entries').select('
 async function loadEmailContacts(){
   const{data,error}=await sb.from('email_contacts').select('*').order('sort_order',{ascending:true}).order('id',{ascending:true});
   if(error){emailContacts=[];return}emailContacts=data||[]}
+
+// ═══ PEOPLE / ASSIGNMENTS / SETTINGS ═══
+// Loaded lazily — first time the admin tab is opened. Falls back to empty/defaults on error
+// so the rest of the app keeps working even before the b5.0 SQL migration has been run.
+let people=[],assignments=[],appSettings={overdue_install_days:3};
+async function loadPeople(){
+  try{const{data,error}=await sb.from('people').select('*').order('role',{ascending:true}).order('name');
+    if(error)throw error;people=data||[]}catch(e){console.warn('[REO] loadPeople failed (run migration_b5.0.sql?):',e.message);people=[]}}
+async function loadAssignments(){
+  try{const{data,error}=await sb.from('project_assignments').select('*');
+    if(error)throw error;assignments=data||[]}catch(e){console.warn('[REO] loadAssignments failed:',e.message);assignments=[]}}
+async function loadAppSettings(){
+  try{const{data,error}=await sb.from('app_settings').select('*');
+    if(error)throw error;
+    const map={};(data||[]).forEach(r=>{map[r.key]=r.value});
+    appSettings={overdue_install_days:parseInt(map.overdue_install_days||'3',10)||3}
+  }catch(e){console.warn('[REO] loadAppSettings failed:',e.message);appSettings={overdue_install_days:3}}}
+async function saveAppSetting(key,value){
+  await sb.from('app_settings').upsert({key,value:String(value),updated_at:new Date().toISOString()},{onConflict:'key'});
+  await loadAppSettings()}
+// Helper: people assigned to a project (DBCC only — Aus Reo are tracked but not assigned)
+function peopleForProject(name){
+  const ids=assignments.filter(a=>a.project_name===name).map(a=>a.person_id);
+  return people.filter(p=>p.role==='DBCC'&&ids.includes(p.id))}
+function projectsForPerson(personId){
+  return assignments.filter(a=>a.person_id===personId).map(a=>a.project_name)}
 async function refreshAll(){await Promise.all([loadProjects(),loadEntries()]);populateDropdowns();renderDash()}
 function subscribeRealtime(){
   sb.channel('e').on('postgres_changes',{event:'*',schema:'public',table:'entries'},()=>loadEntries().then(renderDash)).subscribe();
@@ -186,9 +230,44 @@ function onLevelAreaChange(){
     const hint=allDone
       ? 'All matching orders already have a schedule. If this is a separate / split delivery, create a new unmatched entry below.'
       : 'None of these match? Create a new unmatched entry instead.';
-    html+=`<div style="margin-top:14px;padding:12px 14px;background:#FFF8E7;border:1px solid #F0D785;border-radius:8px"><div style="font-size:12px;color:var(--gray-dk);margin-bottom:8px">⚠ ${hint}</div><button class="btn btn-sec btn-sm" onclick="startUnmatchedEntry()" style="width:auto">Create new unmatched entry</button></div>`;
+    // Collect existing split refs in this Level/Area combo so the user can inherit one,
+    // e.g. picking "Bottom reo" so the new entry is grouped with the right pour.
+    const existingSplits=[...new Set(matching.map(e=>e.split_reference).filter(Boolean))];
+    let splitPicker='';
+    if(existingSplits.length){
+      splitPicker=`<div style="margin-bottom:10px"><label style="display:block;font-size:11px;color:var(--gray-dk);font-weight:600;margin-bottom:4px">Split Reference (optional)</label>
+        <select id="unmatchedSplitSel" onchange="onUnmatchedSplitChange()" style="width:100%;padding:7px 9px;border:1px solid var(--border);border-radius:6px;font-size:12px;background:#fff">
+          <option value="">— None —</option>
+          ${existingSplits.map(s=>`<option value="${esc(s)}">${esc(s)}</option>`).join('')}
+          <option value="__custom__">Custom…</option>
+        </select>
+        <input type="text" id="unmatchedSplitCustom" placeholder="Type custom split reference (e.g. Bottom reo - Part 2)" style="display:none;margin-top:6px;width:100%;padding:7px 9px;border:1px solid var(--border);border-radius:6px;font-size:12px">
+      </div>`;
+    }else{
+      splitPicker=`<div style="margin-bottom:10px"><label style="display:block;font-size:11px;color:var(--gray-dk);font-weight:600;margin-bottom:4px">Split Reference (optional)</label>
+        <input type="text" id="unmatchedSplitCustom" placeholder="e.g. Top Reo, Bottom reo, Part 1 — leave blank if not split" style="width:100%;padding:7px 9px;border:1px solid var(--border);border-radius:6px;font-size:12px">
+      </div>`;
+    }
+    html+=`<div style="margin-top:14px;padding:12px 14px;background:#FFF8E7;border:1px solid #F0D785;border-radius:8px"><div style="font-size:12px;color:var(--gray-dk);margin-bottom:10px">⚠ ${hint}</div>${splitPicker}<button class="btn btn-sec btn-sm" onclick="startUnmatchedEntry()" style="width:auto">Create new unmatched entry</button></div>`;
   }
   content.innerHTML=html}
+
+// Toggle the custom-split text input visibility based on dropdown choice.
+function onUnmatchedSplitChange(){
+  const sel=$('unmatchedSplitSel'),inp=$('unmatchedSplitCustom');
+  if(!sel||!inp)return;
+  if(sel.value==='__custom__'){inp.style.display='block';inp.focus()}
+  else{inp.style.display='none';inp.value=''}
+}
+
+// Read the chosen split reference (from the dropdown or the custom text input).
+// Returns null if none.
+function getUnmatchedSplitRef(){
+  const sel=$('unmatchedSplitSel'),inp=$('unmatchedSplitCustom');
+  if(sel&&sel.value&&sel.value!=='__custom__'&&sel.value!=='')return sel.value;
+  if(inp&&inp.value.trim())return inp.value.trim();
+  return null;
+}
 
 // Begin upload flow as an unmatched entry (no placeholder selected). Used when:
 //  (a) no matching orders exist for the project/level/area combo, or
@@ -196,6 +275,11 @@ function onLevelAreaChange(){
 //      wants to add an additional entry — e.g. a split delivery they didn't pre-plan.
 function startUnmatchedEntry(){
   selectedOrderId=null;
+  // Capture the chosen split reference NOW so it persists through the upload flow.
+  // (The dropdown lives in the order list area which doesn't get re-rendered, so this
+  // is mostly belt-and-braces — but storing it in window state makes it clearly available
+  // when the form is submitted.)
+  window._unmatchedSplitRef=getUnmatchedSplitRef();
   $('uploadSection').style.display='block';$('uploadStepLabel').textContent='② Upload Schedule';
   $('detailsStepLabel').textContent='③ Schedule Details';
   $('commentsSection').style.display='block';$('submitBtn').style.display='block';
@@ -609,9 +693,15 @@ async function submitEntry(){
         const{error}=await sb.from('entries').update(up).eq('id',selectedOrderId);if(error)throw error;
         await auditLog({entry_id:selectedOrderId,action:'UPDATE',field_changed:'schedule_attached',new_value:`${schedule} (${fname||'no file'})`});
       }else{
-        const{data,error}=await sb.from('entries').insert({project,level:level||null,area:area||null,schedule,status:'Scheduled',entry_date:ed,comments:comments||null,file_url:furl,file_name:fname,entry_type:'scheduled',total_weight:weight?parseFloat(weight):null,drawing_reference:drawing,supplier_delivery_date:supD,markup_plans:mkNew.length?JSON.stringify(mkNew):null,unmatched:true,...breakdown}).select().single();
+        // For unmatched entries, pull in the split_reference the user picked from the
+        // dropdown / typed in the custom field, if any. window._unmatchedSplitRef is set
+        // when the user clicks "Create new unmatched entry".
+        const splitRef=window._unmatchedSplitRef||null;
+        const{data,error}=await sb.from('entries').insert({project,level:level||null,area:area||null,schedule,status:'Scheduled',entry_date:ed,comments:comments||null,file_url:furl,file_name:fname,entry_type:'scheduled',total_weight:weight?parseFloat(weight):null,drawing_reference:drawing,supplier_delivery_date:supD,split_reference:splitRef,markup_plans:mkNew.length?JSON.stringify(mkNew):null,unmatched:true,...breakdown}).select().single();
         if(error)throw error;
-        await auditLog({entry_id:data.id,action:'CREATE',new_value:`UNMATCHED: ${project}/${level||'-'}/${schedule}`});
+        await auditLog({entry_id:data.id,action:'CREATE',new_value:`UNMATCHED: ${project}/${level||'-'}${splitRef?' ('+splitRef+')':''}/${schedule}`});
+        // Clear the captured split ref so it doesn't leak into the next submission
+        window._unmatchedSplitRef=null;
       }}
     info.innerHTML='';$('successOv').classList.add('show');
   }catch(e){err.innerHTML='<div class="error-msg">'+esc(e.message)+'</div>'}
@@ -1063,14 +1153,85 @@ async function loadNotifications(){
   if(error){el.innerHTML='<div class="empty"><p>Error loading notifications</p></div>';return}
   window._notifData=data;renderNotif()}
 
+// Action-Required pinned section at the top of the Notifications tab.
+// Lists currently-actionable items: mismatches, unmatched, overdue installs, late deliveries.
+// Hidden when there's nothing to action.
+function renderActionRequired(){
+  const card=$('actionRequiredCard'),list=$('actionRequiredList'),cnt=$('arCount');
+  if(!card||!list)return;
+  const mismatches=entries.filter(e=>hasMismatch(e)&&e.status!=='Cancelled');
+  const unmatched=entries.filter(e=>e.unmatched&&e.status!=='Cancelled');
+  const lateDel=entries.filter(e=>isLateDelivery(e));
+  const overdueInst=entries.filter(e=>isOverdueInstall(e));
+  const total=mismatches.length+unmatched.length+lateDel.length+overdueInst.length;
+  if(total===0){card.style.display='none';return}
+  card.style.display='block';
+  cnt.textContent=total+' total';
+  // Helper to render a row showing project / level / area / schedule
+  const row=e=>{
+    const ctx=`<b>${esc(e.project)}</b> / ${esc(e.level||'—')} / ${esc(e.area||'—')}${e.split_reference?' <span style="color:var(--accent-dk);font-size:11px">('+esc(e.split_reference)+')</span>':''}${e.schedule?' · <span style="font-family:\'JetBrains Mono\',monospace;font-size:11px;color:var(--accent-dk)">'+esc(e.schedule)+'</span>':''}`;
+    return `<div onclick="showDetail(${e.id})" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:6px;cursor:pointer;font-size:12px;line-height:1.4;border:1px solid #f0ebe1;margin-bottom:5px;background:#fff" onmouseover="this.style.background='#FEF6E5'" onmouseout="this.style.background='#fff'"><div style="flex:1">${ctx}</div></div>`;
+  };
+  let html='';
+  if(mismatches.length){
+    html+=`<div style="margin-bottom:14px"><div style="font-size:12px;font-weight:600;color:var(--warn-dk);margin-bottom:6px">⚠ ${mismatches.length} mismatched (date conflict needs reconciling)</div>`;
+    mismatches.slice(0,5).forEach(e=>{
+      const days=daysAgo(e.entry_date)||0;
+      html+=row(e).replace('</div></div>',`</div><span style="font-size:11px;color:var(--muted);white-space:nowrap">${days}d open</span></div>`);
+    });
+    if(mismatches.length>5)html+=`<div style="font-size:11px;color:var(--muted);padding:4px 10px"><a onclick="showPage('dash');setTimeout(()=>{const f=document.getElementById('fM');if(f){f.value='mismatch';f.dispatchEvent(new Event('change'))}},80)" style="color:var(--accent-dk);cursor:pointer;text-decoration:underline">+${mismatches.length-5} more — view in Dashboard</a></div>`;
+    html+='</div>';
+  }
+  if(unmatched.length){
+    html+=`<div style="margin-bottom:14px"><div style="font-size:12px;font-weight:600;color:#cc7a00;margin-bottom:6px">⚠ ${unmatched.length} unmatched (schedule uploaded with no placeholder)</div>`;
+    unmatched.slice(0,5).forEach(e=>{
+      const days=daysAgo(e.entry_date)||0;
+      html+=row(e).replace('</div></div>',`</div><span style="font-size:11px;color:var(--muted);white-space:nowrap">${days}d open</span></div>`);
+    });
+    if(unmatched.length>5)html+=`<div style="font-size:11px;color:var(--muted);padding:4px 10px"><a onclick="showPage('dash');setTimeout(()=>{const f=document.getElementById('fM');if(f){f.value='unmatched';f.dispatchEvent(new Event('change'))}},80)" style="color:var(--accent-dk);cursor:pointer;text-decoration:underline">+${unmatched.length-5} more — view in Dashboard</a></div>`;
+    html+='</div>';
+  }
+  if(lateDel.length){
+    html+=`<div style="margin-bottom:14px"><div style="font-size:12px;font-weight:600;color:var(--err);margin-bottom:6px">⚠ ${lateDel.length} late delivery (supplier date passed, not marked Delivered)</div>`;
+    lateDel.slice(0,5).forEach(e=>{
+      const days=daysAgo(e.supplier_delivery_date)||0;
+      html+=row(e).replace('</div></div>',`</div><span style="font-size:11px;color:var(--err);white-space:nowrap;font-weight:600">${days}d late</span></div>`);
+    });
+    if(lateDel.length>5)html+=`<div style="font-size:11px;color:var(--muted);padding:4px 10px">+${lateDel.length-5} more — view in Dashboard</div>`;
+    html+='</div>';
+  }
+  if(overdueInst.length){
+    const N=appSettings.overdue_install_days||3;
+    html+=`<div><div style="font-size:12px;font-weight:600;color:#7a4d00;margin-bottom:6px">⏱ ${overdueInst.length} overdue install (more than ${N} days since delivery, not marked installed)</div>`;
+    overdueInst.slice(0,5).forEach(e=>{
+      const days=daysAgo(e.supplier_delivery_date)||0;
+      html+=row(e).replace('</div></div>',`</div><span style="font-size:11px;color:#7a4d00;white-space:nowrap;font-weight:600">${days}d ago</span></div>`);
+    });
+    if(overdueInst.length>5)html+=`<div style="font-size:11px;color:var(--muted);padding:4px 10px">+${overdueInst.length-5} more</div>`;
+    html+='</div>';
+  }
+  list.innerHTML=html;
+}
+
 function renderNotif(){
+  // Always refresh the action-required pinned section first.
+  renderActionRequired();
   const data=window._notifData||[];const el=$('notifList');
   const ft=$('nfType').value,fp=$('nfProj').value,fq=$('nfSearch').value.toLowerCase().trim();
   // Build entry map for project lookup
   const em={};entries.forEach(e=>em[e.id]=e);
+  // Helper: is this audit log entry a schedule upload?
+  // Two cases: UPDATE/schedule_attached (attach to existing placeholder) or CREATE with
+  // new_value starting "UNMATCHED:" (a fresh entry created via the unmatched-upload flow).
+  const isScheduleUpload=a=>(a.action==='UPDATE'&&a.field_changed==='schedule_attached')||(a.action==='CREATE'&&typeof a.new_value==='string'&&a.new_value.startsWith('UNMATCHED:'));
   let list=data.slice();
-  if(ft)list=list.filter(a=>a.action===ft);
-  // Only keep UPDATE actions that are delivery-related
+  if(ft==='SCHEDULE_UPLOAD'){
+    // Pseudo-filter — not a single action type, matches both attach + unmatched-create.
+    list=list.filter(isScheduleUpload);
+  }else if(ft){
+    list=list.filter(a=>a.action===ft);
+  }
+  // Only keep UPDATE actions that are delivery-related (skip noise like comment edits)
   list=list.filter(a=>a.action!=='UPDATE'||DELIVERY_FIELDS.includes(a.field_changed)||!a.field_changed);
   if(fp)list=list.filter(a=>{const e=em[a.entry_id];return e&&e.project===fp});
   if(fq)list=list.filter(a=>{const e=em[a.entry_id];const hay=[a.action,a.field_changed,a.old_value,a.new_value,a.user_identifier,e?e.project:'',e?e.level:'',e?e.area:''].join(' ').toLowerCase();return hay.includes(fq)});
@@ -1078,7 +1239,19 @@ function renderNotif(){
   el.innerHTML=list.map(a=>{
     const e=em[a.entry_id];const ctx=e?`<b>${esc(e.project)}</b> / ${esc(e.level||'—')} / ${esc(e.area||'—')}${e.schedule?' <span style="font-family:\'JetBrains Mono\',monospace;color:var(--accent-dk)">'+esc(e.schedule)+'</span>':''}`:'';
     let icon='update',iconChar='✎',msg='';
-    if(a.action==='CREATE'){icon='create';iconChar='+';msg=`New entry created — ${ctx}`}
+    if(a.action==='CREATE'){
+      // Distinguish a "schedule was uploaded as unmatched" from other creates so the user
+      // can scan for upload events at a glance. The new_value string is set in the submit
+      // handler to "UNMATCHED: project/level (split)/SCHEDULE_CODE".
+      if(typeof a.new_value==='string'&&a.new_value.startsWith('UNMATCHED:')){
+        icon='create';iconChar='📎';
+        const sched=a.new_value.split('/').pop()||'';
+        msg=`Schedule uploaded (unmatched): <b>${esc(sched)}</b> — ${ctx}`;
+      }else{
+        icon='create';iconChar='+';
+        msg=`New entry created — ${ctx}`;
+      }
+    }
     else if(a.action==='BULK_CREATE'){icon='create';iconChar='⚡';msg=`<b>Bulk create:</b> ${esc(a.new_value)}`}
     else if(a.action==='UPDATE'&&a.field_changed==='our_delivery_date'){icon='update';iconChar='📅';msg=`Ordered delivery date changed from <b>${fmtDate(a.old_value)||'not set'}</b> to <b>${fmtDate(a.new_value)||'not set'}</b> — ${ctx}`}
     else if(a.action==='UPDATE'&&a.field_changed==='supplier_delivery_date'){icon='update';iconChar='📅';msg=`Supplier delivery date changed from <b>${fmtDate(a.old_value)||'not set'}</b> to <b>${fmtDate(a.new_value)||'not set'}</b> — ${ctx}`}
@@ -1098,10 +1271,12 @@ function checkPin(){
   if($('pinInp').value===ADMIN_PIN){adminUnlocked=true;$('pinGate').style.display='none';$('adminContent').style.display='block';showAdminSub('proj');$('pinInp').value='';$('pinErr').innerHTML=''}
   else{$('pinErr').innerHTML='<div class="error-msg">Wrong PIN</div>';$('pinInp').value=''}}
 function lockAdmin(){adminUnlocked=false;$('pinGate').style.display='block';$('adminContent').style.display='none'}
-function showAdminSub(s){['proj','program','fixers','contacts','audit'].forEach(t=>{
+function showAdminSub(s){['proj','program','fixers','people','assign','account','contacts','audit'].forEach(t=>{
   const tab=$('at'+t.charAt(0).toUpperCase()+t.slice(1));if(tab)tab.classList.toggle('active',t===s);
   const panel=$('admin'+t.charAt(0).toUpperCase()+t.slice(1));if(panel)panel.style.display=t===s?'block':'none'});
-  if(s==='proj')renderAdminProj();if(s==='program')renderAdminProgram();if(s==='fixers')renderAdminFixers();if(s==='contacts')renderAdminContacts();if(s==='audit')loadAuditLog()}
+  if(s==='proj')renderAdminProj();if(s==='program')renderAdminProgram();if(s==='fixers')renderAdminFixers();
+  if(s==='people')renderAdminPeople();if(s==='assign')renderAdminAssign();if(s==='account')renderAdminAccount();
+  if(s==='contacts')renderAdminContacts();if(s==='audit')loadAuditLog()}
 
 /* ═══ ADMIN: PROJECTS ═══ */
 function renderAdminProj(){
@@ -1493,6 +1668,322 @@ async function deleteContact(id){
     await sb.from('email_contacts').delete().eq('id',id);
     await auditLog({action:'DELETE',field_changed:'email_contact',old_value:c.label+' <'+c.email+'>'});
     await renderAdminContacts()})}
+
+/* ═══ ADMIN: PEOPLE ═══
+   Manage names + roles. DBCC = internal staff, eligible for project assignments.
+   Aus Reo = supplier contacts, tracked but not assigned to projects. */
+async function renderAdminPeople(){
+  // Refresh in case another admin added someone since the tab last opened.
+  await loadPeople();
+  const el=$('adminPeople');
+  // The form for adding a new person + the list of existing.
+  el.innerHTML=`<div class="card" style="margin-bottom:18px">
+    <h3 style="font-size:15px;font-weight:700;margin-bottom:14px;color:var(--gray-dk)">Add Person</h3>
+    <div class="row2">
+      <div class="fg"><label>Name</label><input type="text" id="newPersonName" placeholder="e.g. Selva D"></div>
+      <div class="fg"><label>Role</label><select id="newPersonRole"><option value="DBCC">DBCC</option><option value="Aus Reo">Aus Reo</option></select></div>
+    </div>
+    <div style="display:flex;gap:10px;margin-top:8px"><button class="btn btn-sm" onclick="addPerson()" style="width:auto">Add Person</button></div>
+    <div id="personErr"></div>
+  </div>
+  <div class="card">
+    <h3 style="font-size:15px;font-weight:700;margin-bottom:12px;color:var(--gray-dk)">People (<span>${people.length}</span>)</h3>
+    <p style="font-size:11px;color:var(--muted);margin-bottom:14px">DBCC = internal staff (can be assigned to projects). Aus Reo = supplier contacts (tracked only).</p>
+    ${people.length===0?'<div class="empty"><p>No people yet. Add some above.</p></div>':`
+      <div style="display:flex;flex-direction:column;gap:6px">
+        ${people.map(p=>`<div style="display:flex;align-items:center;gap:10px;padding:8px 12px;background:#fff;border:1px solid var(--border);border-radius:6px">
+          <span style="flex:1;font-weight:600;color:var(--gray-dk)">${esc(p.name)}</span>
+          <select onchange="setPersonRole(${p.id},this.value)" style="padding:4px 8px;border:1px solid var(--border);border-radius:5px;font-size:12px;background:#fff">
+            <option value="DBCC"${p.role==='DBCC'?' selected':''}>DBCC</option>
+            <option value="Aus Reo"${p.role==='Aus Reo'?' selected':''}>Aus Reo</option>
+          </select>
+          <button class="btn btn-err btn-sm" onclick="deletePerson(${p.id})" style="width:auto;padding:4px 10px;font-size:11px">Delete</button>
+        </div>`).join('')}
+      </div>`}
+  </div>`;
+}
+async function addPerson(){
+  const name=$('newPersonName').value.trim(),role=$('newPersonRole').value;
+  const err=$('personErr');err.innerHTML='';
+  if(!name)return err.innerHTML='<div class="error-msg" style="margin-top:8px">Name required</div>';
+  if(people.some(p=>p.name.toLowerCase()===name.toLowerCase()))return err.innerHTML='<div class="error-msg" style="margin-top:8px">A person with that name already exists</div>';
+  const{error}=await sb.from('people').insert({name,role});
+  if(error)return err.innerHTML='<div class="error-msg" style="margin-top:8px">'+esc(error.message)+'</div>';
+  await auditLog({action:'CREATE',field_changed:'person',new_value:`${name} (${role})`});
+  await renderAdminPeople();
+}
+async function setPersonRole(id,role){
+  const p=people.find(x=>x.id===id);if(!p||p.role===role)return;
+  // If demoting from DBCC to Aus Reo, drop their project assignments since Aus Reo can't be assigned.
+  let removed=0;
+  if(p.role==='DBCC'&&role==='Aus Reo'){
+    const{error,count}=await sb.from('project_assignments').delete({count:'exact'}).eq('person_id',id);
+    if(!error)removed=count||0;
+  }
+  await sb.from('people').update({role}).eq('id',id);
+  await auditLog({action:'UPDATE',field_changed:'person_role',old_value:`${p.name}: ${p.role}`,new_value:`${p.name}: ${role}${removed?' (removed '+removed+' assignment'+(removed===1?'':'s')+')':''}`});
+  await loadPeople();await loadAssignments();renderAdminPeople();
+}
+function deletePerson(id){
+  const p=people.find(x=>x.id===id);if(!p)return;
+  const projCount=projectsForPerson(id).length;
+  const detailMsg=projCount?`This person is assigned to ${projCount} project${projCount===1?'':'s'}. Those assignments will also be removed. `:'';
+  confirmDialog('Delete Person?',`${detailMsg}This cannot be undone.<br><br><b>${esc(p.name)}</b> (${p.role})`,'Delete','btn-err',async()=>{
+    // Cascade in project_assignments handles the assignments side via FK ON DELETE CASCADE.
+    const{error}=await sb.from('people').delete().eq('id',id);
+    if(error){alert('Error: '+error.message);return}
+    await auditLog({action:'DELETE',field_changed:'person',old_value:`${p.name} (${p.role})`});
+    await loadPeople();await loadAssignments();renderAdminPeople();
+  });
+}
+
+/* ═══ ADMIN: PROJECT ASSIGNMENTS ═══
+   For each project, multi-select which DBCC people own it. */
+async function renderAdminAssign(){
+  await loadPeople();await loadAssignments();
+  const el=$('adminAssign');
+  const dbccPeople=people.filter(p=>p.role==='DBCC');
+  if(!projects.length){el.innerHTML='<div class="card"><div class="empty"><p>No projects yet. Add some on the Projects tab.</p></div></div>';return}
+  if(!dbccPeople.length){el.innerHTML='<div class="card"><div class="empty"><p>No DBCC people yet. Add some on the People tab first.</p></div></div>';return}
+  el.innerHTML=`<div class="card">
+    <h3 style="font-size:15px;font-weight:700;margin-bottom:8px;color:var(--gray-dk)">Project Assignments</h3>
+    <p style="font-size:11px;color:var(--muted);margin-bottom:14px">Click a name to toggle assignment for that project. Only DBCC people are listed. Used by the Accountability tab.</p>
+    <div style="display:flex;flex-direction:column;gap:14px">
+      ${projects.map(pr=>{
+        const assigned=peopleForProject(pr.name);
+        const assignedIds=new Set(assigned.map(p=>p.id));
+        return `<div style="padding:12px 14px;background:#fff;border:1px solid var(--border);border-radius:8px">
+          <div style="font-weight:700;color:var(--gray-dk);margin-bottom:8px">${esc(pr.name)}</div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px">
+            ${dbccPeople.map(p=>{
+              const on=assignedIds.has(p.id);
+              return `<button onclick="toggleAssignment('${esc(pr.name).replace(/'/g,"\\'")}',${p.id})" class="btn btn-sm" style="width:auto;padding:5px 12px;font-size:12px;background:${on?'var(--accent)':'#fff'};color:${on?'#fff':'var(--gray-dk)'};border:1px solid ${on?'var(--accent)':'var(--border)'};font-weight:${on?'600':'500'}">${on?'✓ ':''}${esc(p.name)}</button>`;
+            }).join('')}
+          </div>
+          ${assigned.length===0?'<div style="font-size:11px;color:var(--muted);margin-top:6px;font-style:italic">⚠ Unassigned</div>':''}
+        </div>`;
+      }).join('')}
+    </div>
+  </div>`;
+}
+async function toggleAssignment(projectName,personId){
+  const exists=assignments.find(a=>a.project_name===projectName&&a.person_id===personId);
+  const p=people.find(x=>x.id===personId);
+  if(exists){
+    await sb.from('project_assignments').delete().eq('id',exists.id);
+    await auditLog({action:'DELETE',field_changed:'assignment',old_value:`${p?.name}: ${projectName}`});
+  }else{
+    await sb.from('project_assignments').insert({project_name:projectName,person_id:personId});
+    await auditLog({action:'CREATE',field_changed:'assignment',new_value:`${p?.name}: ${projectName}`});
+  }
+  await loadAssignments();renderAdminAssign();
+}
+
+/* ═══ ADMIN: ACCOUNTABILITY ═══
+   Date-range review showing per-person open issues + resolution times.
+   Default range: current Mon-Fri week. */
+function getMondayOfThisWeek(){
+  const d=new Date();const day=d.getDay();// 0=Sun, 1=Mon ... 6=Sat
+  const diff=day===0?-6:1-day;// shift back to Monday
+  d.setDate(d.getDate()+diff);d.setHours(0,0,0,0);return d;
+}
+function getFridayOfThisWeek(){
+  const m=getMondayOfThisWeek();const f=new Date(m);f.setDate(m.getDate()+4);f.setHours(23,59,59,999);return f;
+}
+function fmtIsoDate(d){return d.toISOString().slice(0,10)}
+let _accountRange={from:fmtIsoDate(getMondayOfThisWeek()),to:fmtIsoDate(getFridayOfThisWeek())};
+
+async function renderAdminAccount(){
+  await loadPeople();await loadAssignments();await loadAppSettings();
+  const el=$('adminAccount');
+  // Date range filter at top + threshold setting
+  el.innerHTML=`<div class="card" style="margin-bottom:14px">
+    <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
+      <div>
+        <label style="display:block;font-size:11px;color:var(--gray-dk);font-weight:600;margin-bottom:4px">From</label>
+        <input type="date" id="accFrom" value="${_accountRange.from}" style="padding:6px 9px;border:1px solid var(--border);border-radius:6px;font-size:12px">
+      </div>
+      <div>
+        <label style="display:block;font-size:11px;color:var(--gray-dk);font-weight:600;margin-bottom:4px">To</label>
+        <input type="date" id="accTo" value="${_accountRange.to}" style="padding:6px 9px;border:1px solid var(--border);border-radius:6px;font-size:12px">
+      </div>
+      <div style="display:flex;gap:6px;margin-top:18px">
+        <button class="btn btn-ghost btn-sm" onclick="setAccountPreset('thisWeek')" style="width:auto;padding:6px 12px;font-size:11px">This Week</button>
+        <button class="btn btn-ghost btn-sm" onclick="setAccountPreset('lastWeek')" style="width:auto;padding:6px 12px;font-size:11px">Last Week</button>
+        <button class="btn btn-ghost btn-sm" onclick="setAccountPreset('last30')" style="width:auto;padding:6px 12px;font-size:11px">Last 30 days</button>
+        <button class="btn btn-sm" onclick="applyAccountRange()" style="width:auto;padding:6px 14px;font-size:11px">Apply</button>
+      </div>
+      <div style="margin-left:auto;border-left:1px solid var(--border);padding-left:14px">
+        <label style="display:block;font-size:11px;color:var(--gray-dk);font-weight:600;margin-bottom:4px">Overdue install threshold</label>
+        <div style="display:flex;align-items:center;gap:6px"><input type="number" id="overdueThresholdInp" value="${appSettings.overdue_install_days}" min="1" max="60" style="width:60px;padding:6px;border:1px solid var(--border);border-radius:6px;font-size:12px"><span style="font-size:11px;color:var(--muted)">days</span><button class="btn btn-sm" onclick="saveOverdueThreshold()" style="width:auto;padding:5px 10px;font-size:11px">Save</button></div>
+      </div>
+    </div>
+  </div>
+  <div id="accountBody"></div>`;
+  renderAccountBody();
+}
+function setAccountPreset(p){
+  if(p==='thisWeek'){_accountRange={from:fmtIsoDate(getMondayOfThisWeek()),to:fmtIsoDate(getFridayOfThisWeek())}}
+  else if(p==='lastWeek'){const m=getMondayOfThisWeek();m.setDate(m.getDate()-7);const f=new Date(m);f.setDate(m.getDate()+4);_accountRange={from:fmtIsoDate(m),to:fmtIsoDate(f)}}
+  else if(p==='last30'){const t=new Date();const f=new Date(t);f.setDate(t.getDate()-30);_accountRange={from:fmtIsoDate(f),to:fmtIsoDate(t)}}
+  $('accFrom').value=_accountRange.from;$('accTo').value=_accountRange.to;applyAccountRange();
+}
+function applyAccountRange(){
+  _accountRange={from:$('accFrom').value,to:$('accTo').value};
+  renderAccountBody();
+}
+async function saveOverdueThreshold(){
+  const n=parseInt($('overdueThresholdInp').value,10);
+  if(isNaN(n)||n<1||n>60)return alert('Enter a number between 1 and 60');
+  await saveAppSetting('overdue_install_days',n);
+  await auditLog({action:'UPDATE',field_changed:'overdue_install_days',new_value:String(n)});
+  alert('Saved. Threshold: '+n+' days');
+}
+
+// Render the body of the accountability tab. Heavy lifting:
+//  - Pulls audit log entries within the date range
+//  - For each DBCC person, computes per-project open issues and resolutions
+async function renderAccountBody(){
+  const body=$('accountBody');if(!body)return;
+  body.innerHTML='<div class="empty"><p>Loading…</p></div>';
+  const fromIso=_accountRange.from+'T00:00:00';
+  const toIso=_accountRange.to+'T23:59:59';
+  // Pull audit log entries in range — used for "resolutions this week" and per-issue resolution times.
+  let logs=[];
+  try{
+    const{data,error}=await sb.from('audit_log').select('*').gte('created_at',fromIso).lte('created_at',toIso).order('created_at',{ascending:true}).limit(2000);
+    if(error)throw error;logs=data||[];
+  }catch(e){console.warn('[REO] audit log fetch failed:',e.message);logs=[]}
+  const dbccPeople=people.filter(p=>p.role==='DBCC');
+  if(!dbccPeople.length){
+    body.innerHTML='<div class="card"><div class="empty"><p>No DBCC people configured. Add some on the People tab.</p></div></div>';
+    return;
+  }
+  // Per-entry resolution times (audit log: MISMATCH_RESOLVED action).
+  // Map of entry_id -> [{when, by}] for resolutions in range.
+  const resolutionsInRange={};
+  logs.filter(l=>l.action==='MISMATCH_RESOLVED').forEach(l=>{
+    if(!resolutionsInRange[l.entry_id])resolutionsInRange[l.entry_id]=[];
+    resolutionsInRange[l.entry_id].push({when:l.created_at,by:l.user_identifier||'?'});
+  });
+  // For each resolved entry, look up the original mismatch detection time from full audit history.
+  // Mismatch is "detected" the first time supplier_delivery_date was set to a value different
+  // from our_delivery_date. Approximate: use entry creation time if no clear marker.
+  const resolvedEntryIds=Object.keys(resolutionsInRange);
+  let detectionTimes={};
+  if(resolvedEntryIds.length){
+    try{
+      const{data}=await sb.from('audit_log').select('entry_id,field_changed,old_value,new_value,created_at').in('entry_id',resolvedEntryIds.map(Number)).in('field_changed',['supplier_delivery_date','schedule_attached']).order('created_at',{ascending:true});
+      (data||[]).forEach(l=>{
+        if(!detectionTimes[l.entry_id])detectionTimes[l.entry_id]=l.created_at;
+      });
+    }catch(e){/* fallback: use entry created_at */}
+  }
+  // Build per-person aggregates
+  let html='';
+  // First a "summary grid" showing all people side-by-side
+  html+=`<div class="card" style="margin-bottom:14px">
+    <h3 style="font-size:15px;font-weight:700;margin-bottom:6px;color:var(--gray-dk)">Accountability Review</h3>
+    <p style="font-size:11px;color:var(--muted);margin-bottom:14px">Range: <b>${fmtDate(_accountRange.from)} → ${fmtDate(_accountRange.to)}</b>. "Open" counts use today's data (not the range). Resolutions and time-to-resolve use the range.</p>
+    <div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="background:#FAFAF8;border-bottom:2px solid var(--border)">
+        <th style="text-align:left;padding:8px 10px">Person</th>
+        <th style="text-align:left;padding:8px 10px">Projects</th>
+        <th style="text-align:right;padding:8px 10px">Open Mismatches</th>
+        <th style="text-align:right;padding:8px 10px">Open Unmatched</th>
+        <th style="text-align:right;padding:8px 10px">Late Deliveries</th>
+        <th style="text-align:right;padding:8px 10px">Overdue Install</th>
+        <th style="text-align:right;padding:8px 10px">Resolved (range)</th>
+        <th style="text-align:right;padding:8px 10px">Avg Resolution</th>
+      </tr></thead>
+      <tbody>`;
+  dbccPeople.forEach(p=>{
+    const projs=projectsForPerson(p.id);
+    const myEntries=entries.filter(e=>projs.includes(e.project));
+    const open={mm:myEntries.filter(e=>hasMismatch(e)&&e.status!=='Cancelled'),
+                un:myEntries.filter(e=>e.unmatched&&e.status!=='Cancelled'),
+                lt:myEntries.filter(e=>isLateDelivery(e)),
+                od:myEntries.filter(e=>isOverdueInstall(e))};
+    // Resolutions in range BY THIS PERSON
+    const myResolutions=Object.entries(resolutionsInRange).flatMap(([eid,arr])=>arr.filter(r=>r.by===p.name).map(r=>({eid:Number(eid),when:r.when})));
+    let avgMs=0;
+    if(myResolutions.length){
+      const durations=myResolutions.map(r=>{
+        const start=detectionTimes[r.eid];
+        if(!start)return null;
+        return new Date(r.when).getTime()-new Date(start).getTime();
+      }).filter(d=>d!=null&&d>0);
+      if(durations.length)avgMs=durations.reduce((a,b)=>a+b,0)/durations.length;
+    }
+    const avgTxt=avgMs?(avgMs/86400000).toFixed(1)+'d':'—';
+    const oldestAge=arr=>arr.length?Math.max(...arr.map(e=>daysAgo(e.entry_date)||0)):0;
+    const cell=(arr,colorWhen)=>{
+      if(arr.length===0)return '<span style="color:var(--muted)">0</span>';
+      const o=oldestAge(arr);
+      const col=o>=colorWhen?'var(--err)':'var(--gray-dk)';
+      return `<span style="font-weight:700;color:${col}">${arr.length}</span> <span style="font-size:10px;color:var(--muted)">(oldest ${o}d)</span>`;
+    };
+    html+=`<tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:10px;font-weight:600;color:var(--gray-dk)">${esc(p.name)}</td>
+      <td style="padding:10px;color:var(--muted);font-size:11px">${projs.length?projs.map(esc).join(', '):'<i>none assigned</i>'}</td>
+      <td style="text-align:right;padding:10px">${cell(open.mm,7)}</td>
+      <td style="text-align:right;padding:10px">${cell(open.un,7)}</td>
+      <td style="text-align:right;padding:10px">${cell(open.lt,3)}</td>
+      <td style="text-align:right;padding:10px">${cell(open.od,7)}</td>
+      <td style="text-align:right;padding:10px;font-weight:600;color:var(--success)">${myResolutions.length||'—'}</td>
+      <td style="text-align:right;padding:10px;font-weight:600;color:var(--gray-dk)">${avgTxt}</td>
+    </tr>`;
+  });
+  // Unassigned aggregate (issues on projects with no one assigned) — for visibility
+  const unassignedProjects=projects.filter(pr=>peopleForProject(pr.name).length===0).map(pr=>pr.name);
+  if(unassignedProjects.length){
+    const myEntries=entries.filter(e=>unassignedProjects.includes(e.project));
+    const open={mm:myEntries.filter(e=>hasMismatch(e)&&e.status!=='Cancelled'),
+                un:myEntries.filter(e=>e.unmatched&&e.status!=='Cancelled'),
+                lt:myEntries.filter(e=>isLateDelivery(e)),
+                od:myEntries.filter(e=>isOverdueInstall(e))};
+    const total=open.mm.length+open.un.length+open.lt.length+open.od.length;
+    if(total){
+      html+=`<tr style="border-bottom:1px solid var(--border);background:#FFF8E7">
+        <td style="padding:10px;font-weight:600;color:var(--warn-dk)">⚠ Unassigned projects</td>
+        <td style="padding:10px;color:var(--muted);font-size:11px">${unassignedProjects.map(esc).join(', ')}</td>
+        <td style="text-align:right;padding:10px">${open.mm.length||'<span style="color:var(--muted)">0</span>'}</td>
+        <td style="text-align:right;padding:10px">${open.un.length||'<span style="color:var(--muted)">0</span>'}</td>
+        <td style="text-align:right;padding:10px">${open.lt.length||'<span style="color:var(--muted)">0</span>'}</td>
+        <td style="text-align:right;padding:10px">${open.od.length||'<span style="color:var(--muted)">0</span>'}</td>
+        <td style="text-align:right;padding:10px;color:var(--muted)">—</td>
+        <td style="text-align:right;padding:10px;color:var(--muted)">—</td>
+      </tr>`;
+    }
+  }
+  html+='</tbody></table></div></div>';
+  // Per-person drill-down: list the actual issues so it's not just numbers
+  dbccPeople.forEach(p=>{
+    const projs=projectsForPerson(p.id);
+    if(!projs.length)return;
+    const myEntries=entries.filter(e=>projs.includes(e.project));
+    const issues=[];
+    myEntries.filter(e=>hasMismatch(e)&&e.status!=='Cancelled').forEach(e=>issues.push({type:'mismatch',e,age:daysAgo(e.entry_date)||0}));
+    myEntries.filter(e=>e.unmatched&&e.status!=='Cancelled').forEach(e=>issues.push({type:'unmatched',e,age:daysAgo(e.entry_date)||0}));
+    myEntries.filter(e=>isLateDelivery(e)).forEach(e=>issues.push({type:'late',e,age:daysAgo(e.supplier_delivery_date)||0}));
+    myEntries.filter(e=>isOverdueInstall(e)).forEach(e=>issues.push({type:'overdue_install',e,age:daysAgo(e.supplier_delivery_date)||0}));
+    if(!issues.length)return;
+    issues.sort((a,b)=>b.age-a.age);
+    const tag={mismatch:'<span style="background:#FEF3C7;color:#92400E;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:600">MISMATCH</span>',
+               unmatched:'<span style="background:#FED7AA;color:#9A3412;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:600">UNMATCHED</span>',
+               late:'<span style="background:#FEE2E2;color:#991B1B;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:600">LATE</span>',
+               overdue_install:'<span style="background:#FFEDD5;color:#7A4D00;padding:2px 6px;border-radius:4px;font-size:10px;font-weight:600">NO INSTALL</span>'};
+    html+=`<div class="card" style="margin-bottom:12px"><h4 style="font-size:13px;font-weight:700;color:var(--gray-dk);margin-bottom:10px">${esc(p.name)} — open issues (${issues.length})</h4>
+      <div style="display:flex;flex-direction:column;gap:6px">
+        ${issues.map(({type,e,age})=>`<div onclick="showDetail(${e.id})" style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:#fff;border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:12px" onmouseover="this.style.background='#FAFAF8'" onmouseout="this.style.background='#fff'">
+          ${tag[type]}
+          <span style="flex:1"><b>${esc(e.project)}</b> / ${esc(e.level||'—')} / ${esc(e.area||'—')}${e.split_reference?' <span style="color:var(--accent-dk);font-size:11px">('+esc(e.split_reference)+')</span>':''}${e.schedule?' · <span style="font-family:\'JetBrains Mono\',monospace;font-size:11px;color:var(--accent-dk)">'+esc(e.schedule)+'</span>':''}</span>
+          <span style="white-space:nowrap;color:${age>=7?'var(--err)':'var(--muted)'};font-size:11px;font-weight:600">${age}d</span>
+        </div>`).join('')}
+      </div></div>`;
+  });
+  body.innerHTML=html;
+}
 
 
 async function loadAuditLog(){const{data,error}=await sb.from('audit_log').select('*').order('created_at',{ascending:false}).limit(300);

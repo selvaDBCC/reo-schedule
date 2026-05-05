@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>REO Schedule Management | Debono Bros Concreting</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=b4.5">
+<link rel="stylesheet" href="styles.css?v=b5.0">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 </head>
@@ -174,9 +174,19 @@
 <div class="page" id="pageNotif">
   <div style="max-width:900px;margin:0 auto;padding:0 4px">
     <div class="page-header" style="padding:0 0 8px"><h1>Notifications</h1><p>Timeline of delivery-related communications and changes</p></div>
+    <!-- Action Required: pinned section showing items that need attention right now.
+         Updated automatically when entries change. Hidden when there's nothing to action. -->
+    <div id="actionRequiredCard" class="tcard" style="display:none;margin-bottom:14px;padding:14px 16px;border-left:4px solid var(--accent)">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <h3 style="font-size:14px;font-weight:700;color:var(--gray-dk);margin:0">⚠ Action Required</h3>
+        <span id="arCount" style="font-size:11px;color:var(--muted);font-family:'JetBrains Mono',monospace"></span>
+      </div>
+      <div id="actionRequiredList"></div>
+    </div>
     <div class="filters">
       <select id="nfType" onchange="renderNotif()">
         <option value="">All Events</option>
+        <option value="SCHEDULE_UPLOAD">📎 Schedule Uploads</option>
         <option value="UPDATE">Date Changes</option>
         <option value="EMAIL_SENT">Emails Sent</option>
         <option value="ON_HOLD">On Hold</option>
@@ -213,12 +223,18 @@
       <button class="nav-tab active" onclick="showAdminSub('proj')" id="atProj" style="height:42px">Projects</button>
       <button class="nav-tab" onclick="showAdminSub('program')" id="atProgram" style="height:42px">Delivery Program</button>
       <button class="nav-tab" onclick="showAdminSub('fixers')" id="atFixers" style="height:42px">Steel Fixers</button>
+      <button class="nav-tab" onclick="showAdminSub('people')" id="atPeople" style="height:42px">People</button>
+      <button class="nav-tab" onclick="showAdminSub('assign')" id="atAssign" style="height:42px">Project Assignments</button>
+      <button class="nav-tab" onclick="showAdminSub('account')" id="atAccount" style="height:42px">Accountability</button>
       <button class="nav-tab" onclick="showAdminSub('contacts')" id="atContacts" style="height:42px">Email Contacts</button>
       <button class="nav-tab" onclick="showAdminSub('audit')" id="atAudit" style="height:42px">Audit Log</button>
     </div>
     <div id="adminProj"></div>
     <div id="adminProgram" style="display:none"></div>
     <div id="adminFixers" style="display:none"></div>
+    <div id="adminPeople" style="display:none"></div>
+    <div id="adminAssign" style="display:none"></div>
+    <div id="adminAccount" style="display:none"></div>
     <div id="adminContacts" style="display:none"></div>
     <div id="adminAudit" style="display:none"></div>
   </div>
@@ -281,6 +297,6 @@
 
 <div id="versionBadge" style="position:fixed;bottom:6px;right:8px;font-size:11px;color:#999;font-family:'JetBrains Mono',monospace;pointer-events:none;z-index:1;user-select:none;background:rgba(255,255,255,0.85);padding:2px 6px;border-radius:4px"></div>
 
-<script src="app.js?v=b4.5"></script>
+<script src="app.js?v=b5.0"></script>
 </body>
 </html>
