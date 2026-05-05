@@ -693,10 +693,12 @@ async function submitEntry(){
         const{error}=await sb.from('entries').update(up).eq('id',selectedOrderId);if(error)throw error;
         await auditLog({entry_id:selectedOrderId,action:'UPDATE',field_changed:'schedule_attached',new_value:`${schedule} (${fname||'no file'})`});
       }else{
-        // For unmatched entries, pull in the split_reference the user picked from the
-        // dropdown / typed in the custom field, if any. window._unmatchedSplitRef is set
-        // when the user clicks "Create new unmatched entry".
-        const splitRef=window._unmatchedSplitRef||null;
+        // For unmatched entries, capture the user's split_reference choice. Read the dropdown /
+        // custom-text input at SUBMIT TIME so that picking the dropdown after clicking the
+        // "Create new unmatched entry" button still works. Falls back to the value captured at
+        // button-click time (window._unmatchedSplitRef) in case the order list got re-rendered
+        // (e.g. user changed level/area after starting the unmatched flow) and the dropdown is gone.
+        const splitRef=getUnmatchedSplitRef()||window._unmatchedSplitRef||null;
         const{data,error}=await sb.from('entries').insert({project,level:level||null,area:area||null,schedule,status:'Scheduled',entry_date:ed,comments:comments||null,file_url:furl,file_name:fname,entry_type:'scheduled',total_weight:weight?parseFloat(weight):null,drawing_reference:drawing,supplier_delivery_date:supD,split_reference:splitRef,markup_plans:mkNew.length?JSON.stringify(mkNew):null,unmatched:true,...breakdown}).select().single();
         if(error)throw error;
         await auditLog({entry_id:data.id,action:'CREATE',new_value:`UNMATCHED: ${project}/${level||'-'}${splitRef?' ('+splitRef+')':''}/${schedule}`});
