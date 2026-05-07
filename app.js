@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b5.0';
+const APP_VERSION='b5.1';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const ADMIN_PIN='7519', BUCKET='schedules';
@@ -30,6 +30,47 @@ function fmtSize(b){return b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':(b/
 function closeOv(id){document.getElementById(id).classList.remove('show')}
 function $(id){return document.getElementById(id)}
 function hasMismatch(e){return e.our_delivery_date&&e.supplier_delivery_date&&e.our_delivery_date!==e.supplier_delivery_date&&!e.mismatch_resolved}
+
+/* ═══ CHUNKED COMMENTS (b5.1) ═══
+   Each comment column (aus_reo_comment, dbcc_comment) stores a JSON array of chunks:
+     [{text, authors:[name1,name2], created_at, edited_at?}, ...]
+   When a user adds a chunk: authors=[currentUser].
+   When a user edits an existing chunk:
+     - If they're already in authors → no change.
+     - If they're not → append their name to authors (deduplicated, order preserved).
+     - If text becomes empty → remove the chunk entirely.
+   Cleared comments (everyone removed) → column set to null. */
+function parseChunks(raw){
+  if(!raw)return[];
+  try{const a=JSON.parse(raw);return Array.isArray(a)?a:[]}
+  catch{return[]}}
+function chunksToJson(chunks){return chunks.length?JSON.stringify(chunks):null}
+// Plain-text rendering for tooltips, CSV, emails — joins chunks by newlines, includes authors.
+function chunksToPlain(chunks){
+  if(!chunks.length)return'';
+  return chunks.map(c=>{const auth=Array.isArray(c.authors)?c.authors.join(' · '):'';return c.text+(auth?' ['+auth+']':'')}).join('\n');}
+// HTML rendering for full display in popups / detail view. Each chunk on its own line with pill.
+function chunksToHtml(chunks){
+  if(!chunks.length)return'<span style="color:var(--muted);font-style:italic">No comments</span>';
+  return chunks.map(c=>{
+    const auth=Array.isArray(c.authors)?c.authors:[];
+    const pill=auth.length?' <span class="cmt-pill">'+auth.map(esc).join(' · ')+'</span>':'';
+    return '<div class="cmt-line">'+esc(c.text||'').replace(/\n/g,'<br>')+pill+'</div>'}).join('');}
+// Dashboard cell — shorter preview (first chunk truncated), with the latest pill.
+function chunksToCell(chunks){
+  if(!chunks.length)return'<span style="color:#ccc">—</span>';
+  // Show last chunk's text + pill for that chunk only — most recent is most relevant.
+  const last=chunks[chunks.length-1];
+  const auth=Array.isArray(last.authors)?last.authors:[];
+  const pill=auth.length?' <span class="cmt-pill">'+esc(auth[auth.length-1])+'</span>':'';
+  const text=String(last.text||'').slice(0,50)+(last.text&&last.text.length>50?'…':'');
+  const more=chunks.length>1?' <span style="color:var(--muted);font-size:10px">(+'+(chunks.length-1)+')</span>':'';
+  return esc(text)+pill+more;}
+// Compute the new authors list for an edited chunk: existing authors + currentUser, deduplicated, order preserved.
+function appendAuthor(existing,name){
+  const arr=Array.isArray(existing)?existing.slice():[];
+  if(!arr.includes(name))arr.push(name);
+  return arr;}
 
 // Days between a date string (yyyy-mm-dd) and today. Positive = past, negative = future.
 function daysAgo(d){if(!d)return null;const ms=Date.now()-new Date(d).getTime();return Math.floor(ms/86400000)}
@@ -169,8 +210,14 @@ function projectsForPerson(personId){
   return assignments.filter(a=>a.person_id===personId).map(a=>a.project_name)}
 async function refreshAll(){await Promise.all([loadProjects(),loadEntries()]);populateDropdowns();renderDash()}
 function subscribeRealtime(){
-  sb.channel('e').on('postgres_changes',{event:'*',schema:'public',table:'entries'},()=>loadEntries().then(renderDash)).subscribe();
-  sb.channel('p').on('postgres_changes',{event:'*',schema:'public',table:'projects'},()=>loadProjects().then(()=>{populateDropdowns();if(adminUnlocked)renderProjList()})).subscribe()}
+  sb.channel('e').on('postgres_changes',{event:'*',schema:'public',table:'entries'},()=>loadEntries().then(()=>{renderDash();renderActionRequired()})).subscribe();
+  sb.channel('p').on('postgres_changes',{event:'*',schema:'public',table:'projects'},()=>loadProjects().then(()=>{populateDropdowns();if(adminUnlocked)renderProjList()})).subscribe();
+  // Audit log realtime — when a new audit row appears, refresh the Notifications list
+  // (only if the user is currently on that page, otherwise it'll refresh next time they switch).
+  sb.channel('al').on('postgres_changes',{event:'INSERT',schema:'public',table:'audit_log'},()=>{
+    const onNotif=$('pageNotif')&&$('pageNotif').classList.contains('active');
+    if(onNotif)loadNotifications();
+  }).subscribe();}
 
 /* ═══ DROPDOWNS ═══ */
 function populateDropdowns(){
@@ -724,7 +771,7 @@ function getFiltered(){
   if(fs)list=list.filter(e=>e.status===fs);if(ft)list=list.filter(e=>e.entry_type===ft);
   if(fh==='hold')list=list.filter(e=>e.on_hold);if(fh==='nohold')list=list.filter(e=>!e.on_hold);
   if(fm==='mismatch')list=list.filter(e=>hasMismatch(e));if(fm==='unmatched')list=list.filter(e=>e.unmatched);
-  if(fq)list=list.filter(e=>[e.schedule,e.project,e.level,e.area,e.comments,e.drawing_reference].some(f=>(f||'').toLowerCase().includes(fq)));
+  if(fq)list=list.filter(e=>[e.schedule,e.project,e.level,e.area,e.comments,chunksToPlain(parseChunks(e.aus_reo_comment)),chunksToPlain(parseChunks(e.dbcc_comment)),e.drawing_reference].some(f=>(f||'').toLowerCase().includes(fq)));
   list.sort((a,b)=>{let va=a[sortCol]||'',vb=b[sortCol]||'';
     if(['entry_date','created_at','our_delivery_date','supplier_delivery_date'].includes(sortCol)){va=new Date(va||0);vb=new Date(vb||0);return sortAsc?va-vb:vb-va}
     if(sortCol==='total_weight'){va=parseFloat(va)||0;vb=parseFloat(vb)||0;return sortAsc?va-vb:vb-va}
@@ -738,7 +785,7 @@ function renderDash(){
   if(!f.length){w.innerHTML=`<div class="empty"><p>${all.length===0?'No entries yet.':'No matches.'}</p></div>`;return}
   const ar=c=>sortCol===c?(sortAsc?' ▲':' ▼'):'';
   const allCk=f.every(e=>selectedIds.has(e.id));
-  w.innerHTML=`<table><thead><tr><th class="no-sort" style="width:36px"><input type="checkbox" ${allCk?'checked':''} onchange="toggleAll(this.checked)"></th><th onclick="tSort('project')">Project${ar('project')}</th><th onclick="tSort('level')">Level${ar('level')}</th><th onclick="tSort('area')">Area${ar('area')}</th><th onclick="tSort('schedule')">Schedule${ar('schedule')}</th><th onclick="tSort('total_weight')">Wt${ar('total_weight')}</th><th onclick="tSort('status')">Status${ar('status')}</th><th onclick="tSort('our_delivery_date')">Ordered Delivery${ar('our_delivery_date')}</th><th onclick="tSort('supplier_delivery_date')">Supplier${ar('supplier_delivery_date')}</th><th onclick="tSort('entry_date')">Submitted${ar('entry_date')}</th><th class="no-sort">Schedule File</th><th class="no-sort">Markup Plans</th><th class="no-sort" style="max-width:140px">Comments</th><th class="no-sort">Actions</th></tr></thead><tbody>${f.map(e=>{
+  w.innerHTML=`<table><thead><tr><th class="no-sort" style="width:36px"><input type="checkbox" ${allCk?'checked':''} onchange="toggleAll(this.checked)"></th><th onclick="tSort('project')">Project${ar('project')}</th><th onclick="tSort('level')">Level${ar('level')}</th><th onclick="tSort('area')">Area${ar('area')}</th><th onclick="tSort('schedule')">Schedule${ar('schedule')}</th><th onclick="tSort('total_weight')">Wt${ar('total_weight')}</th><th onclick="tSort('status')">Status${ar('status')}</th><th onclick="tSort('our_delivery_date')">Ordered Delivery${ar('our_delivery_date')}</th><th onclick="tSort('supplier_delivery_date')">Supplier${ar('supplier_delivery_date')}</th><th onclick="tSort('entry_date')">Submitted${ar('entry_date')}</th><th class="no-sort">Schedule File</th><th class="no-sort">Markup Plans</th><th class="no-sort" style="max-width:120px">Aus Reo Comments</th><th class="no-sort" style="max-width:120px">DBCC Comments</th><th class="no-sort">Actions</th></tr></thead><tbody>${f.map(e=>{
     const mm=hasMismatch(e),cn=e.status==='Cancelled',mp=e.markup_plans?JSON.parse(e.markup_plans):[];
     return`<tr class="${cn?'cancelled':''}${e.on_hold?' on-hold':''}" ondragover="event.preventDefault();this.classList.add('drag-over')" ondragleave="this.classList.remove('drag-over')" ondrop="handleRowDrop(event,${e.id});this.classList.remove('drag-over')">
 <td class="td-check"><input type="checkbox" ${selectedIds.has(e.id)?'checked':''} onchange="toggleSel(${e.id},this.checked)"></td>
@@ -753,7 +800,8 @@ function renderDash(){
 <td style="white-space:nowrap;font-size:11px">${fmtDate(e.entry_date)||'—'}</td>
 <td>${e.file_url?`<a class="att-link" href="${e.file_url}" target="_blank">📄 ${esc((e.file_name||'').slice(0,14))}</a>`:`<button class="action-btn" onclick="uploadScheduleFile(${e.id})" style="color:var(--accent-dk);font-size:10px">+ Upload</button>`}</td>
 <td>${mp.length?`<button class="att-link markup-link" onclick="viewMarkups(${e.id})">📐 ${mp.length}</button>`:''}<button class="action-btn" onclick="uploadMarkup(${e.id})" style="font-size:10px;color:var(--info)">+📐</button></td>
-<td class="comment-td" onclick="editComment(${e.id})" title="${esc(e.comments||'')}"><div class="comment-preview">${esc(e.comments||'—')}</div></td>
+<td class="comment-td" onclick="editChunkComment(${e.id},'aus_reo')" title="${esc(chunksToPlain(parseChunks(e.aus_reo_comment)))}"><div class="comment-preview">${chunksToCell(parseChunks(e.aus_reo_comment))}</div></td>
+<td class="comment-td" onclick="editChunkComment(${e.id},'dbcc')" title="${esc(chunksToPlain(parseChunks(e.dbcc_comment)))}"><div class="comment-preview">${chunksToCell(parseChunks(e.dbcc_comment))}</div></td>
 <td><div class="action-cell">
 ${e.status!=='Cancelled'?`<span class="hold-toggle${e.on_hold?' on':''}" onclick="toggleHold(${e.id})" title="Toggle On Hold"><span class="hold-slider"></span></span>`:''}
 <button class="action-btn view" onclick="showDetail(${e.id})">View</button>
@@ -914,6 +962,82 @@ async function saveCmt(id){const v=$('cmtInp').value.trim();const e=entries.find
   await auditLog({entry_id:id,action:'UPDATE',field_changed:'comments',old_value:e.comments||'',new_value:v||''});
   closeOv('commentOv');await loadEntries();renderDash()}
 
+/* ═══ b5.1 — chunked comment editor ═══
+   Used for both Aus Reo Comments and DBCC Comments. Each chunk is editable in-place.
+   When user saves: any chunk whose text changed gets currentUser appended to its authors list.
+   The "Add to comment" textarea creates a new chunk authored by currentUser.
+   Clear-all wipes the entire column. */
+function editChunkComment(id,col){
+  // col = 'aus_reo' or 'dbcc'
+  const e=entries.find(x=>x.id===id);if(!e)return;
+  const colName=col==='aus_reo'?'aus_reo_comment':'dbcc_comment';
+  const colLabel=col==='aus_reo'?'Aus Reo Comments':'DBCC Comments';
+  const chunks=parseChunks(e[colName]);
+  // Render existing chunks as textareas (one per chunk) so they can be edited individually.
+  const chunkHtml=chunks.map((c,i)=>{
+    const auth=Array.isArray(c.authors)?c.authors:[];
+    const pillHtml=auth.length?'<div class="cmt-pill-row">'+auth.map(esc).map(n=>'<span class="cmt-pill">'+n+'</span>').join('')+'</div>':'';
+    return`<div class="chunk-edit-row" data-i="${i}">
+      <textarea class="chunk-edit-text" rows="2" data-original="${esc(c.text||'')}">${esc(c.text||'')}</textarea>
+      ${pillHtml}
+    </div>`;
+  }).join('');
+  const intro=chunks.length
+    ? `<p style="font-size:11px;color:var(--muted);margin-bottom:10px">Edit a line below to update it. Empty a line to delete it. Your name will be added to any line you change.</p>`
+    : `<p style="font-size:11px;color:var(--muted);margin-bottom:10px">No comments yet. Add one below.</p>`;
+  $('commentModal').innerHTML=`<h3>${esc(colLabel)} <span style="font-size:11px;color:var(--muted);font-weight:normal">— ${esc(e.project)} / ${esc(e.level||'—')} / ${esc(e.area||'—')}</span><button class="modal-close" onclick="closeOv('commentOv')">&times;</button></h3>
+${intro}
+<div id="chunkList">${chunkHtml}</div>
+<div class="fg" style="margin-top:14px;border-top:1px solid var(--border);padding-top:14px">
+  <label style="display:block;margin-bottom:4px;font-size:12px;font-weight:600;color:var(--gray-dk)">Add new comment</label>
+  <textarea id="newChunkInp" rows="3" placeholder="Type your comment..."></textarea>
+</div>
+<div style="display:flex;gap:8px;justify-content:space-between;margin-top:14px">
+  <button class="btn btn-err btn-sm" onclick="clearChunkComment(${id},'${col}')" style="width:auto" ${chunks.length?'':'disabled'}>Clear All</button>
+  <div style="display:flex;gap:8px"><button class="btn btn-sec btn-sm" onclick="closeOv('commentOv')">Cancel</button><button class="btn btn-sm" onclick="saveChunkComment(${id},'${col}')" style="width:auto">Save</button></div>
+</div>`;
+  $('commentOv').classList.add('show');
+  setTimeout(()=>{const ta=$('newChunkInp');if(ta)ta.focus()},80)}
+
+async function saveChunkComment(id,col){
+  const e=entries.find(x=>x.id===id);if(!e)return;
+  const colName=col==='aus_reo'?'aus_reo_comment':'dbcc_comment';
+  const old=parseChunks(e[colName]);
+  // 1. Walk existing chunks: keep those still non-empty; if text changed, append currentUser.
+  const updated=[];
+  document.querySelectorAll('#chunkList .chunk-edit-row').forEach(row=>{
+    const i=parseInt(row.getAttribute('data-i'),10);
+    const orig=old[i];if(!orig)return;
+    const ta=row.querySelector('.chunk-edit-text');
+    const newText=(ta.value||'').trim();
+    if(!newText)return;// removed
+    const changed=newText!==(orig.text||'').trim();
+    const newAuthors=changed?appendAuthor(orig.authors,userName):orig.authors;
+    const c={text:newText,authors:newAuthors,created_at:orig.created_at};
+    if(changed)c.edited_at=new Date().toISOString();
+    updated.push(c);
+  });
+  // 2. New chunk from "Add new comment" box, if any.
+  const newText=($('newChunkInp').value||'').trim();
+  if(newText){updated.push({text:newText,authors:[userName],created_at:new Date().toISOString()})}
+  // 3. Persist.
+  const newJson=chunksToJson(updated);
+  await sb.from('entries').update({[colName]:newJson}).eq('id',id);
+  await auditLog({entry_id:id,action:'UPDATE',field_changed:colName,old_value:chunksToPlain(old).slice(0,200),new_value:chunksToPlain(updated).slice(0,200)});
+  closeOv('commentOv');await loadEntries();renderDash();}
+
+function clearChunkComment(id,col){
+  const colName=col==='aus_reo'?'aus_reo_comment':'dbcc_comment';
+  const colLabel=col==='aus_reo'?'Aus Reo Comments':'DBCC Comments';
+  confirmDialog(`Clear all ${colLabel}?`,'This will remove every line in this column. Audit log captures who cleared it. This cannot be undone.','Clear All','btn-err',async()=>{
+    const e=entries.find(x=>x.id===id);if(!e)return;
+    const old=parseChunks(e[colName]);
+    await sb.from('entries').update({[colName]:null}).eq('id',id);
+    await auditLog({entry_id:id,action:'UPDATE',field_changed:colName+'_cleared',old_value:chunksToPlain(old).slice(0,200),new_value:'(cleared)'});
+    closeOv('commentOv');await loadEntries();renderDash();
+  });
+}
+
 function uploadMarkup(id){const inp=document.createElement('input');inp.type='file';inp.accept='.pdf,.jpg,.jpeg,.png,.dwg';inp.multiple=true;
   inp.onchange=async()=>{if(!inp.files.length)return;try{const e=entries.find(x=>x.id===id);
     const mp=e.markup_plans?JSON.parse(e.markup_plans):[];
@@ -948,7 +1072,8 @@ ${e.cancel_reason?`<div class="drow"><div class="dlbl">Cancel Reason</div><div c
 <div class="drow"><div class="dlbl">Ordered Delivery</div><div class="dval">${fmtDate(e.our_delivery_date)||'—'}</div></div>
 <div class="drow"><div class="dlbl">Supplier Date</div><div class="dval">${fmtDate(e.supplier_delivery_date)||'—'}${mm?' ⚠️':''}</div></div>
 <div class="drow"><div class="dlbl">Submitted</div><div class="dval">${fmtDate(e.entry_date)||'—'}</div></div>
-<div class="drow"><div class="dlbl">Comments</div><div class="dval">${esc(e.comments)||'—'}</div></div>
+<div class="drow"><div class="dlbl">Aus Reo Comments</div><div class="dval">${chunksToHtml(parseChunks(e.aus_reo_comment))}</div></div>
+<div class="drow"><div class="dlbl">DBCC Comments</div><div class="dval">${chunksToHtml(parseChunks(e.dbcc_comment))}</div></div>
 <div class="drow"><div class="dlbl">Schedule File</div><div class="dval">${e.file_url?`<a class="att-link" href="${e.file_url}" target="_blank">📄 ${esc(e.file_name)}</a>`:'None'}</div></div>
 <div class="drow"><div class="dlbl">Markup Plans</div><div class="dval">${mp.length?mp.map(m=>`<a class="att-link markup-link" href="${m.url}" target="_blank">📐 ${esc(m.name)}</a>`).join(' '):'None'}</div></div>
 <div style="margin-top:20px;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
@@ -1001,7 +1126,7 @@ function openEditEntry(id){const e=entries.find(x=>x.id===id);if(!e)return;
 <div class="row2"><div class="fg"><label>Ordered Delivery Date</label><input type="date" id="ed_ourD" value="${e.our_delivery_date||''}"></div><div class="fg"><label>Supplier Delivery Date</label><input type="date" id="ed_supD" value="${e.supplier_delivery_date||''}"></div></div>
 <div class="row2"><div class="fg"><label>Drawing Reference</label><input type="text" id="ed_draw" value="${esc(e.drawing_reference||'')}"></div><div class="fg"><label>Weight (T)</label><input type="number" step="0.001" id="ed_wt" value="${e.total_weight||''}" style="font-family:'JetBrains Mono',monospace"></div></div>
 <div class="fg"><label>Split Reference</label><input type="text" id="ed_split" value="${esc(e.split_reference||'')}"></div>
-<div class="fg"><label>Comments</label><textarea id="ed_comm">${esc(e.comments||'')}</textarea></div>
+<div class="info-msg" style="margin-top:8px;font-size:12px;background:#F0F5FF;border-color:#C7D2FE;color:var(--info)">💡 Comments are now edited directly on the dashboard — click the Aus Reo Comments or DBCC Comments cell on the row.</div>
 ${dangerSection}
 <div id="edErr"></div>
 <div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-sec btn-sm" onclick="closeOv('editOv')">Cancel</button><button class="btn btn-sm" onclick="saveEdit(${id})" style="width:auto">Save</button></div>`;
@@ -1054,12 +1179,12 @@ async function removeMarkupFromEdit(id,idx){
     })}
 
 async function saveEdit(id){const e=entries.find(x=>x.id===id);if(!e)return;const err=$('edErr');err.innerHTML='';
-  const nv={project:$('ed_proj').value,level:$('ed_level').value||null,area:$('ed_area').value||null,schedule:$('ed_sched').value.trim()||null,entry_date:$('ed_date').value||null,our_delivery_date:$('ed_ourD').value||null,supplier_delivery_date:$('ed_supD').value||null,drawing_reference:$('ed_draw').value.trim()||null,total_weight:$('ed_wt').value?parseFloat($('ed_wt').value):null,split_reference:$('ed_split').value.trim()||null,comments:$('ed_comm').value.trim()||null};
+  const nv={project:$('ed_proj').value,level:$('ed_level').value||null,area:$('ed_area').value||null,schedule:$('ed_sched').value.trim()||null,entry_date:$('ed_date').value||null,our_delivery_date:$('ed_ourD').value||null,supplier_delivery_date:$('ed_supD').value||null,drawing_reference:$('ed_draw').value.trim()||null,total_weight:$('ed_wt').value?parseFloat($('ed_wt').value):null,split_reference:$('ed_split').value.trim()||null};
   if(!nv.project)return err.innerHTML='<div class="error-msg">Project required</div>';
   if(e.status==='Not Ordered'&&nv.our_delivery_date)nv.status='Ordered';
   if((e.status==='Not Ordered'||e.status==='Ordered')&&nv.schedule)nv.status='Scheduled';
   if(nv.our_delivery_date&&nv.supplier_delivery_date&&nv.our_delivery_date!==nv.supplier_delivery_date&&(e.our_delivery_date!==nv.our_delivery_date||e.supplier_delivery_date!==nv.supplier_delivery_date)){nv.mismatch_resolved=false}
-  const ch=[];['project','level','area','schedule','entry_date','our_delivery_date','supplier_delivery_date','drawing_reference','total_weight','split_reference','comments'].forEach(k=>{if(String(e[k]||'')!==String(nv[k]||''))ch.push({field:k,old:e[k]||'',new:nv[k]||''})});
+  const ch=[];['project','level','area','schedule','entry_date','our_delivery_date','supplier_delivery_date','drawing_reference','total_weight','split_reference'].forEach(k=>{if(String(e[k]||'')!==String(nv[k]||''))ch.push({field:k,old:e[k]||'',new:nv[k]||''})});
   if(!ch.length){closeOv('editOv');return}
   const{error}=await sb.from('entries').update(nv).eq('id',id);if(error)return err.innerHTML='<div class="error-msg">'+esc(error.message)+'</div>';
   await sb.from('audit_log').insert(ch.map(c=>({entry_id:id,action:'UPDATE',field_changed:c.field,old_value:String(c.old),new_value:String(c.new),user_identifier:userName})));
@@ -1116,17 +1241,22 @@ async function sendEmail(id,context){
   const extra=($('em_cc_extra')&&$('em_cc_extra').value||'').trim();
   if(extra)ccEmails.push(extra);
   const cc=ccEmails.join(',');
+  // IMPORTANT: log the audit entry BEFORE opening the mailto URL.
+  // Some browsers (mobile especially) suspend or unfocus the page when mailto: triggers
+  // the OS email handler, which can drop the audit log insert if it runs after.
+  // Doing the insert first guarantees the notification timeline gets the entry.
+  const auditNote='To: '+to+(cc?' · CC: '+cc:'')+' — '+sub;
+  try{await auditLog({entry_id:id,action:'EMAIL_SENT',field_changed:context,new_value:auditNote})}
+  catch(e){console.warn('[REO] email audit log failed:',e.message)}
   let url=`mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(sub)}&body=${encodeURIComponent(body)}`;
   if(cc)url+=`&cc=${encodeURIComponent(cc)}`;
   window.open(url,'_blank');
-  const auditNote='To: '+to+(cc?' · CC: '+cc:'')+' — '+sub;
-  await auditLog({entry_id:id,action:'EMAIL_SENT',field_changed:context,new_value:auditNote});
   closeOv('emailOv')}
 
 /* ═══ EXPORT ═══ */
 function exportCSV(){const d=getFiltered();if(!d.length)return alert('No data');
-  const h=['Project','Level','Area','Split','Schedule','Drawing','Weight','Status','On Hold','Type','Ordered Delivery','Supplier Date','Submitted','Comments','File'];
-  const rows=d.map(e=>[e.project,e.level||'',e.area||'',e.split_reference||'',e.schedule||'',e.drawing_reference||'',e.total_weight||'',e.status,e.on_hold?'Yes':'',e.entry_type,e.our_delivery_date||'',e.supplier_delivery_date||'',e.entry_date||'',e.comments||'',e.file_name||'']);
+  const h=['Project','Level','Area','Split','Schedule','Drawing','Weight','Status','On Hold','Type','Ordered Delivery','Supplier Date','Submitted','Aus Reo Comments','DBCC Comments','File'];
+  const rows=d.map(e=>[e.project,e.level||'',e.area||'',e.split_reference||'',e.schedule||'',e.drawing_reference||'',e.total_weight||'',e.status,e.on_hold?'Yes':'',e.entry_type,e.our_delivery_date||'',e.supplier_delivery_date||'',e.entry_date||'',chunksToPlain(parseChunks(e.aus_reo_comment))||e.comments||'',chunksToPlain(parseChunks(e.dbcc_comment))||'',e.file_name||'']);
   const csv=[h,...rows].map(r=>r.map(c=>`"${String(c||'').replace(/"/g,'""')}"`).join(',')).join('\n');
   const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download=`reo-${today()}.csv`;a.click()}
 
