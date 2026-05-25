@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>REO Schedule Management | Debono Bros Concreting</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=b5.1">
+<link rel="stylesheet" href="styles.css?v=b5.2">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 </head>
@@ -184,7 +184,7 @@
       <div id="actionRequiredList"></div>
     </div>
     <div class="filters">
-      <select id="nfType" onchange="renderNotif()">
+      <select id="nfType" onchange="loadNotifications()">
         <option value="">All Events</option>
         <option value="SCHEDULE_UPLOAD">📎 Schedule Uploads</option>
         <option value="UPDATE">Date Changes</option>
@@ -272,6 +272,46 @@
   </div>
 </div>
 
+<div id="foremanApp" style="display:none">
+  <nav class="nav">
+    <div class="nav-brand">
+      <img src="https://selvadbcc.github.io/reo-schedule/logo.png" alt="Debono Bros" style="height:36px;width:auto">
+      <div class="nav-brand-text">
+        <span class="nav-brand-name">Debono Bros Concreting</span>
+        <span class="nav-brand-sub">Foreman View — Deliveries &amp; Installs</span>
+      </div>
+    </div>
+    <div class="nav-right">
+      <span class="user-chip" id="fmUserChip"></span>
+      <span class="badge" id="fmCountBadge">
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        <span id="fmCountNum">0</span> entries
+      </span>
+    </div>
+  </nav>
+  <div style="max-width:1100px;margin:0 auto;padding:20px 16px 60px">
+    <div class="page-header" style="padding:0 0 14px"><h1>Deliveries &amp; Installs</h1><p>Mark deliveries as delivered and record install dates. Updates sync to the office dashboard.</p></div>
+    <div class="filters">
+      <select id="fmProj" onchange="renderForeman()"><option value="">All Projects</option></select>
+      <select id="fmLevel" onchange="renderForeman()"><option value="">All Levels</option></select>
+      <select id="fmArea" onchange="renderForeman()"><option value="">All Areas</option></select>
+      <input type="text" id="fmSearch" placeholder="Search schedule..." oninput="renderForeman()">
+      <button class="btn btn-ghost btn-sm" onclick="refreshAll()">Refresh</button>
+    </div>
+    <div id="foremanList"></div>
+  </div>
+</div>
+
+<!-- Foreman name prompt -->
+<div class="overlay" id="fmNameOverlay">
+  <div class="modal" style="max-width:380px">
+    <h3 style="font-size:18px;font-weight:700;margin-bottom:6px;color:var(--gray-dk)">Welcome, Foreman</h3>
+    <p style="font-size:13px;color:var(--muted);margin-bottom:16px">Enter your name so we can track who marks deliveries and installs.</p>
+    <div class="fg"><input type="text" id="fmNameInput" placeholder="Your name" onkeydown="if(event.key==='Enter')saveForemanName()"></div>
+    <button class="btn btn-sm" onclick="saveForemanName()" style="width:100%;margin-top:8px">Continue</button>
+  </div>
+</div>
+
 <!-- MODALS -->
 <div class="overlay" id="successOv">
   <div class="modal" style="text-align:center;padding:40px 32px;max-width:420px">
@@ -297,6 +337,6 @@
 
 <div id="versionBadge" style="position:fixed;bottom:6px;right:8px;font-size:11px;color:#999;font-family:'JetBrains Mono',monospace;pointer-events:none;z-index:1;user-select:none;background:rgba(255,255,255,0.85);padding:2px 6px;border-radius:4px"></div>
 
-<script src="app.js?v=b5.1"></script>
+<script src="app.js?v=b5.2"></script>
 </body>
 </html>

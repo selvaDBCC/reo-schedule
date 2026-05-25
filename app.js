@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b5.1';
+const APP_VERSION='b5.2';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const ADMIN_PIN='7519', BUCKET='schedules';
@@ -98,6 +98,7 @@ function confirmDialog(title,msg,okLabel,okClass,onOk){
 /* ═══ INIT ═══ */
 async function waitForSupabase(maxMs=8000){const start=Date.now();while(typeof supabase==='undefined'){if(Date.now()-start>maxMs)throw new Error('Supabase client library failed to load. Check your internet connection.');await new Promise(r=>setTimeout(r,100))}}
 function isSiteViewMode(){try{return new URLSearchParams(location.search).get('view')==='site'}catch(_){return false}}
+function isForemanViewMode(){try{return new URLSearchParams(location.search).get('view')==='foreman'}catch(_){return false}}
 // Fetch version.json from the server with cache busting. If a newer version is available,
 // force-reload the page with a cache-bypass query string so the browser fetches fresh app.js
 // and index.html. This solves the "users have stale cached app.js" problem after a deploy.
@@ -159,7 +160,20 @@ async function init(){
       renderSite();
     }catch(e){$('loadingScreen').innerHTML='<div style="text-align:center;padding:20px"><h2 style="color:var(--err)">Connection Error</h2><p style="color:var(--muted);font-size:13px">'+esc(e.message)+'</p><button class="btn btn-sm" onclick="location.reload()" style="width:auto;margin-top:12px">Retry</button></div>'}
     return}
-  if(!userName){$('loadingScreen').style.display='none';$('nameOverlay').classList.add('show');return}
+  // Foreman View (site foreman — mark delivered + install dates, name required for audit)
+  if(isForemanViewMode()){
+    try{
+      await loadProjects();await loadEntries();
+      populateForemanDropdowns();subscribeForemanRealtime();
+      $('loadingScreen').style.display='none';
+      $('nameOverlay').classList.remove('show');
+      foremanName=localStorage.getItem('reo_foreman_name')||'';
+      if(!foremanName){$('fmNameOverlay').classList.add('show')}
+      else{$('fmUserChip').textContent=foremanName}
+      $('foremanApp').style.display='block';
+      renderForeman();
+    }catch(e){$('loadingScreen').innerHTML='<div style="text-align:center;padding:20px"><h2 style="color:var(--err)">Connection Error</h2><p style="color:var(--muted);font-size:13px">'+esc(e.message)+'</p><button class="btn btn-sm" onclick="location.reload()" style="width:auto;margin-top:12px">Retry</button></div>'}
+    return}
   $('nameOverlay').classList.remove('show');
   $('userChip').textContent=userName;
   try{
@@ -208,7 +222,11 @@ function peopleForProject(name){
   return people.filter(p=>p.role==='DBCC'&&ids.includes(p.id))}
 function projectsForPerson(personId){
   return assignments.filter(a=>a.person_id===personId).map(a=>a.project_name)}
-async function refreshAll(){await Promise.all([loadProjects(),loadEntries()]);populateDropdowns();renderDash()}
+async function refreshAll(){
+  await Promise.all([loadProjects(),loadEntries()]);
+  if(isForemanViewMode()){populateForemanDropdowns();renderForeman();return}
+  if(isSiteViewMode()){populateSiteDropdowns();renderSite();return}
+  populateDropdowns();renderDash()}
 function subscribeRealtime(){
   sb.channel('e').on('postgres_changes',{event:'*',schema:'public',table:'entries'},()=>loadEntries().then(()=>{renderDash();renderActionRequired()})).subscribe();
   sb.channel('p').on('postgres_changes',{event:'*',schema:'public',table:'projects'},()=>loadProjects().then(()=>{populateDropdowns();if(adminUnlocked)renderProjList()})).subscribe();
@@ -1281,7 +1299,22 @@ const DELIVERY_FIELDS=['our_delivery_date','supplier_delivery_date','status','sc
 
 async function loadNotifications(){
   const el=$('notifList');el.innerHTML='<div class="empty"><p>Loading...</p></div>';
-  const{data,error}=await sb.from('audit_log').select('*').in('action',NOTIF_ACTIONS).order('created_at',{ascending:false}).limit(500);
+  // Determine which actions to fetch based on the active type filter. When a specific filter
+  // is selected we query the DB for JUST that action type — otherwise the 500-row limit (which
+  // loads the 500 most-recent events of ALL types) would hide older emails / mismatches / bulk
+  // creates behind a wall of more-frequent UPDATE rows. This was the "filters show nothing" bug.
+  const ft=$('nfType')?$('nfType').value:'';
+  let q=sb.from('audit_log').select('*').order('created_at',{ascending:false}).limit(500);
+  if(ft==='SCHEDULE_UPLOAD'){
+    // Schedule uploads = UPDATE/schedule_attached OR CREATE (unmatched). Fetch both action types,
+    // then narrow to schedule-upload rows in renderNotif via isScheduleUpload().
+    q=sb.from('audit_log').select('*').in('action',['UPDATE','CREATE']).order('created_at',{ascending:false}).limit(500);
+  }else if(ft){
+    q=sb.from('audit_log').select('*').eq('action',ft).order('created_at',{ascending:false}).limit(500);
+  }else{
+    q=sb.from('audit_log').select('*').in('action',NOTIF_ACTIONS).order('created_at',{ascending:false}).limit(500);
+  }
+  const{data,error}=await q;
   if(error){el.innerHTML='<div class="empty"><p>Error loading notifications</p></div>';return}
   window._notifData=data;renderNotif()}
 
@@ -2205,5 +2238,115 @@ function refreshSiteLevelAreaOptions(){
   // Preserve prior selection if still valid; otherwise reset
   if(levels.includes(prevL))lSel.value=prevL;
   if(areas.includes(prevA))aSel.value=prevA}
+
+/* ═══ FOREMAN VIEW (b5.2) ═══
+   Like site view but with write access to: installed_date + Delivered status.
+   Name prompt on first open (localStorage), audit-logged as the foreman's name. */
+let foremanName='';
+function saveForemanName(){
+  const n=($('fmNameInput').value||'').trim();if(!n)return alert('Please enter your name');
+  foremanName=n;localStorage.setItem('reo_foreman_name',n);
+  $('fmNameOverlay').classList.remove('show');$('fmUserChip').textContent=n;
+}
+// Audit log helper that uses the foreman's name instead of userName.
+async function foremanAudit(o){await sb.from('audit_log').insert({...o,user_identifier:foremanName||'Foreman'})}
+function populateForemanDropdowns(){
+  const ps=$('fmProj');if(!ps)return;
+  ps.innerHTML='<option value="">All Projects</option>';
+  projects.forEach(p=>ps.appendChild(new Option(p.name,p.name)));
+  refreshForemanLevelAreaOptions();
+}
+function refreshForemanLevelAreaOptions(){
+  const fp=$('fmProj').value;const lSel=$('fmLevel'),aSel=$('fmArea');if(!lSel||!aSel)return;
+  const prevL=lSel.value,prevA=aSel.value;let levels=[],areas=[];
+  if(fp){const p=projects.find(x=>x.name===fp);if(p){levels=p.levels.slice();areas=p.areas.slice()}}
+  else{const allL=new Set(),allA=new Set();projects.forEach(p=>{p.levels.forEach(l=>allL.add(l));p.areas.forEach(a=>allA.add(a))});levels=[...allL].sort();areas=[...allA].sort()}
+  lSel.innerHTML='<option value="">All Levels</option>';levels.forEach(l=>lSel.appendChild(new Option(l,l)));
+  aSel.innerHTML='<option value="">All Areas</option>';areas.forEach(a=>aSel.appendChild(new Option(a,a)));
+  if(levels.includes(prevL))lSel.value=prevL;
+  if(areas.includes(prevA))aSel.value=prevA;
+}
+function subscribeForemanRealtime(){
+  sb.channel('fm_e').on('postgres_changes',{event:'*',schema:'public',table:'entries'},()=>loadEntries().then(()=>renderForeman())).subscribe();
+  sb.channel('fm_p').on('postgres_changes',{event:'*',schema:'public',table:'projects'},()=>loadProjects().then(()=>{populateForemanDropdowns();renderForeman()})).subscribe();
+}
+function renderForeman(){
+  const fp=$('fmProj').value,fl=$('fmLevel').value,fa=$('fmArea').value,fq=($('fmSearch').value||'').toLowerCase().trim();
+  const w=$('foremanList');
+  refreshForemanLevelAreaOptions();
+  if(!fp){
+    $('fmCountNum').textContent=0;
+    w.innerHTML='<div class="sv-empty" style="padding:80px 20px"><div style="font-size:40px;margin-bottom:10px">📁</div><p style="font-size:14px;font-weight:600;color:var(--gray-dk);margin-bottom:4px">Select a project to begin</p><p>Pick a project from the dropdown above to see deliveries.</p></div>';
+    return}
+  let list=entries.filter(e=>e.project===fp&&e.status!=='Cancelled');
+  if(fl)list=list.filter(e=>e.level===fl);
+  if(fa)list=list.filter(e=>e.area===fa);
+  if(fq)list=list.filter(e=>[e.schedule,e.project,e.level,e.area].some(f=>(f||'').toLowerCase().includes(fq)));
+  // Sort: not-delivered first by delivery date, then delivered
+  list.sort((a,b)=>{
+    const da=a.status==='Delivered'?1:0,db=b.status==='Delivered'?1:0;if(da!==db)return da-db;
+    const x=new Date(a.our_delivery_date||'2099-01-01'),y=new Date(b.our_delivery_date||'2099-01-01');return x-y});
+  $('fmCountNum').textContent=list.length;
+  if(!list.length){w.innerHTML='<div class="sv-empty"><p>No deliveries match these filters.</p></div>';return}
+  w.innerHTML='<div class="sv-list">'+list.map(e=>{
+    const delivered=e.status==='Delivered';
+    const cls=delivered?' delivered':'';
+    const statusPill=`<span class="pill ${ST_CLS[e.status]||'pill-notordered'}">${esc(e.status)}</span>`;
+    let filesHtml='';
+    if(e.file_url){filesHtml+=`<a class="sv-file-link" href="${e.file_url}" target="_blank" rel="noopener"><span class="sv-file-icon">📄</span><span class="sv-file-name">${esc(e.file_name||'Schedule')}</span></a>`}
+    const mp=e.markup_plans?JSON.parse(e.markup_plans):[];
+    mp.forEach(m=>{filesHtml+=`<a class="sv-file-link markup" href="${m.url}" target="_blank" rel="noopener"><span class="sv-file-icon">📐</span><span class="sv-file-name">${esc(m.name||'Markup plan')}</span></a>`});
+    if(!filesHtml)filesHtml='<div class="sv-no-files">No files attached yet</div>';
+    // Action row: install date + delivered toggle
+    const installHtml=e.installed_date
+      ? `<div class="fm-installed">✓ Installed: <b>${fmtDate(e.installed_date)}</b> <button class="fm-mini-btn" onclick="foremanSetInstall(${e.id})">Change</button></div>`
+      : `<button class="fm-action-btn install" onclick="foremanSetInstall(${e.id})">📌 Set Install Date</button>`;
+    const deliveredHtml=delivered
+      ? `<button class="fm-action-btn undo" onclick="foremanUndoDelivered(${e.id})">↩ Undo Delivered</button>`
+      : `<button class="fm-action-btn deliver" onclick="foremanMarkDelivered(${e.id})">✓ Mark Delivered</button>`;
+    return `<div class="sv-card${cls}">
+      <div class="sv-card-head">
+        <div style="flex:1;min-width:0">
+          <div class="sv-proj">${esc(e.project)}</div>
+          <div class="sv-loc">${esc(e.level||'—')} / ${esc(e.area||'—')}${e.split_reference?' ('+esc(e.split_reference)+')':''}</div>
+        </div>
+        ${e.schedule?`<span class="sv-sched">${esc(e.schedule)}</span>`:''}
+      </div>
+      <div class="sv-date">📅 Delivery: <b>${fmtDate(e.our_delivery_date)||'Not set'}</b> · ${statusPill}</div>
+      <div class="sv-files">${filesHtml}</div>
+      <div class="fm-actions">${deliveredHtml}${installHtml}</div>
+    </div>`}).join('')+'</div>'}
+
+async function foremanMarkDelivered(id){
+  const e=entries.find(x=>x.id===id);if(!e)return;
+  await sb.from('entries').update({status:'Delivered'}).eq('id',id);
+  await foremanAudit({entry_id:id,action:'UPDATE',field_changed:'status',old_value:e.status,new_value:'Delivered'});
+  await loadEntries();renderForeman();
+}
+async function foremanUndoDelivered(id){
+  const e=entries.find(x=>x.id===id);if(!e)return;
+  // Revert to a sensible prior status: Scheduled if it has a schedule, else Ordered/Not Ordered.
+  const revert=e.schedule?'Scheduled':(e.our_delivery_date?'Ordered':'Not Ordered');
+  await sb.from('entries').update({status:revert}).eq('id',id);
+  await foremanAudit({entry_id:id,action:'UPDATE',field_changed:'status',old_value:'Delivered',new_value:revert+' (undo)'});
+  await loadEntries();renderForeman();
+}
+function foremanSetInstall(id){
+  const e=entries.find(x=>x.id===id);if(!e)return;
+  $('weightModal').innerHTML=`<h3>Install Date<button class="modal-close" onclick="closeOv('weightOv')">&times;</button></h3><p style="font-size:12px;color:var(--muted);margin-bottom:10px">${esc(e.project)} / ${esc(e.level||'—')} / ${esc(e.area||'—')}${e.schedule?' · '+esc(e.schedule):''}</p><div class="fg"><label style="display:block;margin-bottom:4px">Date installed on site</label><input type="date" id="fmDateInp" value="${e.installed_date||''}"></div><div style="display:flex;gap:8px;justify-content:space-between;margin-top:14px"><button class="btn btn-err btn-sm" onclick="foremanClearInstall(${id})" style="width:auto" ${e.installed_date?'':'disabled'}>Clear</button><div style="display:flex;gap:8px"><button class="btn btn-sec btn-sm" onclick="closeOv('weightOv')">Cancel</button><button class="btn btn-sm" onclick="foremanSaveInstall(${id})" style="width:auto">Save</button></div></div>`;
+  $('weightOv').classList.add('show');
+}
+async function foremanSaveInstall(id){
+  const v=$('fmDateInp').value,nv=v||null;const e=entries.find(x=>x.id===id);
+  await sb.from('entries').update({installed_date:nv}).eq('id',id);
+  await foremanAudit({entry_id:id,action:'UPDATE',field_changed:'installed_date',old_value:String(e.installed_date||''),new_value:String(nv||'')});
+  closeOv('weightOv');await loadEntries();renderForeman();
+}
+async function foremanClearInstall(id){
+  const e=entries.find(x=>x.id===id);
+  await sb.from('entries').update({installed_date:null}).eq('id',id);
+  await foremanAudit({entry_id:id,action:'UPDATE',field_changed:'installed_date',old_value:String(e.installed_date||''),new_value:''});
+  closeOv('weightOv');await loadEntries();renderForeman();
+}
 
 init();
