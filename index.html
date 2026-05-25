@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>REO Schedule Management | Debono Bros Concreting</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=b5.2">
+<link rel="stylesheet" href="styles.css?v=b5.3">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 </head>
@@ -130,6 +130,24 @@
       <div class="sec"><div class="sec-label">② Details</div>
         <div class="fg"><label>Description <span class="req">*</span></label><textarea id="inpLooseDesc" placeholder="Describe the loose bar order..."></textarea></div>
         <div class="fg"><label>Submission Date <span class="req">*</span></label><input type="date" id="inpLooseDate"></div>
+      </div>
+    </div>
+    <div id="multiUploadSection" style="display:none">
+      <div class="sec">
+        <div class="sec-label">⊕ Multi-Upload — Split Delivery</div>
+        <div id="multiUploadHeader" style="font-size:12px;color:var(--muted);margin-bottom:12px"></div>
+        <div id="multiUploadList"></div>
+        <div class="fzone" id="multiDropZone" onclick="document.getElementById('multiFileInp').click()" style="margin-top:10px">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#7A7A7A" stroke-width="1.5" style="margin-bottom:8px"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          <p><strong>Add schedule PDFs</strong> — one per split / delivery</p>
+          <p style="font-size:11px;margin-top:4px;color:#aaa">Each PDF becomes its own row on the dashboard</p>
+          <input type="file" id="multiFileInp" accept=".pdf" multiple onchange="addMultiFiles(this.files)">
+        </div>
+        <div id="multiUploadErr"></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+          <button class="btn btn-sec btn-sm" onclick="cancelMultiUpload()" style="width:auto">Cancel</button>
+          <button class="btn btn-sm" id="multiSubmitBtn" onclick="submitMultiUpload()" style="width:auto" disabled>Submit All</button>
+        </div>
       </div>
     </div>
     <div id="commentsSection" style="display:none">
@@ -337,6 +355,6 @@
 
 <div id="versionBadge" style="position:fixed;bottom:6px;right:8px;font-size:11px;color:#999;font-family:'JetBrains Mono',monospace;pointer-events:none;z-index:1;user-select:none;background:rgba(255,255,255,0.85);padding:2px 6px;border-radius:4px"></div>
 
-<script src="app.js?v=b5.2"></script>
+<script src="app.js?v=b5.3"></script>
 </body>
 </html>

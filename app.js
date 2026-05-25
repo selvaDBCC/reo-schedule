@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b5.2';
+const APP_VERSION='b5.3';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const ADMIN_PIN='7519', BUCKET='schedules';
@@ -19,6 +19,8 @@ function initSupabase(){
   sb=supabase.createClient(SUPA_URL,SUPA_KEY);
   return sb}
 let projects=[],entries=[],emailContacts=[],pendingFile=null,pendingMarkups=[],editingId=null,adminUnlocked=false;
+// b5.3 multi-upload: each item = {id, file, splitRef, supDate, schedule, weight, drawing, extracted, status}
+let multiUploadItems=[],multiUploadSeq=0;
 let sortCol="created_at",sortAsc=false,userName=localStorage.getItem('reo_user_name')||'';
 let currentEntryType='scheduled',selectedOrderId=null,selectedIds=new Set(),dpSelected={},pdfjsLoaded=false;
 
@@ -255,6 +257,7 @@ function setEntryType(t){
   $('uploadSection').style.display=t==='loose'?'block':'none';
   $('scheduleSection').style.display='none';
   $('markupSection').style.display='none';
+  const mu=$('multiUploadSection');if(mu)mu.style.display='none';multiUploadItems=[];
   $('commentsSection').style.display=t==='loose'?'block':'none';
   $('submitBtn').style.display=t==='loose'?'block':'none';
   if(t==='loose')$('uploadStepLabel').textContent='③ Upload (Optional)';
@@ -278,8 +281,12 @@ function onLevelAreaChange(){
   const sec=$('orderListSection'),content=$('orderListContent');
   if(matching.length===0){
     sec.style.display='block';
-    content.innerHTML=`<div class="warn-msg" style="margin-top:0">No orders found.${level&&area?' You can still submit — it will be flagged as <b>Unmatched</b>.':' Select level and area to narrow down.'}</div>`;
-    if(level&&area){$('uploadSection').style.display='block';$('uploadStepLabel').textContent='② Upload Schedule';$('detailsStepLabel').textContent='③ Schedule Details';$('commentsSection').style.display='block';$('submitBtn').style.display='block';selectedOrderId=null}
+    let h=`<div class="warn-msg" style="margin-top:0">No orders found.${level&&area?' You can still submit — it will be flagged as <b>Unmatched</b>.':' Select level and area to narrow down.'}</div>`;
+    if(level&&area){
+      // Offer both single and multi-upload even when no placeholder exists yet.
+      h+=`<div style="margin-top:14px;padding:12px 14px;background:#FFF8E7;border:1px solid #F0D785;border-radius:8px"><div style="font-size:12px;color:var(--gray-dk);margin-bottom:10px">Uploading one schedule, or splitting this delivery into several?</div><div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-sec btn-sm" onclick="startUnmatchedEntry()" style="width:auto">Single upload</button><button class="btn btn-sm" onclick="startMultiUpload()" style="width:auto;background:var(--accent);color:#fff">⊕ Multi-upload (split delivery)</button></div></div>`;
+    }
+    content.innerHTML=h;
     return}
   sec.style.display='block';
   let html='<p style="font-size:12px;color:var(--muted);margin-bottom:10px">Orders for <b>'+esc(proj)+'</b>'+(level?' / '+esc(level):'')+(area?' / '+esc(area):'')+':</p>';
@@ -313,7 +320,7 @@ function onLevelAreaChange(){
         <input type="text" id="unmatchedSplitCustom" placeholder="e.g. Top Reo, Bottom reo, Part 1 — leave blank if not split" style="width:100%;padding:7px 9px;border:1px solid var(--border);border-radius:6px;font-size:12px">
       </div>`;
     }
-    html+=`<div style="margin-top:14px;padding:12px 14px;background:#FFF8E7;border:1px solid #F0D785;border-radius:8px"><div style="font-size:12px;color:var(--gray-dk);margin-bottom:10px">⚠ ${hint}</div>${splitPicker}<button class="btn btn-sec btn-sm" onclick="startUnmatchedEntry()" style="width:auto">Create new unmatched entry</button></div>`;
+    html+=`<div style="margin-top:14px;padding:12px 14px;background:#FFF8E7;border:1px solid #F0D785;border-radius:8px"><div style="font-size:12px;color:var(--gray-dk);margin-bottom:10px">⚠ ${hint}</div>${splitPicker}<div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn btn-sec btn-sm" onclick="startUnmatchedEntry()" style="width:auto">Create new unmatched entry</button><button class="btn btn-sm" onclick="startMultiUpload()" style="width:auto;background:var(--accent);color:#fff">⊕ Multi-upload (split delivery)</button></div></div>`;
   }
   content.innerHTML=html}
 
@@ -353,6 +360,171 @@ function startUnmatchedEntry(){
   setTimeout(()=>{const u=$('uploadSection');if(u)u.scrollIntoView({behavior:'smooth',block:'center'})},80);
 }
 
+/* ═══ MULTI-UPLOAD (b5.3) — split deliveries ═══
+   Pick Project/Level/Area once, add multiple schedule PDFs. Each PDF:
+     - gets its own extraction
+     - gets its own split reference + supplier delivery date
+     - becomes its own dashboard row
+   The FIRST split fills the oldest empty placeholder for this Level/Area (if one exists);
+   remaining splits create new unmatched rows. */
+function startMultiUpload(){
+  const proj=$('selProj').value,level=$('selLevel').value,area=$('selArea').value;
+  if(!proj||!level||!area){alert('Select project, level and area first');return}
+  // Hide the single-entry sections, show the multi-upload panel.
+  ['orderListSection','uploadSection','scheduleSection','markupSection','commentsSection','submitBtn'].forEach(id=>{const el=$(id);if(el)el.style.display='none'});
+  multiUploadItems=[];multiUploadSeq=0;
+  $('multiUploadSection').style.display='block';
+  // Count empty placeholders for context.
+  const emptyPlaceholders=entries.filter(e=>e.project===proj&&e.level===level&&e.area===area&&!e.schedule&&e.status!=='Cancelled'&&e.status!=='Delivered');
+  $('multiUploadHeader').innerHTML=`Splitting delivery for <b>${esc(proj)}</b> / ${esc(level)} / ${esc(area)}.`
+    +(emptyPlaceholders.length?` The first PDF will fill the existing empty placeholder${emptyPlaceholders.length>1?' (oldest)':''}; the rest create new rows.`:` Each PDF creates a new row (flagged Unmatched).`);
+  renderMultiUploadList();
+  setTimeout(()=>{const u=$('multiUploadSection');if(u)u.scrollIntoView({behavior:'smooth',block:'start'})},80);
+}
+
+function cancelMultiUpload(){
+  multiUploadItems=[];
+  $('multiUploadSection').style.display='none';
+  $('multiUploadErr').innerHTML='';
+  onLevelAreaChange();// restore the order list view
+}
+
+async function addMultiFiles(fileList){
+  const files=[...fileList].filter(f=>f.name.toLowerCase().endsWith('.pdf'));
+  $('multiFileInp').value='';
+  if(!files.length){alert('Please add PDF files only');return}
+  for(const file of files){
+    const item={id:++multiUploadSeq,file,splitRef:'',supDate:'',schedule:'',weight:'',drawing:'',extracted:null,status:'extracting'};
+    multiUploadItems.push(item);
+    renderMultiUploadList();
+    // Run extraction for this file (async, updates the row when done).
+    extractMultiItem(item);
+  }
+}
+
+async function extractMultiItem(item){
+  try{
+    const ext=await doPdfExtract(item.file);
+    if(ext._needsOcr){
+      item.status='rejected';
+      renderMultiUploadList();
+      return;
+    }
+    item.extracted=ext;
+    item.status='ready';
+    // Pre-fill fields from extraction.
+    if(ext.ctrlCode)item.schedule=ext.ctrlCode;
+    if(ext.weight)item.weight=ext.weight;
+    if(ext.drawing)item.drawing=ext.drawing;
+    if(ext.shipDate){const iso=parseAusDate(ext.shipDate);if(iso)item.supDate=iso}
+    renderMultiUploadList();
+  }catch(e){
+    item.status='error';item.errorMsg=e.message||'extraction failed';
+    renderMultiUploadList();
+  }
+}
+
+function updateMultiItem(id,field,value){
+  const item=multiUploadItems.find(x=>x.id===id);if(!item)return;
+  item[field]=value;
+  // Don't re-render on every keystroke — just update the submit button state.
+  refreshMultiSubmitState();
+}
+
+function removeMultiItem(id){
+  multiUploadItems=multiUploadItems.filter(x=>x.id!==id);
+  renderMultiUploadList();
+}
+
+function refreshMultiSubmitState(){
+  const btn=$('multiSubmitBtn');if(!btn)return;
+  const ready=multiUploadItems.filter(i=>i.status==='ready');
+  // Submit enabled only if at least one ready item and none still extracting.
+  const anyExtracting=multiUploadItems.some(i=>i.status==='extracting');
+  btn.disabled=ready.length===0||anyExtracting;
+  btn.textContent=ready.length>1?`Submit All (${ready.length})`:'Submit';
+}
+
+function renderMultiUploadList(){
+  const w=$('multiUploadList');if(!w)return;
+  if(!multiUploadItems.length){w.innerHTML='<div style="font-size:12px;color:var(--muted);font-style:italic;padding:8px 0">No files added yet. Use the box below to add schedule PDFs.</div>';refreshMultiSubmitState();return}
+  w.innerHTML=multiUploadItems.map((item,idx)=>{
+    let statusBadge='';
+    if(item.status==='extracting')statusBadge='<span style="color:var(--accent-dk);font-size:11px">⏳ Reading PDF…</span>';
+    else if(item.status==='ready')statusBadge='<span style="color:var(--success);font-size:11px">✓ Ready</span>';
+    else if(item.status==='rejected')statusBadge='<span style="color:var(--err);font-size:11px">⚠ Image PDF — not usable</span>';
+    else if(item.status==='error')statusBadge='<span style="color:var(--err);font-size:11px">Extraction failed</span>';
+    const disabled=item.status==='rejected'?'opacity:.55':'';
+    const fields=item.status==='rejected'
+      ? `<div style="font-size:11px;color:var(--err);margin-top:6px">This PDF is an image (Print-to-PDF). Re-export using Save As PDF / Export as PDF and add it again.</div>`
+      : `<div class="row2" style="margin-top:8px">
+          <div class="fg" style="margin:0"><label style="font-size:11px">Schedule Number</label><input type="text" value="${esc(item.schedule)}" oninput="updateMultiItem(${item.id},'schedule',this.value)" style="font-family:'JetBrains Mono',monospace;font-size:12px;padding:6px 8px"></div>
+          <div class="fg" style="margin:0"><label style="font-size:11px">Split Reference</label><input type="text" value="${esc(item.splitRef)}" oninput="updateMultiItem(${item.id},'splitRef',this.value)" placeholder="e.g. Part ${idx+1}" style="font-size:12px;padding:6px 8px"></div>
+        </div>
+        <div class="row2" style="margin-top:6px">
+          <div class="fg" style="margin:0"><label style="font-size:11px">Supplier Delivery Date</label><input type="date" value="${esc(item.supDate)}" oninput="updateMultiItem(${item.id},'supDate',this.value)" style="font-size:12px;padding:6px 8px"></div>
+          <div class="fg" style="margin:0"><label style="font-size:11px">Weight (T)</label><input type="number" step="0.001" value="${esc(item.weight)}" oninput="updateMultiItem(${item.id},'weight',this.value)" style="font-family:'JetBrains Mono',monospace;font-size:12px;padding:6px 8px"></div>
+        </div>`;
+    return `<div class="sel-item" style="${disabled}">
+      <div class="sel-item-header">
+        <div class="sel-item-title" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60%">📄 ${esc(item.file.name)}</div>
+        <div style="display:flex;align-items:center;gap:10px">${statusBadge}<button onclick="removeMultiItem(${item.id})" style="background:none;border:none;color:var(--err);cursor:pointer;font-size:16px;line-height:1">×</button></div>
+      </div>
+      ${fields}
+    </div>`;
+  }).join('');
+  refreshMultiSubmitState();
+}
+
+async function submitMultiUpload(){
+  const err=$('multiUploadErr');err.innerHTML='';
+  const proj=$('selProj').value,level=$('selLevel').value,area=$('selArea').value;
+  const ed=today();// submission date = today for all
+  const ready=multiUploadItems.filter(i=>i.status==='ready');
+  if(!ready.length){err.innerHTML='<div class="error-msg">No ready files to submit.</div>';return}
+  // Validate each ready item has a schedule number.
+  for(const item of ready){
+    if(!item.schedule.trim()){err.innerHTML='<div class="error-msg">Every schedule needs a Schedule Number. Check '+esc(item.file.name)+'.</div>';return}
+  }
+  const btn=$('multiSubmitBtn');btn.disabled=true;btn.textContent='Uploading…';
+  try{
+    // Find empty placeholders for this Level/Area — oldest first (by created_at ascending).
+    let emptyPlaceholders=entries.filter(e=>e.project===proj&&e.level===level&&e.area===area&&!e.schedule&&e.status!=='Cancelled'&&e.status!=='Delivered')
+      .sort((a,b)=>new Date(a.created_at||0)-new Date(b.created_at||0));
+    let placeholderIdx=0;
+    let created=0;
+    for(const item of ready){
+      const furl=await uploadFile(item.file,proj,level,area);
+      const fname=item.file.name;
+      const ex=item.extracted||{};
+      const breakdown={bar_weight:ex.barWeight!=null?ex.barWeight:null,mesh_sqm:ex.meshSqm!=null?ex.meshSqm:null,trench_mesh_lm:ex.trenchLm!=null?ex.trenchLm:null,extraction_method:ex._extractionMethod||null};
+      const wt=item.weight?parseFloat(item.weight):null;
+      const supD=item.supDate||null;
+      const splitRef=item.splitRef.trim()||null;
+      if(placeholderIdx<emptyPlaceholders.length){
+        // Fill the existing empty placeholder.
+        const ph=emptyPlaceholders[placeholderIdx];placeholderIdx++;
+        const up={schedule:item.schedule.trim(),entry_date:ed,supplier_delivery_date:supD,file_url:furl,file_name:fname,status:'Scheduled',total_weight:wt,drawing_reference:item.drawing.trim()||null,split_reference:splitRef||ph.split_reference,...breakdown};
+        if(ph.our_delivery_date&&supD&&ph.our_delivery_date!==supD)up.mismatch_resolved=false;
+        const{error}=await sb.from('entries').update(up).eq('id',ph.id);if(error)throw error;
+        await auditLog({entry_id:ph.id,action:'UPDATE',field_changed:'schedule_attached',new_value:`${item.schedule.trim()} (${fname}) [split upload]`});
+      }else{
+        // Create a new unmatched row.
+        const{data,error}=await sb.from('entries').insert({project:proj,level,area,schedule:item.schedule.trim(),status:'Scheduled',entry_date:ed,file_url:furl,file_name:fname,entry_type:'scheduled',total_weight:wt,drawing_reference:item.drawing.trim()||null,supplier_delivery_date:supD,split_reference:splitRef,unmatched:true,...breakdown}).select().single();
+        if(error)throw error;
+        await auditLog({entry_id:data.id,action:'CREATE',new_value:`UNMATCHED: ${proj}/${level}${splitRef?' ('+splitRef+')':''}/${item.schedule.trim()} [split upload]`});
+      }
+      created++;
+    }
+    multiUploadItems=[];
+    $('multiUploadSection').style.display='none';
+    $('successOv').classList.add('show');
+  }catch(e){
+    err.innerHTML='<div class="error-msg">'+esc(e.message)+'</div>';
+  }
+  btn.disabled=false;refreshMultiSubmitState();
+}
+
 function selectOrder(id){
   selectedOrderId=id;onLevelAreaChange();
   $('uploadSection').style.display='block';$('uploadStepLabel').textContent='③ Upload Schedule';
@@ -369,7 +541,11 @@ function setupDragDrop(){
   const mz=$('markupDropZone');if(mz){
     ['dragenter','dragover'].forEach(ev=>mz.addEventListener(ev,e=>{e.preventDefault();mz.classList.add('dragover')}));
     ['dragleave','drop'].forEach(ev=>mz.addEventListener(ev,e=>{e.preventDefault();mz.classList.remove('dragover')}));
-    mz.addEventListener('drop',e=>{if(e.dataTransfer.files.length)addMarkups(e.dataTransfer.files)})}}
+    mz.addEventListener('drop',e=>{if(e.dataTransfer.files.length)addMarkups(e.dataTransfer.files)})}
+  const muz=$('multiDropZone');if(muz){
+    ['dragenter','dragover'].forEach(ev=>muz.addEventListener(ev,e=>{e.preventDefault();muz.classList.add('dragover')}));
+    ['dragleave','drop'].forEach(ev=>muz.addEventListener(ev,e=>{e.preventDefault();muz.classList.remove('dragover')}));
+    muz.addEventListener('drop',e=>{if(e.dataTransfer.files.length)addMultiFiles(e.dataTransfer.files)})}}
 
 function setFile(fl){
   if(!fl.length)return;pendingFile=fl[0];renderFile();$('fileInp').value='';
@@ -778,6 +954,7 @@ function resetForm(){
   $('selProj').value='';$('inpSched').value='';$('inpDate').value=today();$('inpLooseDate').value=today();
   $('inpLooseDesc').value='';$('inpComm').value='';$('inpSupDate').value='';$('inpWeight').value='';
   $('inpDrawing').value='';pendingFile=null;pendingMarkups=[];selectedOrderId=null;
+  multiUploadItems=[];const mu=$('multiUploadSection');if(mu)mu.style.display='none';
   $('flist').innerHTML='';$('mkList').innerHTML='';$('formErr').innerHTML='';$('formInfo').innerHTML='';$('extractInfo').innerHTML='';
   onProjChange();setEntryType('scheduled')}
 
