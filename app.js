@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b5.3.2';
+const APP_VERSION='b5.4';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const ADMIN_PIN='7519', BUCKET='schedules';
@@ -760,12 +760,70 @@ function parseReoText(pageOneText, allText){
     }
     if(bw!=null)e.barWeight=bw;
   }
+  // ── BAR WEIGHT FALLBACK (no BAR SUMMARY — small / loose orders) ──
+  // Small Aus Reo orders have NO "BAR SUMMARY" block — all line items sit under "Bar Mark ...
+  // Tonne". Sum ONLY genuine reinforcing-bar line items and EXCLUDE accessories: bar chairs,
+  // tie wire, spacers, joining tape, plastic membrane, delivery charges, etc. These accessories
+  // are NOT reinforcement and must never count toward steel weight.
+  if(e.barWeight==null){
+    let barSum=0,barFound=false;
+    const liRe=/\b([A-Z]{1,4}\d+[A-Z0-9]*)\s+(\d+(?:\.\d+)?)\s+Each\s+([^\n]*?)\s+([\d.]+)\s*(?:\n|$)/gi;
+    let li;
+    while((li=liRe.exec(a))!==null){
+      const code=li[1].toUpperCase(),desc=(li[3]||''),tonne=parseReoNum(li[4]);
+      if(isNaN(tonne)||tonne<=0)continue;
+      // Skip mesh / trench (counted separately).
+      if(/^(SL|RL)\d/.test(code))continue;
+      if(/TM\d/.test(code))continue;
+      // Skip accessories by DESCRIPTION — bar chair, tie wire, spacer, tape, membrane, film,
+      // delivery, cartage, grease, stool, trestle, chair, clip. (Bar Chair contains "Bar" so we
+      // must check the accessory words, not just look for "Bar".)
+      if(/chair|tie\s*wire|tie-wire|spacer|joining\s*tape|tape|membrane|film|plastic|delivery|cartage|grease|stool|trestle|\bclip\b|belt\s*pack/i.test(desc))continue;
+      // Skip accessory by CODE prefix: SOG/PTBC/BC (bar chairs), TW (tie wire), DEL (delivery),
+      // PBFB / PBF (plastic film/membrane), SPC (spacer).
+      if(/^(SOG|PTBC|BC|TW|DEL|PBFB|PBF|SPC|JT)\d*/i.test(code))continue;
+      // Only count if it's a genuine reinforcing-bar designation: N / Y / R / D500N etc.
+      // Australian bar codes: N12, N16, N20, Y12, R10, plus bar-mark codes whose DESCRIPTION
+      // explicitly says "Bar D500" or "Deformed" / "Round bar".
+      const isBarCode=/^[NYR]\d/.test(code);
+      const isBarDesc=/\bBar\s+D?500|deformed|round\s*bar|\bN\d{2}\b/i.test(desc)&&!/chair/i.test(desc);
+      if(isBarCode||isBarDesc){barSum+=tonne;barFound=true}
+    }
+    if(barFound)e.barWeight=Math.round(barSum*1000)/1000;
+  }
   // ── MESH (SL/RL codes) sum of qty × width × length ──
+  // The PDF text layer often splits a mesh line across rows, e.g.:
+  //   "Square Mesh SL92 effective area"   ← description first
+  //   "SL92 2 Each 0.132"                 ← code + qty + tonne
+  //   "5.8x2.4m"                          ← dimensions on their own line
+  // So we can't rely on a single-line regex. Strategy: find each mesh code occurrence with its
+  // qty, then look for the "<num>x<num>m" effective-area dimensions anywhere nearby (within a
+  // small window of text around that code), and multiply qty × w × l.
   let meshSqm=0,meshFound=false;
-  const meshRe=/\b((?:SL|RL)\d+[A-Z]*)\s+([\d.,]+)\s+Each\s+(?:Square|Rectangular|Reinforcing)?\s*Mesh\s+(?:(?:SL|RL)\d+[A-Z]*\s+)?effective\s*area\s*([\d.,]+)\s*[xX]\s*([\d.,]+)\s*m/gi;
-  let mm;while((mm=meshRe.exec(a))!==null){
+  // First try the original single-sequence regex (works when layout isn't split).
+  const meshReInline=/\b((?:SL|RL)\d+[A-Z]*)\s+([\d.,]+)\s+Each\s+(?:Square|Rectangular|Reinforcing)?\s*Mesh\s+(?:(?:SL|RL)\d+[A-Z]*\s+)?effective\s*area\s*([\d.,]+)\s*[xX]\s*([\d.,]+)\s*m/gi;
+  let mm,inlineMatched=false;
+  while((mm=meshReInline.exec(a))!==null){
     const qty=parseReoInt(mm[2]),w=parseReoDim(mm[3]),l=parseReoDim(mm[4]);
-    if(!isNaN(qty)&&!isNaN(w)&&!isNaN(l)){meshSqm+=qty*w*l;meshFound=true}}
+    if(!isNaN(qty)&&!isNaN(w)&&!isNaN(l)){meshSqm+=qty*w*l;meshFound=true;inlineMatched=true}}
+  // Fallback for split layout: find "<code> <qty> Each" rows, then a "<w>x<l>m" dimension nearby.
+  if(!inlineMatched){
+    const codeRe=/\b((?:SL|RL)\d+[A-Z]*)\s+(\d+)\s+Each/gi;
+    let cm;
+    while((cm=codeRe.exec(a))!==null){
+      const qty=parseReoInt(cm[2]);
+      // Search a window around this match for effective-area dimensions like "5.8x2.4m".
+      const winStart=Math.max(0,cm.index-80);
+      const win=a.slice(winStart,cm.index+120);
+      // Only treat as mesh if "Mesh" or "effective area" appears in the window (avoid false hits).
+      if(!/mesh|effective\s*area/i.test(win))continue;
+      const dim=win.match(/([\d.]+)\s*[xX]\s*([\d.]+)\s*m\b/);
+      if(dim){
+        const w=parseReoDim(dim[1]),l=parseReoDim(dim[2]);
+        if(!isNaN(qty)&&!isNaN(w)&&!isNaN(l)){meshSqm+=qty*w*l;meshFound=true}
+      }
+    }
+  }
   // ── TRENCH MESH (TM codes + "Trench Mesh" text) sum of qty × longer dimension ──
   let trenchLm=0,trenchFound=false;
   const trenchRe=/\b([A-Z]*\d*TM\d+[A-Z]*)\s+([\d.,]+)\s+Each\s+Trench\s*Mesh\s+(?:\d+mm\s+)?([\d.,]+)\s*[xX]\s*([\d.,]+)\s*m/gi;
@@ -908,9 +966,15 @@ async function submitEntry(){
       if(!desc)throw new Error('Enter a description');if(!ed)throw new Error('Select a date');
       let furl=null,fname=null;
       if(pendingFile){info.innerHTML='<div class="info-msg">Uploading...</div>';furl=await uploadFile(pendingFile,project,level,area);fname=pendingFile.name}
-      const{data,error}=await sb.from('entries').insert({project,level:level||null,area:area||null,schedule:null,status:'Not Ordered',entry_date:ed,comments:desc+(comments?'\n'+comments:''),file_url:furl,file_name:fname,entry_type:'loose'}).select().single();
+      // Ad Hoc orders are often real schedules (small/loose deliveries). If a PDF was uploaded and
+      // extracted, save the schedule code + weight breakdown so Steel Fixers picks them up too.
+      const ex=pendingFile&&pendingFile._extracted||{};
+      const looseSchedule=ex.ctrlCode||null;
+      const looseWeight=ex.weight!=null?ex.weight:null;
+      const breakdown={bar_weight:ex.barWeight!=null?ex.barWeight:null,mesh_sqm:ex.meshSqm!=null?ex.meshSqm:null,trench_mesh_lm:ex.trenchLm!=null?ex.trenchLm:null,extraction_method:ex._extractionMethod||null};
+      const{data,error}=await sb.from('entries').insert({project,level:level||null,area:area||null,schedule:looseSchedule,status:'Not Ordered',entry_date:ed,comments:desc+(comments?'\n'+comments:''),file_url:furl,file_name:fname,entry_type:'loose',total_weight:looseWeight,drawing_reference:ex.drawing||null,...breakdown}).select().single();
       if(error)throw error;
-      await auditLog({entry_id:data.id,action:'CREATE',new_value:`LOOSE: ${project}/${level||'-'}/${area||'-'}`});
+      await auditLog({entry_id:data.id,action:'CREATE',new_value:`LOOSE: ${project}/${level||'-'}/${area||'-'}${looseSchedule?' ('+looseSchedule+')':''}`});
     }else{
       const schedule=$('inpSched').value.trim(),ed=$('inpDate').value,supD=$('inpSupDate').value||null;
       const weight=$('inpWeight').value||null,drawing=$('inpDrawing').value.trim()||null;
