@@ -647,9 +647,25 @@ function parseReoText(pageOneText, allText){
   // Ship Date — strict
   m=t.match(/Ship\s*Date:\s*(\d{1,2}\/\d{1,2}\/\d{2,4})/i);if(m)e.shipDate=m[1].trim();
   m=t.match(/Drawing:\s*([A-Za-z0-9\-\s]+?)(?=\s{2,}|Bar|Desc|$)/i);if(m)e.drawing=m[1].trim();
-  // Weight — "Wt: 10,014 T" then fallback "Total Weight: X Tonne"
-  m=t.match(/Wt:\s*([\d.,]+)\s*T/i);if(m){const v=parseReoNum(m[1]);if(!isNaN(v))e.weight=v}
-  if(e.weight==null){m=a.match(/Total\s*Weight:\s*([\d.,]+)\s*Tonne/i);if(m){const v=parseReoNum(m[1]);if(!isNaN(v))e.weight=v}}
+  // Weight — primary source is the header "Wt: X T". The value sometimes sits on the line
+  // AFTER the "Wt:" label (e.g. "Wt:\n...Jason Mahony 8,977 T"), so we also look at the
+  // header block for a "<num> T" near a Sales Rep / Wt context.
+  m=t.match(/Wt:\s*([\d.,]+)\s*T\b/i);
+  if(m){const v=parseReoNum(m[1]);if(!isNaN(v))e.weight=v}
+  if(e.weight==null){
+    // "Total Weight: X Tonne" — but a schedule can contain misleading SUB-totals such as
+    // "End varying set - Total Weight: 0,137 Tonne" in the body. The TRUE grand total is the
+    // largest "Total Weight" value on the page, so collect them all and take the max.
+    const totals=[];
+    const twRe=/Total\s*Weight:\s*([\d.,]+)\s*Tonne/gi;let tw;
+    while((tw=twRe.exec(a))!==null){const v=parseReoNum(tw[1]);if(!isNaN(v))totals.push(v)}
+    if(totals.length)e.weight=Math.max(...totals);
+  }
+  if(e.weight==null){
+    // Last resort: a standalone "<num> T" in the header block near the Sales Rep line.
+    const hm=t.match(/Sales\s*Rep:[^\n]*?([\d.,]+)\s*T\b/i);
+    if(hm){const v=parseReoNum(hm[1]);if(!isNaN(v))e.weight=v}
+  }
 
   // ── OCR-FRIENDLY FALLBACKS ──
   // OCR can garble labels ("Ctri Code" instead of "Ctrl Code") or scatter values across the page.
