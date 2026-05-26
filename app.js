@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b5.3';
+const APP_VERSION='b5.3.2';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const ADMIN_PIN='7519', BUCKET='schedules';
@@ -91,7 +91,7 @@ function isLateDelivery(e){
   return d!=null&&d>0}
 function getStatusPill(s,t,hold){let h='';if(t==='loose')h='<span class="pill pill-loose">Ad Hoc</span> ';h+='<span class="pill '+(ST_CLS[s]||'pill-notordered')+'">'+esc(s)+'</span>';if(hold)h+='<span class="pill pill-onhold">⏸ ON HOLD</span>';return h}
 function parseAusDate(s){const p=s.split('/');if(p.length!==3)return null;let[d,m,y]=p;if(y.length===2)y='20'+y;return`${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`}
-async function auditLog(o){await sb.from('audit_log').insert({...o,user_identifier:userName})}
+async function auditLog(o){const{error}=await sb.from('audit_log').insert({...o,user_identifier:userName});if(error)console.warn('[REO] auditLog insert failed:',error.message,o);return error}
 function confirmDialog(title,msg,okLabel,okClass,onOk){
   $('confirmModal').innerHTML=`<h3>${esc(title)}<button class="modal-close" onclick="closeOv('confirmOv')">&times;</button></h3><p style="font-size:13px;color:var(--mid);margin-bottom:16px;line-height:1.5">${msg}</p><div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-sec btn-sm" onclick="closeOv('confirmOv')">Cancel</button><button class="btn ${okClass||''} btn-sm" id="confirmOkBtn" style="width:auto">${esc(okLabel||'OK')}</button></div>`;
   $('confirmOv').classList.add('show');
