@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b5.4';
+const APP_VERSION='b5.5';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const ADMIN_PIN='7519', BUCKET='schedules';
@@ -497,7 +497,7 @@ async function submitMultiUpload(){
       const furl=await uploadFile(item.file,proj,level,area);
       const fname=item.file.name;
       const ex=item.extracted||{};
-      const breakdown={bar_weight:ex.barWeight!=null?ex.barWeight:null,mesh_sqm:ex.meshSqm!=null?ex.meshSqm:null,trench_mesh_lm:ex.trenchLm!=null?ex.trenchLm:null,extraction_method:ex._extractionMethod||null};
+      const breakdown=extractionBreakdown(ex);
       const wt=item.weight?parseFloat(item.weight):null;
       const supD=item.supDate||null;
       const splitRef=item.splitRef.trim()||null;
@@ -742,128 +742,155 @@ function parseReoText(pageOneText, allText){
     }
     return e;
   }
-  // ── BAR SUMMARY TOTAL ──
-  // Native PDF: "TOTAL items pieces tonne" appears on a single line. Strict same-line match works.
-  // OCR PDF: Tesseract often reads the row labels first ("N12, N16, TOTAL") then dumps all data
-  // rows beneath, so a greedy "TOTAL\s+\d+\s+\d+\s+\d+" picks up the FIRST data row, not the total.
-  // Fix: prefer same-line strict match; otherwise scan all 3-number rows in scope and use the last.
-  const bsIdx=a.search(/BAR\s*SUMMARY/i);
-  if(bsIdx>=0){
-    const slice=a.slice(bsIdx);
-    const endIdx=slice.search(/MISCELLANEOUS\s*PRODUCT\s*SUMMARY/i);
-    const scope=endIdx>0?slice.slice(0,endIdx):slice;
-    // Strict same-line TOTAL (uses [ \t]+ instead of \s+ to NOT cross newlines)
-    let bw=null;
-    const strictTm=scope.match(/TOTAL[ \t]+(\d+)[ \t]+([\d.,]+)[ \t]+([\d.,]+)/i);
-    if(strictTm){const v=parseReoNum(strictTm[3]);if(!isNaN(v))bw=v}
-    if(bw===null){
-      // OCR fallback: collect all (items, pieces, tonne) rows in scope; the last is the total.
-      const rowRe=/(?:^|\s)(\d{1,3})\s+([\d,]+)\s+([\d.]+)(?=\s|$)/g;
-      const rows=[];let rm;
-      while((rm=rowRe.exec(scope))!==null){
-        const items=parseInt(rm[1],10);
-        // Use parseReoInt for pieces — it strips commas without treating "2,794" as "2.794"
-        const pieces=parseReoInt(rm[2]);
-        const tonne=parseReoNum(rm[3]);
-        if(isNaN(items)||isNaN(pieces)||isNaN(tonne))continue;
-        if(items<1||items>999)continue;
-        if(pieces<items)continue;
-        if(!/\./.test(rm[3]))continue;
-        if(tonne<0.001||tonne>9999)continue;
-        rows.push(tonne);
-      }
-      if(rows.length)bw=rows[rows.length-1];
+  // ════════════════════════════════════════════════════════════════════════════════
+  // SELF-CHECKING EXTRACTION (b5.5) — full document understanding + reconciliation.
+  // Reads BAR SUMMARY, SPIRAL WEIGHT SUMMARY (both reinforcement), MISCELLANEOUS PRODUCT
+  // SUMMARY (accessories), and the body line items. Deducts starter bars (-SB marks) from
+  // the invoiceable bar weight. Reconciles (Bar + Spiral + Misc) against stated Total Weight.
+  // ════════════════════════════════════════════════════════════════════════════════
+  // reoNum2 — Aus Reo mixes decimal separators: "0,137" (comma) and "0.137" (dot), and uses
+  // dots/commas as thousands separators inconsistently. Treat the LAST separator as the decimal.
+  const reoNum2=s=>{
+    if(s==null)return NaN;let str=String(s).trim();if(!str)return NaN;
+    if(/[.,]/.test(str)){
+      const lc=str.lastIndexOf(','),ld=str.lastIndexOf('.');const dp=Math.max(lc,ld);
+      const ip=str.slice(0,dp).replace(/[.,]/g,'');const dec=str.slice(dp+1).replace(/[^\d]/g,'');
+      str=ip+'.'+dec;
     }
-    if(bw!=null)e.barWeight=bw;
+    const v=parseFloat(str);return isNaN(v)?NaN:v;
+  };
+  // Read the TOTAL tonne from a named summary section, bounded so SPIRAL/MISC don't bleed into BAR.
+  const sectionTotal=(name,tonneGroup)=>{
+    const start=a.search(new RegExp(name,'i'));if(start<0)return null;
+    const rest=a.slice(start+name.length);
+    const nextHdr=rest.search(/(?:BAR|SPIRAL\s*WEIGHT|MISCELLANEOUS\s*PRODUCT)\s*SUMMARY/i);
+    const section=nextHdr>=0?rest.slice(0,nextHdr):rest;
+    const mm2=section.match(new RegExp('TOTAL\\s+'+tonneGroup,'i'));
+    return mm2?reoNum2(mm2[1]):null;
+  };
+  // BAR / SPIRAL: "TOTAL <items> <pieces> <tonne>" — items/pieces may use . or , as separators.
+  const barSummary=sectionTotal('BAR SUMMARY','[\\d.,]+\\s+[\\d.,]+\\s+([\\d.,]+)');
+  const spiralSummary=sectionTotal('SPIRAL WEIGHT SUMMARY','[\\d.,]+\\s+[\\d.,]+\\s+([\\d.,]+)');
+  const miscSummary=sectionTotal('MISCELLANEOUS PRODUCT SUMMARY','([\\d.,]+)');
+
+  // ── Body line items: starter bars + bar fallback ──
+  // Starter bars: a Bar Mark ending in "-SB" followed by a real bar product (N/Y/R). Detected by
+  // the mark suffix ALONE — the "STARTER BARS" description is corroborating but never required.
+  let bodyStarter=0,starterCount=0,bodyBarSum=0,bodyBarFound=false;
+  for(const line of a.split('\n')){
+    // <mark> <product Nxx/Yxx/Rxx> <qty> ... <tonne at end>
+    const bm=line.match(/^\s*([A-Z0-9.\-]+)\s+(N\d+|Y\d+|R\d+)[A-Z]*\s+(\d+)\s+.*?([\d]+[.,]\d+)\s*$/);
+    if(bm){
+      const mark=bm[1].toUpperCase(),tonne=reoNum2(bm[4]);
+      if(isNaN(tonne)||tonne<=0)continue;
+      if(/-SB$/.test(mark)){bodyStarter+=tonne;starterCount++;}
+      bodyBarSum+=tonne;bodyBarFound=true;
+    }
   }
-  // ── BAR WEIGHT FALLBACK (no BAR SUMMARY — small / loose orders) ──
-  // Small Aus Reo orders have NO "BAR SUMMARY" block — all line items sit under "Bar Mark ...
-  // Tonne". Sum ONLY genuine reinforcing-bar line items and EXCLUDE accessories: bar chairs,
-  // tie wire, spacers, joining tape, plastic membrane, delivery charges, etc. These accessories
-  // are NOT reinforcement and must never count toward steel weight.
-  if(e.barWeight==null){
-    let barSum=0,barFound=false;
+
+  // ── Reinforcement bar weight (before starter deduction) ──
+  // Prefer the authoritative BAR SUMMARY (+ SPIRAL). Fall back to summed body bar line items
+  // for small orders that have no BAR SUMMARY (e.g. 2DD7). The fallback excludes accessories.
+  let barReoTotal=null;
+  if(barSummary!=null||spiralSummary!=null){
+    barReoTotal=(barSummary||0)+(spiralSummary||0);
+  }else if(bodyBarFound){
+    // No summary — sum genuine reinforcing-bar line items, excluding accessories & mesh/trench.
+    let s=0,found=false;
     const liRe=/\b([A-Z]{1,4}\d+[A-Z0-9]*)\s+(\d+(?:\.\d+)?)\s+Each\s+([^\n]*?)\s+([\d.]+)\s*(?:\n|$)/gi;
     let li;
     while((li=liRe.exec(a))!==null){
-      const code=li[1].toUpperCase(),desc=(li[3]||''),tonne=parseReoNum(li[4]);
+      const code=li[1].toUpperCase(),desc=(li[3]||''),tonne=reoNum2(li[4]);
       if(isNaN(tonne)||tonne<=0)continue;
-      // Skip mesh / trench (counted separately).
       if(/^(SL|RL)\d/.test(code))continue;
       if(/TM\d/.test(code))continue;
-      // Skip accessories by DESCRIPTION — bar chair, tie wire, spacer, tape, membrane, film,
-      // delivery, cartage, grease, stool, trestle, chair, clip. (Bar Chair contains "Bar" so we
-      // must check the accessory words, not just look for "Bar".)
-      if(/chair|tie\s*wire|tie-wire|spacer|joining\s*tape|tape|membrane|film|plastic|delivery|cartage|grease|stool|trestle|\bclip\b|belt\s*pack/i.test(desc))continue;
-      // Skip accessory by CODE prefix: SOG/PTBC/BC (bar chairs), TW (tie wire), DEL (delivery),
-      // PBFB / PBF (plastic film/membrane), SPC (spacer).
-      if(/^(SOG|PTBC|BC|TW|DEL|PBFB|PBF|SPC|JT)\d*/i.test(code))continue;
-      // Only count if it's a genuine reinforcing-bar designation: N / Y / R / D500N etc.
-      // Australian bar codes: N12, N16, N20, Y12, R10, plus bar-mark codes whose DESCRIPTION
-      // explicitly says "Bar D500" or "Deformed" / "Round bar".
+      if(/chair|tie\s*wire|tie-wire|spacer|joining\s*tape|tape|membrane|film|plastic|delivery|cartage|grease|stool|trestle|\bclip\b|belt\s*pack|dowel/i.test(desc))continue;
+      if(/^(SOG|PTBC|PCF|BC|TW|DEL|PBFB|PBF|SPC|JT|DWB|DWL)\d*/i.test(code))continue;
       const isBarCode=/^[NYR]\d/.test(code);
       const isBarDesc=/\bBar\s+D?500|deformed|round\s*bar|\bN\d{2}\b/i.test(desc)&&!/chair/i.test(desc);
-      if(isBarCode||isBarDesc){barSum+=tonne;barFound=true}
+      if(isBarCode||isBarDesc){s+=tonne;found=true}
     }
-    if(barFound)e.barWeight=Math.round(barSum*1000)/1000;
+    if(found)barReoTotal=Math.round(s*1000)/1000;
   }
-  // ── MESH (SL/RL codes) sum of qty × width × length ──
-  // The PDF text layer often splits a mesh line across rows, e.g.:
-  //   "Square Mesh SL92 effective area"   ← description first
-  //   "SL92 2 Each 0.132"                 ← code + qty + tonne
-  //   "5.8x2.4m"                          ← dimensions on their own line
-  // So we can't rely on a single-line regex. Strategy: find each mesh code occurrence with its
-  // qty, then look for the "<num>x<num>m" effective-area dimensions anywhere nearby (within a
-  // small window of text around that code), and multiply qty × w × l.
+
+  // ── MESH (SL/RL) sum of qty × width × length, handling split text layout ──
   let meshSqm=0,meshFound=false;
-  // First try the original single-sequence regex (works when layout isn't split).
   const meshReInline=/\b((?:SL|RL)\d+[A-Z]*)\s+([\d.,]+)\s+Each\s+(?:Square|Rectangular|Reinforcing)?\s*Mesh\s+(?:(?:SL|RL)\d+[A-Z]*\s+)?effective\s*area\s*([\d.,]+)\s*[xX]\s*([\d.,]+)\s*m/gi;
-  let mm,inlineMatched=false;
-  while((mm=meshReInline.exec(a))!==null){
-    const qty=parseReoInt(mm[2]),w=parseReoDim(mm[3]),l=parseReoDim(mm[4]);
+  let mm3,inlineMatched=false;
+  while((mm3=meshReInline.exec(a))!==null){
+    const qty=parseReoInt(mm3[2]),w=parseReoDim(mm3[3]),l=parseReoDim(mm3[4]);
     if(!isNaN(qty)&&!isNaN(w)&&!isNaN(l)){meshSqm+=qty*w*l;meshFound=true;inlineMatched=true}}
-  // Fallback for split layout: find "<code> <qty> Each" rows, then a "<w>x<l>m" dimension nearby.
   if(!inlineMatched){
-    const codeRe=/\b((?:SL|RL)\d+[A-Z]*)\s+(\d+)\s+Each/gi;
-    let cm;
-    while((cm=codeRe.exec(a))!==null){
-      const qty=parseReoInt(cm[2]);
-      // Search a window around this match for effective-area dimensions like "5.8x2.4m".
-      const winStart=Math.max(0,cm.index-80);
-      const win=a.slice(winStart,cm.index+120);
-      // Only treat as mesh if "Mesh" or "effective area" appears in the window (avoid false hits).
+    const codeRe=/\b((?:SL|RL)\d+[A-Z]*)\s+(\d+)\s+Each/gi;let cm2;
+    while((cm2=codeRe.exec(a))!==null){
+      const qty=parseReoInt(cm2[2]);
+      const win=a.slice(Math.max(0,cm2.index-90),cm2.index+130);
       if(!/mesh|effective\s*area/i.test(win))continue;
       const dim=win.match(/([\d.]+)\s*[xX]\s*([\d.]+)\s*m\b/);
-      if(dim){
-        const w=parseReoDim(dim[1]),l=parseReoDim(dim[2]);
-        if(!isNaN(qty)&&!isNaN(w)&&!isNaN(l)){meshSqm+=qty*w*l;meshFound=true}
-      }
+      if(dim){const w=parseReoDim(dim[1]),l=parseReoDim(dim[2]);if(!isNaN(qty)&&!isNaN(w)&&!isNaN(l)){meshSqm+=qty*w*l;meshFound=true}}
     }
   }
-  // ── TRENCH MESH (TM codes + "Trench Mesh" text) sum of qty × longer dimension ──
+  // ── TRENCH MESH (TM) sum of qty × longest dimension ──
   let trenchLm=0,trenchFound=false;
   const trenchRe=/\b([A-Z]*\d*TM\d+[A-Z]*)\s+([\d.,]+)\s+Each\s+Trench\s*Mesh\s+(?:\d+mm\s+)?([\d.,]+)\s*[xX]\s*([\d.,]+)\s*m/gi;
   let tr;while((tr=trenchRe.exec(a))!==null){
     const qty=parseReoInt(tr[2]),aa=parseReoDim(tr[3]),bb=parseReoDim(tr[4]);
     if(!isNaN(qty)&&!isNaN(aa)&&!isNaN(bb)){trenchLm+=qty*Math.max(aa,bb);trenchFound=true}}
+
+  // ── Final invoiceable figures ──
+  e.starterWeight=starterCount>0?Math.round(bodyStarter*1000)/1000:null;
+  if(barReoTotal!=null){
+    // Bar weight feeding invoicing EXCLUDES starter bars (we fix those, not the steel fixers).
+    const barForFixing=Math.round((barReoTotal-bodyStarter)*1000)/1000;
+    e.barWeight=barForFixing;
+  }
   if(meshFound)e.meshSqm=Math.round(meshSqm*100)/100;
   if(trenchFound)e.trenchLm=Math.round(trenchLm*100)/100;
-  // Diagnostic — logs the final extraction state. Helps debug when browser Tesseract
-  // produces different output than expected. Safe to leave on; trivial overhead.
+
+  // ── RECONCILIATION (sanity check) ──
+  // Compare (Bar summary + Spiral + Misc) against the stated Total Weight. If they don't match
+  // within 0.01T, flag the row for review. Starter % safety net flags when starters > 50%.
+  if(e.weight!=null&&(barSummary!=null||spiralSummary!=null||miscSummary!=null)){
+    const components=(barSummary||0)+(spiralSummary||0)+(miscSummary||0);
+    const diff=Math.round((e.weight-components)*1000)/1000;
+    e.reconDiff=diff;
+    e.reconStatus=Math.abs(diff)<=0.01?'reconciled':'review';
+    if(e.reconStatus==='review')e.reconReason='Totals do not match (diff '+diff+'T)';
+  }else{
+    // Nothing to reconcile against (no summaries, or no total) — leave status null per spec.
+    e.reconStatus=null;
+  }
+  // Starter > 50% safety net (independent of reconciliation).
+  if(e.weight&&e.starterWeight!=null&&e.starterWeight>0.5*e.weight){
+    e.reconStatus='review';
+    e.reconReason=(e.reconReason?e.reconReason+'; ':'')+'Starter bars exceed 50% of total';
+  }
+
+  // Diagnostic — compact single line.
   if(typeof console!=='undefined'&&console.log){
-    console.log('[REO PARSE]',{
-      ctrl:e.ctrlCode||null,date:e.shipDate||null,wt:e.weight??null,
-      bar:e.barWeight??null,mesh:e.meshSqm??null,trench:e.trenchLm??null,
-      textLen:a.length,
-      hasShipLabel:/Ship\s*Date/i.test(a),
-      hasTolerantShipLabel:/\bS[a-z]{2,4}\s+D[a-z]{2,4}/i.test(a),
-      allDates:(a.match(/\d{1,2}\/\d{1,2}\/\d{2,4}/g)||[]).slice(0,8),
-      first400:a.slice(0,400)
-    });
+    console.log('[REO PARSE]',e.ctrlCode||'?','wt='+(e.weight??'-'),'bar='+(e.barWeight??'-'),'starter='+(e.starterWeight??'-'),'mesh='+(e.meshSqm??'-'),'trench='+(e.trenchLm??'-'),'recon='+(e.reconStatus||'none')+(e.reconDiff?('/'+e.reconDiff):''));
   }
   return e}
 
 // Get text from a PDF using its native text layer. Returns {pageOneText, allText, hasText, numPages}.
+// Build the DB column object for an extraction result, including b5.5 reconciliation fields.
+// Used by all upload paths so the schema stays consistent.
+function extractionBreakdown(ex){
+  ex=ex||{};
+  return {
+    bar_weight: ex.barWeight!=null?ex.barWeight:null,
+    mesh_sqm: ex.meshSqm!=null?ex.meshSqm:null,
+    trench_mesh_lm: ex.trenchLm!=null?ex.trenchLm:null,
+    starter_weight: ex.starterWeight!=null?ex.starterWeight:null,
+    recon_status: ex.reconStatus||null,
+    recon_diff: ex.reconDiff!=null?ex.reconDiff:null,
+    recon_reason: ex.reconReason||null,
+    recon_reviewed: false,
+    recon_reviewed_by: null,
+    extraction_method: ex._extractionMethod||null
+  };
+}
+
 async function getPdfNativeText(file){
   await loadPdfJs();const buf=await file.arrayBuffer();const pdf=await pdfjsLib.getDocument({data:buf}).promise;
   const pageTexts=[];let allText='';
@@ -987,7 +1014,7 @@ async function submitEntry(){
       const ex=pendingFile&&pendingFile._extracted||{};
       const looseSchedule=ex.ctrlCode||null;
       const looseWeight=ex.weight!=null?ex.weight:null;
-      const breakdown={bar_weight:ex.barWeight!=null?ex.barWeight:null,mesh_sqm:ex.meshSqm!=null?ex.meshSqm:null,trench_mesh_lm:ex.trenchLm!=null?ex.trenchLm:null,extraction_method:ex._extractionMethod||null};
+      const breakdown=extractionBreakdown(ex);
       const{data,error}=await sb.from('entries').insert({project,level:level||null,area:area||null,schedule:looseSchedule,status:'Not Ordered',entry_date:ed,comments:desc+(comments?'\n'+comments:''),file_url:furl,file_name:fname,entry_type:'loose',total_weight:looseWeight,drawing_reference:ex.drawing||null,...breakdown}).select().single();
       if(error)throw error;
       await auditLog({entry_id:data.id,action:'CREATE',new_value:`LOOSE: ${project}/${level||'-'}/${area||'-'}${looseSchedule?' ('+looseSchedule+')':''}`});
@@ -1003,7 +1030,7 @@ async function submitEntry(){
         for(const f of pendingMarkups){try{const u=await uploadFile(f,project+'/_markups',level,area);mkNew.push({url:u,name:f.name,uploaded_by:userName,date:today()})}catch(_){}}}
       // Pull extracted weight breakdown from the PDF (if any)
       const ex=pendingFile&&pendingFile._extracted||{};
-      const breakdown={bar_weight:ex.barWeight!=null?ex.barWeight:null,mesh_sqm:ex.meshSqm!=null?ex.meshSqm:null,trench_mesh_lm:ex.trenchLm!=null?ex.trenchLm:null,extraction_method:ex._extractionMethod||null};
+      const breakdown=extractionBreakdown(ex);
       if(selectedOrderId){
         const entry=entries.find(e=>e.id===selectedOrderId);
         const existing=entry.markup_plans?JSON.parse(entry.markup_plans):[];
@@ -1184,7 +1211,7 @@ async function confirmAttach(id){
   const btn=$('att_btn');btn.disabled=true;btn.textContent='Uploading...';
   try{const e=entries.find(x=>x.id===id),file=window._attFile,ex=window._attExt||{};
     const furl=await uploadFile(file,e.project,e.level,e.area);
-    const up={schedule:s,entry_date:sub,supplier_delivery_date:sd,file_url:furl,file_name:file.name,status:'Scheduled',total_weight:wt?parseFloat(wt):null,drawing_reference:dr||null,bar_weight:ex.barWeight!=null?ex.barWeight:null,mesh_sqm:ex.meshSqm!=null?ex.meshSqm:null,trench_mesh_lm:ex.trenchLm!=null?ex.trenchLm:null,extraction_method:ex._extractionMethod||null};
+    const up={schedule:s,entry_date:sub,supplier_delivery_date:sd,file_url:furl,file_name:file.name,status:'Scheduled',total_weight:wt?parseFloat(wt):null,drawing_reference:dr||null,...extractionBreakdown(ex)};
     if(e.our_delivery_date&&sd!==e.our_delivery_date)up.mismatch_resolved=false;
     const{error}=await sb.from('entries').update(up).eq('id',id);if(error)throw error;
     await auditLog({entry_id:id,action:'UPDATE',field_changed:'schedule_attached',new_value:s});
@@ -1424,6 +1451,7 @@ function removeScheduleFromEntry(id){
         schedule:null,file_url:null,file_name:null,
         supplier_delivery_date:null,drawing_reference:null,total_weight:null,
         bar_weight:null,mesh_sqm:null,trench_mesh_lm:null,
+        starter_weight:null,recon_status:null,recon_diff:null,recon_reason:null,recon_reviewed:false,recon_reviewed_by:null,
         extraction_method:null,
         status:newStatus,mismatch_resolved:true
       }).eq('id',id);
@@ -1818,7 +1846,7 @@ function renderAdminFixers(){
   $('adminFixers').innerHTML=`
 <div class="card" style="margin-bottom:14px">
   <h3 style="font-size:15px;font-weight:700;margin-bottom:10px;color:var(--gray-dk)">Steel Fixers</h3>
-  <p style="font-size:12px;color:var(--muted);margin-bottom:14px">Processed bar weight, mesh, and trench mesh extracted from each schedule. Values are editable if the PDF extraction missed anything. Use the Comment column for notes, and click the Dispute Raised cell to cycle through ✓ resolved / ✗ disputed / — N/A.</p>
+  <p style="font-size:12px;color:var(--muted);margin-bottom:14px">Bar weight is the invoiceable reinforcement (bars + spiral), with <b>starter bars deducted</b> (shown separately). Mesh in m², trench mesh in LM. Each schedule is reconciled against its stated total weight — rows that don't add up are flagged <span style="color:var(--err)">⚠ Review</span>; click <b>Mark Reviewed</b> once you've checked one. Values are click-to-edit. Use the Comment column for notes, and click Dispute Raised to cycle ✓ resolved / ✗ disputed / — N/A.</p>
   <div class="filters" style="margin-bottom:0">
     <select id="sfProj" onchange="renderSfTable()"><option value="">All Projects</option>${proj.map(p=>`<option>${esc(p)}</option>`).join('')}</select>
     <select id="sfLevel" onchange="renderSfTable()"><option value="">All Levels</option>${levels.map(l=>`<option>${esc(l)}</option>`).join('')}</select>
@@ -1854,8 +1882,8 @@ function renderSfTable(){
   const w=$('sfTable');if(!w)return;
   if(!list.length){w.innerHTML='<div class="empty"><p>No entries with schedules attached yet.</p></div>';return}
   const ar=c=>sfSort.col===c?(sfSort.asc?' ▲':' ▼'):'';
-  let sumBar=0,sumMesh=0,sumTr=0,sumInstalled=0,sumDisputes=0;
-  list.forEach(e=>{sumBar+=parseFloat(e.bar_weight)||0;sumMesh+=parseFloat(e.mesh_sqm)||0;sumTr+=parseFloat(e.trench_mesh_lm)||0;if(e.installed_date)sumInstalled++;if(e.sf_dispute==='cross')sumDisputes++});
+  let sumBar=0,sumMesh=0,sumTr=0,sumInstalled=0,sumDisputes=0,sumStarter=0,sumReview=0;
+  list.forEach(e=>{sumBar+=parseFloat(e.bar_weight)||0;sumMesh+=parseFloat(e.mesh_sqm)||0;sumTr+=parseFloat(e.trench_mesh_lm)||0;sumStarter+=parseFloat(e.starter_weight)||0;if(e.installed_date)sumInstalled++;if(e.sf_dispute==='cross')sumDisputes++;if(e.recon_status==='review'&&!e.recon_reviewed)sumReview++});
   w.innerHTML=`<table><thead><tr>
 <th onclick="sfTSort('project')">Project${ar('project')}</th>
 <th onclick="sfTSort('level')">Level${ar('level')}</th>
@@ -1863,8 +1891,10 @@ function renderSfTable(){
 <th onclick="sfTSort('schedule')">Schedule${ar('schedule')}</th>
 <th onclick="sfTSort('our_delivery_date')">Ordered Delivery${ar('our_delivery_date')}</th>
 <th onclick="sfTSort('bar_weight')" style="text-align:right">Bar Weight (T)${ar('bar_weight')}</th>
+<th onclick="sfTSort('starter_weight')" style="text-align:right">Starter Bars (T)${ar('starter_weight')}</th>
 <th onclick="sfTSort('mesh_sqm')" style="text-align:right">Mesh (m²)${ar('mesh_sqm')}</th>
 <th onclick="sfTSort('trench_mesh_lm')" style="text-align:right">Trench Mesh (LM)${ar('trench_mesh_lm')}</th>
+<th onclick="sfTSort('recon_status')" style="text-align:center">Reconciliation${ar('recon_status')}</th>
 <th class="no-sort">Schedule File</th>
 <th class="no-sort">Markup Plans</th>
 <th onclick="sfTSort('installed_date')">Installed Date${ar('installed_date')}</th>
@@ -1885,6 +1915,9 @@ function renderSfTable(){
     : `<span class="weight-td" onclick="sfEditComment(${e.id})" style="color:#ccc;font-size:11px">Add note</span>`;
   // Dispute cell — click to cycle through 4 states: null → tick → cross → dash → null.
   const disp=sfDisputeCell(e);
+  // Reconciliation cell — green ✓ reconciled, amber ⚠ review (with reason). A "Reviewed"
+  // acknowledgement clears the warning once a human has eyeballed it.
+  const reconCell=sfReconCell(e);
   return `<tr>
 <td class="proj-td" title="${esc(e.project)}">${esc(e.project)}${e.extraction_method==='ocr'?' <span class="ocr-badge" title="This entry was extracted using OCR — please double-check the values">🔍 OCR</span>':''}</td>
 <td>${esc(e.level||'—')}${e.split_reference?' <span style="font-size:10px;color:var(--accent-dk);font-weight:600">('+esc(e.split_reference)+')</span>':''}</td>
@@ -1892,8 +1925,10 @@ function renderSfTable(){
 <td class="sched-td">${esc(e.schedule)}</td>
 <td style="white-space:nowrap;font-size:11px">${fmtDate(e.our_delivery_date)||'<span style="color:#ccc">—</span>'}</td>
 <td class="weight-td" style="text-align:right" onclick="sfEdit('bar_weight',${e.id})">${e.bar_weight!=null?parseFloat(e.bar_weight).toFixed(3):'<span style="color:#ccc">—</span>'}</td>
+<td class="weight-td" style="text-align:right" onclick="sfEdit('starter_weight',${e.id})">${e.starter_weight!=null&&parseFloat(e.starter_weight)>0?'<span style="color:var(--accent-dk)">−'+parseFloat(e.starter_weight).toFixed(3)+'</span>':'<span style="color:#ccc">—</span>'}</td>
 <td class="weight-td" style="text-align:right" onclick="sfEdit('mesh_sqm',${e.id})">${e.mesh_sqm!=null?parseFloat(e.mesh_sqm).toFixed(2):'<span style="color:#ccc">—</span>'}</td>
 <td class="weight-td" style="text-align:right" onclick="sfEdit('trench_mesh_lm',${e.id})">${e.trench_mesh_lm!=null?parseFloat(e.trench_mesh_lm).toFixed(2):'<span style="color:#ccc">—</span>'}</td>
+<td style="text-align:center">${reconCell}</td>
 <td><a class="att-link" href="${e.file_url}" target="_blank">📄 ${esc((e.file_name||'').slice(0,16))}</a></td>
 <td>${mpCell}</td>
 <td>${instDate}</td>
@@ -1903,8 +1938,10 @@ function renderSfTable(){
 <tr style="background:#FAFAF8;font-weight:700;border-top:2px solid var(--border)">
 <td colspan="5" style="text-align:right;color:var(--gray-dk)">TOTALS (${list.length} entries)</td>
 <td class="sched-td" style="text-align:right;color:var(--accent-dk)">${sumBar.toFixed(3)} T</td>
+<td class="sched-td" style="text-align:right;color:var(--accent-dk)">${sumStarter>0?'−'+sumStarter.toFixed(3):''}</td>
 <td class="sched-td" style="text-align:right;color:var(--accent-dk)">${sumMesh.toFixed(2)} m²</td>
 <td class="sched-td" style="text-align:right;color:var(--accent-dk)">${sumTr.toFixed(2)} LM</td>
+<td style="text-align:center;color:var(--accent-dk);font-size:11px">${sumReview} to review</td>
 <td></td>
 <td></td>
 <td class="sched-td" style="color:var(--accent-dk);font-size:11px">${sumInstalled}/${list.length} installed</td>
@@ -1915,9 +1952,32 @@ function renderSfTable(){
 
 function sfTSort(c){if(sfSort.col===c)sfSort.asc=!sfSort.asc;else{sfSort.col=c;sfSort.asc=true}renderSfTable()}
 
+// Reconciliation cell for the Steel Fixers table.
+//  • null status (manual entry / nothing to check) → em dash
+//  • reconciled → green ✓
+//  • review, not yet acknowledged → amber ⚠ with reason tooltip + "Reviewed" button
+//  • review, acknowledged → green ✓ Reviewed (by name)
+function sfReconCell(e){
+  if(!e.recon_status)return '<span style="color:#ccc">—</span>';
+  if(e.recon_status==='reconciled')return '<span title="Bar + Spiral + Misc matches the schedule total" style="color:var(--success);font-weight:600;font-size:11px">✓ Reconciled</span>';
+  // review
+  if(e.recon_reviewed){
+    return '<span title="Flagged then checked by '+esc(e.recon_reviewed_by||'someone')+'" style="color:var(--success);font-weight:600;font-size:11px">✓ Reviewed'+(e.recon_reviewed_by?'<br><span style="font-weight:400;color:var(--muted)">'+esc(e.recon_reviewed_by)+'</span>':'')+'</span>';
+  }
+  const reason=e.recon_reason||'Needs review';
+  return '<span title="'+esc(reason)+'" style="color:var(--err);font-weight:600;font-size:11px;cursor:help">⚠ Review</span><br><button class="btn btn-sm" style="width:auto;font-size:10px;padding:2px 8px;margin-top:3px" onclick="sfMarkReviewed('+e.id+')">Mark Reviewed</button>';
+}
+async function sfMarkReviewed(id){
+  const e=entries.find(x=>x.id===id);if(!e)return;
+  const by=userName||foremanName||'Unknown';
+  await sb.from('entries').update({recon_reviewed:true,recon_reviewed_by:by}).eq('id',id);
+  await auditLog({entry_id:id,action:'UPDATE',field_changed:'recon_reviewed',old_value:'false',new_value:'true ('+by+')'});
+  await loadEntries();renderSfTable();
+}
+
 function sfEdit(field,id){
   const e=entries.find(x=>x.id===id);if(!e)return;
-  const labels={bar_weight:'Bar Weight (T)',mesh_sqm:'Square Mesh (m²)',trench_mesh_lm:'Trench Mesh (LM)'};
+  const labels={bar_weight:'Bar Weight (T)',starter_weight:'Starter Bars (T)',mesh_sqm:'Square Mesh (m²)',trench_mesh_lm:'Trench Mesh (LM)'};
   const step=field==='bar_weight'?'0.001':'0.01';
   $('weightModal').innerHTML=`<h3>${esc(labels[field])}<button class="modal-close" onclick="closeOv('weightOv')">&times;</button></h3><p style="font-size:12px;color:var(--muted);margin-bottom:10px">${esc(e.project)} / ${esc(e.level||'—')} / ${esc(e.area||'—')} · ${esc(e.schedule||'')}</p><div class="fg"><input type="number" step="${step}" id="sfInp" value="${e[field]!=null?e[field]:''}" style="font-family:'JetBrains Mono',monospace" placeholder="Leave blank to clear"></div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn btn-sec btn-sm" onclick="closeOv('weightOv')">Cancel</button><button class="btn btn-sm" onclick="sfSave('${field}',${id})" style="width:auto">Save</button></div>`;
   $('weightOv').classList.add('show')}
@@ -1990,13 +2050,14 @@ async function sfToggleDispute(id){
 
 function exportSfCSV(){
   const list=getSfFiltered();if(!list.length)return alert('No data');
-  const h=['Project','Level','Area','Split','Schedule','Ordered Delivery','Bar Weight (T)','Mesh (m²)','Trench Mesh (LM)','Markup Plans','Installed Date','File','Comment','Dispute Raised'];
+  const h=['Project','Level','Area','Split','Schedule','Ordered Delivery','Bar Weight (T)','Starter Bars (T)','Mesh (m²)','Trench Mesh (LM)','Reconciliation','Recon Diff (T)','Reviewed By','Markup Plans','Installed Date','File','Comment','Dispute Raised'];
   // Map dispute state to a clear English label for the CSV
   const dispLabel=v=>v==='tick'?'Resolved':v==='cross'?'Disputed':v==='dash'?'N/A':'';
-  const rows=list.map(e=>{const mp=e.markup_plans?JSON.parse(e.markup_plans):[];return [e.project,e.level||'',e.area||'',e.split_reference||'',e.schedule||'',e.our_delivery_date||'',e.bar_weight??'',e.mesh_sqm??'',e.trench_mesh_lm??'',mp.length,e.installed_date||'',e.file_name||'',e.sf_comment||'',dispLabel(e.sf_dispute)]});
+  const reconLabel=e=>!e.recon_status?'':e.recon_status==='reconciled'?'Reconciled':(e.recon_reviewed?'Reviewed':'REVIEW: '+(e.recon_reason||''));
+  const rows=list.map(e=>{const mp=e.markup_plans?JSON.parse(e.markup_plans):[];return [e.project,e.level||'',e.area||'',e.split_reference||'',e.schedule||'',e.our_delivery_date||'',e.bar_weight??'',e.starter_weight??'',e.mesh_sqm??'',e.trench_mesh_lm??'',reconLabel(e),e.recon_diff??'',e.recon_reviewed_by||'',mp.length,e.installed_date||'',e.file_name||'',e.sf_comment||'',dispLabel(e.sf_dispute)]});
   // Totals row
-  let sumBar=0,sumMesh=0,sumTr=0,sumInstalled=0,sumDisputes=0;list.forEach(e=>{sumBar+=parseFloat(e.bar_weight)||0;sumMesh+=parseFloat(e.mesh_sqm)||0;sumTr+=parseFloat(e.trench_mesh_lm)||0;if(e.installed_date)sumInstalled++;if(e.sf_dispute==='cross')sumDisputes++});
-  rows.push(['','','','','','TOTALS',sumBar.toFixed(3),sumMesh.toFixed(2),sumTr.toFixed(2),'',sumInstalled+'/'+list.length+' installed','','',sumDisputes+' disputed']);
+  let sumBar=0,sumMesh=0,sumTr=0,sumInstalled=0,sumDisputes=0,sumStarter=0;list.forEach(e=>{sumBar+=parseFloat(e.bar_weight)||0;sumMesh+=parseFloat(e.mesh_sqm)||0;sumTr+=parseFloat(e.trench_mesh_lm)||0;sumStarter+=parseFloat(e.starter_weight)||0;if(e.installed_date)sumInstalled++;if(e.sf_dispute==='cross')sumDisputes++});
+  rows.push(['','','','','','TOTALS',sumBar.toFixed(3),sumStarter.toFixed(3),sumMesh.toFixed(2),sumTr.toFixed(2),'','','','',sumInstalled+'/'+list.length+' installed','','',sumDisputes+' disputed']);
   const csv=[h,...rows].map(r=>r.map(c=>`"${String(c??'').replace(/"/g,'""')}"`).join(',')).join('\n');
   const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download=`steel-fixers-${today()}.csv`;a.click()}
 
