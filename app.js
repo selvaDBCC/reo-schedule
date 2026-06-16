@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b5.5';
+const APP_VERSION='b5.5.1';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const ADMIN_PIN='7519', BUCKET='schedules';
@@ -91,7 +91,20 @@ function isLateDelivery(e){
   return d!=null&&d>0}
 function getStatusPill(s,t,hold){let h='';if(t==='loose')h='<span class="pill pill-loose">Ad Hoc</span> ';h+='<span class="pill '+(ST_CLS[s]||'pill-notordered')+'">'+esc(s)+'</span>';if(hold)h+='<span class="pill pill-onhold">⏸ ON HOLD</span>';return h}
 function parseAusDate(s){const p=s.split('/');if(p.length!==3)return null;let[d,m,y]=p;if(y.length===2)y='20'+y;return`${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`}
-async function auditLog(o){const{error}=await sb.from('audit_log').insert({...o,user_identifier:userName});if(error)console.warn('[REO] auditLog insert failed:',error.message,o);return error}
+async function auditLog(o){
+  // Defensive: every audit row must have a name. If userName is somehow empty here, refuse to
+  // write a blank-identifier row (would create an unattributed "?" event in Notifications) and
+  // surface the prompt so the user fills it in. The caller's operation may have already
+  // succeeded — that's a separate problem the UI gate above should be preventing.
+  if(!userName||!userName.trim()){
+    console.warn('[REO] auditLog blocked — no user name set. Operation:',o);
+    try{$('nameOverlay').classList.add('show')}catch(_){}
+    return new Error('No user name set');
+  }
+  const{error}=await sb.from('audit_log').insert({...o,user_identifier:userName});
+  if(error)console.warn('[REO] auditLog insert failed:',error.message,o);
+  return error;
+}
 function confirmDialog(title,msg,okLabel,okClass,onOk){
   $('confirmModal').innerHTML=`<h3>${esc(title)}<button class="modal-close" onclick="closeOv('confirmOv')">&times;</button></h3><p style="font-size:13px;color:var(--mid);margin-bottom:16px;line-height:1.5">${msg}</p><div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-sec btn-sm" onclick="closeOv('confirmOv')">Cancel</button><button class="btn ${okClass||''} btn-sm" id="confirmOkBtn" style="width:auto">${esc(okLabel||'OK')}</button></div>`;
   $('confirmOv').classList.add('show');
@@ -170,14 +183,29 @@ async function init(){
       $('loadingScreen').style.display='none';
       $('nameOverlay').classList.remove('show');
       foremanName=localStorage.getItem('reo_foreman_name')||'';
-      if(!foremanName){$('fmNameOverlay').classList.add('show')}
-      else{$('fmUserChip').textContent=foremanName}
+      if(!foremanName){
+        // Show the overlay; do NOT render the app yet. saveForemanName() will re-enter init().
+        $('fmNameOverlay').classList.add('show');
+        setTimeout(()=>{const ni=$('fmNameInput');if(ni)ni.focus()},80);
+        return;
+      }
+      $('fmUserChip').textContent=foremanName;
       $('foremanApp').style.display='block';
       renderForeman();
     }catch(e){$('loadingScreen').innerHTML='<div style="text-align:center;padding:20px"><h2 style="color:var(--err)">Connection Error</h2><p style="color:var(--muted);font-size:13px">'+esc(e.message)+'</p><button class="btn btn-sm" onclick="location.reload()" style="width:auto;margin-top:12px">Retry</button></div>'}
     return}
-  $('nameOverlay').classList.remove('show');
   $('userChip').textContent=userName;
+  // Name gate — the dashboard is the only view that lets a user write changes (create entries,
+  // upload schedules, send emails, cancel, etc.) so every audit row must have a name attached.
+  // If localStorage doesn't have a name (cleared / new browser / incognito), show the prompt
+  // and STOP here — do not load the dashboard until saveName() is called and re-enters init().
+  if(!userName){
+    $('loadingScreen').style.display='none';
+    $('nameOverlay').classList.add('show');
+    setTimeout(()=>{const ni=$('nameInput');if(ni)ni.focus()},80);
+    return;
+  }
+  $('nameOverlay').classList.remove('show');
   try{
     await loadProjects();if(projects.length===0)await seedProjects();
     await loadEntries();await loadEmailContacts();
@@ -2565,9 +2593,22 @@ function saveForemanName(){
   const n=($('fmNameInput').value||'').trim();if(!n)return alert('Please enter your name');
   foremanName=n;localStorage.setItem('reo_foreman_name',n);
   $('fmNameOverlay').classList.remove('show');$('fmUserChip').textContent=n;
+  // The init() name gate returned early; now that the name is set, re-run init to render the app.
+  init();
 }
 // Audit log helper that uses the foreman's name instead of userName.
-async function foremanAudit(o){await sb.from('audit_log').insert({...o,user_identifier:foremanName||'Foreman'})}
+// Defensive: if there's no name (shouldn't happen since UI now blocks until set), refuse to
+// write a generic 'Foreman' row and re-show the prompt so the gap doesn't go unnoticed.
+async function foremanAudit(o){
+  if(!foremanName||!foremanName.trim()){
+    console.warn('[REO] foremanAudit blocked — no foreman name set. Operation:',o);
+    try{$('fmNameOverlay').classList.add('show')}catch(_){}
+    return new Error('No foreman name set');
+  }
+  const{error}=await sb.from('audit_log').insert({...o,user_identifier:foremanName});
+  if(error)console.warn('[REO] foremanAudit insert failed:',error.message,o);
+  return error;
+}
 function populateForemanDropdowns(){
   const ps=$('fmProj');if(!ps)return;
   ps.innerHTML='<option value="">All Projects</option>';
