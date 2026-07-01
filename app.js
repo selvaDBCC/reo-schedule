@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b5.6.2';
+const APP_VERSION='b5.6.3';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const ADMIN_PIN='7519', BUCKET='schedules';
@@ -1570,7 +1570,7 @@ async function deleteEntry(id){
     closeOv('detailOv');await loadEntries();renderDash()})}
 
 /* ═══ EMAIL DRAFTS ═══ */
-function emailModal(subject,body,entryId,auditContext){
+function emailModal(subject,body,entryId,auditContext,projectName){
   const def=emailContacts.find(c=>c.is_default);
   const others=emailContacts.filter(c=>!c.is_default);
   const toVal=def?def.email:'';
@@ -1578,24 +1578,36 @@ function emailModal(subject,body,entryId,auditContext){
     ? `<div style="display:flex;flex-direction:column;gap:6px;background:var(--input);border:1px solid var(--border);border-radius:6px;padding:10px 12px">${others.map((c,i)=>`<label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--gray-dk);cursor:pointer"><input type="checkbox" class="em_cc_box" data-email="${esc(c.email)}" style="width:auto"> <b>${esc(c.label)}</b> <span style="color:var(--muted);font-family:'JetBrains Mono',monospace;font-size:11px">${esc(c.email)}</span></label>`).join('')}</div>`
     : '<p style="font-size:11px;color:var(--muted);margin:0;font-style:italic">No additional contacts saved. Add them in Admin → Email Contacts.</p>';
   // b5.6 — reference file attachments (as clickable links in the email body).
-  // Only shown when we have an entry context (project/level/area known). Bulk-order emails
-  // (entryId=null) skip this since we don't know which project to filter by.
+  // Two paths for figuring out which project's files to show:
+  //   1) entryId given (per-row emails like mismatch/date-change/on-hold) — resolve project from
+  //      that entry AND filter to what's relevant to this row (project-wide + matching level/area).
+  //      Files pre-ticked because they're specifically relevant to this row.
+  //   2) projectName given (bulk emails covering many entries, e.g. bulk order created) — show
+  //      ALL of that project's non-superseded files, un-ticked, so the user picks what to include.
+  // Both paths render the same "📎 Reference Documents" checkbox list.
   let filesHtml='';
+  let files=[],preTick=true;
   if(entryId){
     const e=entries.find(x=>x.id===entryId);
-    if(e){
-      const files=projectFilesFor(e.project,e.level,e.area,{scope:'row'});
-      if(files.length){
-        filesHtml=`<div class="fg"><label>📎 Reference Documents <span style="font-weight:400;color:var(--muted);font-size:11px">(tick to include as links in the email body)</span></label>
-          <div style="display:flex;flex-direction:column;gap:5px;background:var(--input);border:1px solid var(--border);border-radius:6px;padding:10px 12px;max-height:180px;overflow:auto">
-          ${files.map(f=>{
-            const cat=FILE_CATEGORIES.find(c=>c.id===f.category);const icon=cat?cat.icon:'📎';
-            const loc=f.scope==='level_area'?` <span style="color:#E65100;font-size:11px">(${esc(f.level)}/${esc(f.area)})</span>`:'';
-            return `<label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--gray-dk);cursor:pointer;font-weight:400"><input type="checkbox" class="em_file_box" data-url="${esc(f.file_url)}" data-label="${esc(f.label)}" style="width:auto" checked> ${icon} <b>${esc(f.label)}</b>${loc}</label>`;
-          }).join('')}
-          </div></div>`;
-      }
-    }
+    if(e)files=projectFilesFor(e.project,e.level,e.area,{scope:'row'});
+  }else if(projectName){
+    // Bulk email — show everything for the project. Not pre-ticked (user decides which apply).
+    files=projectFilesFor(projectName,null,null,{scope:'all'}).filter(f=>!f.superseded);
+    preTick=false;
+  }
+  if(files.length){
+    const emptyState=preTick?'':'';
+    const helperText=preTick
+      ? '(tick to include as links in the email body)'
+      : '(optional — tick any files you want to include as links in the email body)';
+    filesHtml=`<div class="fg"><label>📎 Reference Documents <span style="font-weight:400;color:var(--muted);font-size:11px">${helperText}</span></label>
+      <div style="display:flex;flex-direction:column;gap:5px;background:var(--input);border:1px solid var(--border);border-radius:6px;padding:10px 12px;max-height:180px;overflow:auto">
+      ${files.map(f=>{
+        const cat=FILE_CATEGORIES.find(c=>c.id===f.category);const icon=cat?cat.icon:'📎';
+        const loc=f.scope==='level_area'?` <span style="color:#E65100;font-size:11px">(${esc(f.level)}/${esc(f.area)})</span>`:' <span style="color:#2E7D32;font-size:11px">(project-wide)</span>';
+        return `<label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--gray-dk);cursor:pointer;font-weight:400"><input type="checkbox" class="em_file_box" data-url="${esc(f.file_url)}" data-label="${esc(f.label)}" style="width:auto"${preTick?' checked':''}> ${icon} <b>${esc(f.label)}</b>${loc}</label>`;
+      }).join('')}
+      </div></div>`;
   }
   $('emailModal').innerHTML=`<h3>Send Email<button class="modal-close" onclick="closeOv('emailOv')">&times;</button></h3>
 <div class="fg"><label>To</label><input type="email" id="em_to" value="${esc(toVal)}" placeholder="orders@ausreo.com.au"></div>
@@ -2293,7 +2305,7 @@ function openOrderCreatedEmail(rows,projectName){
     ? `The following ordered delivery dates have been set:`
     : `An ordered delivery date has been set for the following:`;
   const body=`Hi,\n\n${intro}\n\n${lines.join('\n')}\n\nPlease confirm receipt and the supplier delivery ${isBulk?'dates':'date'}.${EMAIL_FOOTER_TEXT}\n\nRegards,\n${userName}\nDebono Bros Concreting`;
-  emailModal(subject,body,null,'order_created')}
+  emailModal(subject,body,null,'order_created',projectName)}
 
 /* ═══ ADMIN: STEEL FIXERS ═══ */
 let sfSort={col:'our_delivery_date',asc:true};
