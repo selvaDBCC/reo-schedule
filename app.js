@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b5.5.1';
+const APP_VERSION='b5.6';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const ADMIN_PIN='7519', BUCKET='schedules';
@@ -19,6 +19,8 @@ function initSupabase(){
   sb=supabase.createClient(SUPA_URL,SUPA_KEY);
   return sb}
 let projects=[],entries=[],emailContacts=[],pendingFile=null,pendingMarkups=[],editingId=null,adminUnlocked=false;
+// b5.6 — Project reference files (marking plans, construction sequences, design notes, site photos)
+let projectFiles=[];
 // b5.3 multi-upload: each item = {id, file, splitRef, supDate, schedule, weight, drawing, extracted, status}
 let multiUploadItems=[],multiUploadSeq=0;
 let sortCol="created_at",sortAsc=false,userName=localStorage.getItem('reo_user_name')||'';
@@ -52,12 +54,38 @@ function chunksToPlain(chunks){
   if(!chunks.length)return'';
   return chunks.map(c=>{const auth=Array.isArray(c.authors)?c.authors.join(' · '):'';return c.text+(auth?' ['+auth+']':'')}).join('\n');}
 // HTML rendering for full display in popups / detail view. Each chunk on its own line with pill.
+// Whitelist of safe URL schemes for markdown links. Prevents javascript: and data: injections.
+function isSafeUrl(u){
+  if(typeof u!=='string')return false;
+  const t=u.trim().toLowerCase();
+  return t.startsWith('http://')||t.startsWith('https://')||t.startsWith('mailto:');
+}
+// Convert a chunk's plain text into HTML with markdown-style [label](url) links resolved
+// to real <a> tags. Escapes everything else. NEVER breaks the XSS defence — link text and
+// URL are BOTH escaped, and unsafe URL schemes cause the link to fall through to plain text.
+function renderChunkText(txt){
+  if(!txt)return'';
+  // Regex: [ label ] ( url )   — label is non-] chars, url is non-whitespace, non-)
+  const parts=[];let last=0;
+  const re=/\[([^\]]+)\]\(([^\s)]+)\)/g;let m;
+  while((m=re.exec(txt))!==null){
+    if(m.index>last)parts.push({t:'text',v:txt.slice(last,m.index)});
+    parts.push({t:'link',label:m[1],url:m[2]});
+    last=m.index+m[0].length;
+  }
+  if(last<txt.length)parts.push({t:'text',v:txt.slice(last)});
+  return parts.map(p=>{
+    if(p.t==='text')return esc(p.v).replace(/\n/g,'<br>');
+    if(!isSafeUrl(p.url))return esc(p.label);// unsafe URL scheme → render as plain text
+    return '<a href="'+esc(p.url)+'" target="_blank" rel="noopener noreferrer" style="color:var(--accent-dk);text-decoration:underline">'+esc(p.label)+'</a>';
+  }).join('');
+}
 function chunksToHtml(chunks){
   if(!chunks.length)return'<span style="color:var(--muted);font-style:italic">No comments</span>';
   return chunks.map(c=>{
     const auth=Array.isArray(c.authors)?c.authors:[];
     const pill=auth.length?' <span class="cmt-pill">'+auth.map(esc).join(' · ')+'</span>':'';
-    return '<div class="cmt-line">'+esc(c.text||'').replace(/\n/g,'<br>')+pill+'</div>'}).join('');}
+    return '<div class="cmt-line">'+renderChunkText(c.text||'')+pill+'</div>'}).join('');}
 // Dashboard cell — shorter preview (first chunk truncated), with the latest pill.
 function chunksToCell(chunks){
   if(!chunks.length)return'<span style="color:#ccc">—</span>';
@@ -210,6 +238,7 @@ async function init(){
     await loadProjects();if(projects.length===0)await seedProjects();
     await loadEntries();await loadEmailContacts();
     await loadPeople();await loadAssignments();await loadAppSettings();
+    await loadProjectFiles();
     populateDropdowns();subscribeRealtime();
     $('inpDate').value=today();$('inpLooseDate').value=today();
     $('loadingScreen').style.display='none';$('mainApp').style.display='block';
@@ -226,6 +255,13 @@ async function loadEntries(){const{data,error}=await sb.from('entries').select('
 async function loadEmailContacts(){
   const{data,error}=await sb.from('email_contacts').select('*').order('sort_order',{ascending:true}).order('id',{ascending:true});
   if(error){emailContacts=[];return}emailContacts=data||[]}
+
+// b5.6 — Load project reference files. Includes superseded rows; UI filters them by default.
+async function loadProjectFiles(){
+  const{data,error}=await sb.from('project_files').select('*').order('project_name').order('uploaded_at',{ascending:false});
+  if(error){console.warn('[REO] loadProjectFiles failed:',error.message);projectFiles=[];return}
+  projectFiles=data||[];
+}
 
 // ═══ PEOPLE / ASSIGNMENTS / SETTINGS ═══
 // Loaded lazily — first time the admin tab is opened. Falls back to empty/defaults on error
@@ -1131,7 +1167,7 @@ function renderDash(){
 <td>${e.file_url?`<a class="att-link" href="${e.file_url}" target="_blank">📄 ${esc((e.file_name||'').slice(0,14))}</a>`:`<button class="action-btn" onclick="uploadScheduleFile(${e.id})" style="color:var(--accent-dk);font-size:10px">+ Upload</button>`}</td>
 <td>${mp.length?`<button class="att-link markup-link" onclick="viewMarkups(${e.id})">📐 ${mp.length}</button>`:''}<button class="action-btn" onclick="uploadMarkup(${e.id})" style="font-size:10px;color:var(--info)">+📐</button></td>
 <td class="comment-td" onclick="editChunkComment(${e.id},'aus_reo')" title="${esc(chunksToPlain(parseChunks(e.aus_reo_comment)))}"><div class="comment-preview">${chunksToCell(parseChunks(e.aus_reo_comment))}</div></td>
-<td class="comment-td" onclick="editChunkComment(${e.id},'dbcc')" title="${esc(chunksToPlain(parseChunks(e.dbcc_comment)))}"><div class="comment-preview">${chunksToCell(parseChunks(e.dbcc_comment))}</div></td>
+<td class="comment-td" onclick="editChunkComment(${e.id},'dbcc')" title="${esc(chunksToPlain(parseChunks(e.dbcc_comment)))}"><div class="comment-preview">${chunksToCell(parseChunks(e.dbcc_comment))}${rowFilesBadge(e)}</div></td>
 <td><div class="action-cell">
 ${e.status!=='Cancelled'?`<span class="hold-toggle${e.on_hold?' on':''}" onclick="toggleHold(${e.id})" title="Toggle On Hold"><span class="hold-slider"></span></span>`:''}
 <button class="action-btn view" onclick="showDetail(${e.id})">View</button>
@@ -1321,6 +1357,7 @@ ${intro}
 <div class="fg" style="margin-top:14px;border-top:1px solid var(--border);padding-top:14px">
   <label style="display:block;margin-bottom:4px;font-size:12px;font-weight:600;color:var(--gray-dk)">Add new comment</label>
   <textarea id="newChunkInp" rows="3" placeholder="Type your comment..."></textarea>
+  <div style="margin-top:6px"><button class="btn btn-sec btn-sm" onclick="pfAttachToComment(${id})" style="width:auto;font-size:11px;padding:5px 10px">📎 Attach reference file</button></div>
 </div>
 <div style="display:flex;gap:8px;justify-content:space-between;margin-top:14px">
   <button class="btn btn-err btn-sm" onclick="clearChunkComment(${id},'${col}')" style="width:auto" ${chunks.length?'':'disabled'}>Clear All</button>
@@ -1540,10 +1577,31 @@ function emailModal(subject,body,entryId,auditContext){
   const ccCheckboxes=others.length
     ? `<div style="display:flex;flex-direction:column;gap:6px;background:var(--input);border:1px solid var(--border);border-radius:6px;padding:10px 12px">${others.map((c,i)=>`<label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--gray-dk);cursor:pointer"><input type="checkbox" class="em_cc_box" data-email="${esc(c.email)}" style="width:auto"> <b>${esc(c.label)}</b> <span style="color:var(--muted);font-family:'JetBrains Mono',monospace;font-size:11px">${esc(c.email)}</span></label>`).join('')}</div>`
     : '<p style="font-size:11px;color:var(--muted);margin:0;font-style:italic">No additional contacts saved. Add them in Admin → Email Contacts.</p>';
+  // b5.6 — reference file attachments (as clickable links in the email body).
+  // Only shown when we have an entry context (project/level/area known). Bulk-order emails
+  // (entryId=null) skip this since we don't know which project to filter by.
+  let filesHtml='';
+  if(entryId){
+    const e=entries.find(x=>x.id===entryId);
+    if(e){
+      const files=projectFilesFor(e.project,e.level,e.area,{scope:'row'});
+      if(files.length){
+        filesHtml=`<div class="fg"><label>📎 Reference Documents <span style="font-weight:400;color:var(--muted);font-size:11px">(tick to include as links in the email body)</span></label>
+          <div style="display:flex;flex-direction:column;gap:5px;background:var(--input);border:1px solid var(--border);border-radius:6px;padding:10px 12px;max-height:180px;overflow:auto">
+          ${files.map(f=>{
+            const cat=FILE_CATEGORIES.find(c=>c.id===f.category);const icon=cat?cat.icon:'📎';
+            const loc=f.scope==='level_area'?` <span style="color:#E65100;font-size:11px">(${esc(f.level)}/${esc(f.area)})</span>`:'';
+            return `<label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--gray-dk);cursor:pointer;font-weight:400"><input type="checkbox" class="em_file_box" data-url="${esc(f.file_url)}" data-label="${esc(f.label)}" style="width:auto" checked> ${icon} <b>${esc(f.label)}</b>${loc}</label>`;
+          }).join('')}
+          </div></div>`;
+      }
+    }
+  }
   $('emailModal').innerHTML=`<h3>Send Email<button class="modal-close" onclick="closeOv('emailOv')">&times;</button></h3>
 <div class="fg"><label>To</label><input type="email" id="em_to" value="${esc(toVal)}" placeholder="orders@ausreo.com.au"></div>
 <div class="fg"><label>CC <span style="font-weight:400;color:var(--muted);font-size:11px">(tick to include, or add custom below)</span></label>${ccCheckboxes}<input type="text" id="em_cc_extra" placeholder="Add another email (optional)" style="margin-top:6px"></div>
 <div class="fg"><label>Subject</label><input type="text" id="em_sub" value="${esc(subject)}"></div>
+${filesHtml}
 <div class="fg"><label>Message</label><textarea id="em_body" rows="12" style="font-size:13px">${esc(body)}</textarea></div>
 <p style="font-size:11px;color:var(--muted);margin-top:4px">Clicking Send will open your default email app (Outlook, Gmail, etc.) with the message pre-filled. Review and hit Send in your email app.</p>
 <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn btn-sec btn-sm" onclick="closeOv('emailOv')">Cancel</button><button class="btn btn-purple btn-sm" onclick="sendEmail(${entryId},'${esc(auditContext)}')" style="width:auto">✉ Open in Email</button></div>`;$('emailOv').classList.add('show')}
@@ -1564,7 +1622,8 @@ function openHoldEmail(id){const e=entries.find(x=>x.id===id);if(!e)return;
   emailModal(subject,body,id,'on_hold')}
 
 async function sendEmail(id,context){
-  const to=$('em_to').value.trim(),sub=$('em_sub').value.trim(),body=$('em_body').value.trim();
+  const to=$('em_to').value.trim(),sub=$('em_sub').value.trim();
+  let body=$('em_body').value.trim();
   if(!to)return alert('Enter recipient');
   // Gather CC list from checkboxes + manual extra
   const ccEmails=[];
@@ -1572,11 +1631,21 @@ async function sendEmail(id,context){
   const extra=($('em_cc_extra')&&$('em_cc_extra').value||'').trim();
   if(extra)ccEmails.push(extra);
   const cc=ccEmails.join(',');
+  // b5.6 — Append reference file links (mailto can't carry actual attachments, so we include
+  // clickable Supabase Storage URLs the recipient can open in their browser).
+  const files=[];
+  document.querySelectorAll('.em_file_box:checked').forEach(b=>{
+    const u=b.getAttribute('data-url'),l=b.getAttribute('data-label');
+    if(u&&l)files.push({url:u,label:l});
+  });
+  if(files.length){
+    body+='\n\n─── Reference documents ───\n'+files.map(f=>`• ${f.label}: ${f.url}`).join('\n');
+  }
   // IMPORTANT: log the audit entry BEFORE opening the mailto URL.
   // Some browsers (mobile especially) suspend or unfocus the page when mailto: triggers
   // the OS email handler, which can drop the audit log insert if it runs after.
   // Doing the insert first guarantees the notification timeline gets the entry.
-  const auditNote='To: '+to+(cc?' · CC: '+cc:'')+' — '+sub;
+  const auditNote='To: '+to+(cc?' · CC: '+cc:'')+' — '+sub+(files.length?` · ${files.length} ref doc${files.length===1?'':'s'} attached`:'');
   try{await auditLog({entry_id:id,action:'EMAIL_SENT',field_changed:context,new_value:auditNote})}
   catch(e){console.warn('[REO] email audit log failed:',e.message)}
   let url=`mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(sub)}&body=${encodeURIComponent(body)}`;
@@ -1749,10 +1818,10 @@ function checkPin(){
   if($('pinInp').value===ADMIN_PIN){adminUnlocked=true;$('pinGate').style.display='none';$('adminContent').style.display='block';showAdminSub('proj');$('pinInp').value='';$('pinErr').innerHTML=''}
   else{$('pinErr').innerHTML='<div class="error-msg">Wrong PIN</div>';$('pinInp').value=''}}
 function lockAdmin(){adminUnlocked=false;$('pinGate').style.display='block';$('adminContent').style.display='none'}
-function showAdminSub(s){['proj','program','fixers','people','assign','account','contacts','audit'].forEach(t=>{
+function showAdminSub(s){['proj','files','program','fixers','people','assign','account','contacts','audit'].forEach(t=>{
   const tab=$('at'+t.charAt(0).toUpperCase()+t.slice(1));if(tab)tab.classList.toggle('active',t===s);
   const panel=$('admin'+t.charAt(0).toUpperCase()+t.slice(1));if(panel)panel.style.display=t===s?'block':'none'});
-  if(s==='proj')renderAdminProj();if(s==='program')renderAdminProgram();if(s==='fixers')renderAdminFixers();
+  if(s==='proj')renderAdminProj();if(s==='files')renderAdminFiles();if(s==='program')renderAdminProgram();if(s==='fixers')renderAdminFixers();
   if(s==='people')renderAdminPeople();if(s==='assign')renderAdminAssign();if(s==='account')renderAdminAccount();
   if(s==='contacts')renderAdminContacts();if(s==='audit')loadAuditLog()}
 
@@ -1781,6 +1850,348 @@ function deleteProj(id){const p=projects.find(pr=>pr.id===id);if(!p)return;
   confirmDialog('Delete Project?','Delete "'+esc(p.name)+'"? Existing entries will not be affected.','Delete','btn-err',async()=>{
     await sb.from('projects').delete().eq('id',id);await auditLog({action:'PROJECT_DELETE',old_value:p.name});
     await loadProjects();populateDropdowns();renderProjList()})}
+
+/* ═══ ADMIN: PROJECT FILES (b5.6) ═══
+   Reference documents (marking plans, construction sequences, design notes, site photos).
+   Uploaded by DBCC admins (Selva/Marc/Troy/Chris/Daniel), visible to all users.
+   Files can be project-wide or level+area-specific. Supersession preserves history. */
+const FILE_CATEGORIES=[
+  {id:'marking_plan',       label:'Marking Plan',        icon:'📐'},
+  {id:'construction_sequence',label:'Construction Sequence',icon:'🏗️'},
+  {id:'design_notes',       label:'Design Notes',         icon:'📝'},
+  {id:'site_photo',         label:'Site Photo',           icon:'📷'},
+  {id:'other',              label:'Other',                icon:'📎'}
+];
+const FILE_BUCKET='project-files';
+let pfShowSuperseded=false; // toggle for admin view
+
+function fileCategoryLabel(id){const c=FILE_CATEGORIES.find(x=>x.id===id);return c?c.icon+' '+c.label:id}
+
+// Return the list of files for a project, optionally filtered to a level/area and hiding superseded.
+// scope='project' returns only project-wide docs; scope='row' returns project-wide + this row's matching level/area.
+function projectFilesFor(projectName,level,area,{includeSuperseded=false,scope='row'}={}){
+  return projectFiles.filter(f=>{
+    if(f.project_name!==projectName)return false;
+    if(!includeSuperseded&&f.superseded)return false;
+    if(scope==='project')return f.scope==='project';
+    if(scope==='row'){
+      if(f.scope==='project')return true;
+      return f.level===level&&f.area===area;
+    }
+    return true;// scope='all'
+  });
+}
+
+// ── Admin management screen ──
+function renderAdminFiles(){
+  const el=$('adminFiles');if(!el)return;
+  el.innerHTML=`
+    <div class="card" style="margin-bottom:18px">
+      <h3 style="font-size:15px;font-weight:700;margin-bottom:12px;color:var(--gray-dk)">Upload Reference Document</h3>
+      <div class="row2">
+        <div class="fg"><label>Project</label><select id="pfProj" onchange="pfOnProjChange()"><option value="">Choose project…</option>${projects.map(p=>`<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('')}</select></div>
+        <div class="fg"><label>Category</label><select id="pfCat">${FILE_CATEGORIES.map(c=>`<option value="${c.id}">${c.icon} ${c.label}</option>`).join('')}</select></div>
+      </div>
+      <div class="fg" style="margin-top:10px"><label>Scope</label>
+        <div style="display:flex;gap:14px;flex-wrap:wrap">
+          <label style="display:flex;gap:6px;align-items:center;cursor:pointer;font-weight:400;color:var(--text);margin-bottom:0"><input type="radio" name="pfScope" value="project" checked onchange="pfOnScopeChange()"> Project-wide</label>
+          <label style="display:flex;gap:6px;align-items:center;cursor:pointer;font-weight:400;color:var(--text);margin-bottom:0"><input type="radio" name="pfScope" value="level_area" onchange="pfOnScopeChange()"> Specific level + area</label>
+        </div>
+      </div>
+      <div class="row2" id="pfScopeFields" style="display:none;margin-top:6px">
+        <div class="fg"><label>Level</label><select id="pfLevel"><option value="">Choose level…</option></select></div>
+        <div class="fg"><label>Area</label><select id="pfArea"><option value="">Choose area…</option></select></div>
+      </div>
+      <div class="fg" style="margin-top:10px"><label>Friendly Label <span style="font-weight:400;color:var(--muted);font-size:11px">(shown to users, e.g. "L2 Marking Plan v2")</span></label><input type="text" id="pfLabel" placeholder="e.g. L2 Marking Plan v2"></div>
+      <div class="fg" style="margin-top:10px"><label>File</label>
+        <div class="fzone" id="pfDropZone" onclick="document.getElementById('pfFileInp').click()">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#7A7A7A" stroke-width="1.5" style="margin-bottom:8px"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          <p><strong>Choose file</strong> — PDF or image (up to 50 MB)</p>
+          <p id="pfFileName" style="font-size:12px;margin-top:4px;color:var(--accent-dk);font-weight:600"></p>
+          <input type="file" id="pfFileInp" accept=".pdf,.jpg,.jpeg,.png,.gif,.webp" onchange="pfOnFileSelect(this.files)">
+        </div>
+      </div>
+      <div class="fg" style="margin-top:10px">
+        <label style="display:flex;gap:6px;align-items:center;cursor:pointer;font-weight:400;color:var(--text);margin-bottom:0"><input type="checkbox" id="pfSuperseding"> This supersedes an existing file (choose which below after selecting project)</label>
+      </div>
+      <div class="fg" id="pfSupersedeWrap" style="display:none;margin-top:6px">
+        <label>Supersedes</label>
+        <select id="pfSupersedes"><option value="">Choose the file being replaced…</option></select>
+      </div>
+      <div style="display:flex;gap:10px;margin-top:14px;align-items:center">
+        <button class="btn btn-sm" onclick="pfUpload()" id="pfUploadBtn" style="width:auto">Upload File</button>
+        <button class="btn btn-sec btn-sm" onclick="pfResetForm()" style="width:auto">Reset</button>
+        <div id="pfUploadInfo" style="flex:1"></div>
+      </div>
+      <div id="pfUploadErr"></div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;gap:8px;flex-wrap:wrap">
+        <h3 style="font-size:15px;font-weight:700;color:var(--gray-dk);margin:0">All Reference Files (<span id="pfCount">0</span>)</h3>
+        <label style="display:flex;gap:6px;align-items:center;cursor:pointer;font-weight:400;font-size:12px;color:var(--muted);margin:0"><input type="checkbox" id="pfShowSuper" ${pfShowSuperseded?'checked':''} onchange="pfToggleSuperseded(this.checked)"> Show superseded (history)</label>
+      </div>
+      <div id="pfList"></div>
+    </div>`;
+  pfResetForm();
+  renderAdminFilesList();
+}
+
+function pfOnProjChange(){
+  const proj=$('pfProj').value;
+  // Populate level/area dropdowns for that project
+  const p=projects.find(x=>x.name===proj);
+  const lSel=$('pfLevel'),aSel=$('pfArea');
+  if(lSel){lSel.innerHTML='<option value="">Choose level…</option>'+(p?p.levels.map(l=>`<option>${esc(l)}</option>`).join(''):'')}
+  if(aSel){aSel.innerHTML='<option value="">Choose area…</option>'+(p?p.areas.map(a=>`<option>${esc(a)}</option>`).join(''):'')}
+  // Refresh supersede-target dropdown
+  pfRefreshSupersedeOptions();
+}
+function pfOnScopeChange(){
+  const scope=document.querySelector('input[name="pfScope"]:checked').value;
+  $('pfScopeFields').style.display=scope==='level_area'?'flex':'none';
+  pfRefreshSupersedeOptions();
+}
+function pfRefreshSupersedeOptions(){
+  const proj=$('pfProj').value;const wrap=$('pfSupersedeWrap');const sel=$('pfSupersedes');const chk=$('pfSuperseding');
+  if(!proj){wrap.style.display='none';chk.checked=false;return}
+  const opts=projectFilesFor(proj,null,null,{scope:'all'}).filter(f=>!f.superseded);
+  sel.innerHTML='<option value="">Choose the file being replaced…</option>'+opts.map(f=>{
+    const loc=f.scope==='level_area'?` (${esc(f.level)}/${esc(f.area)})`:' (project-wide)';
+    return `<option value="${f.id}">${fileCategoryLabel(f.category)} — ${esc(f.label)}${loc}</option>`;
+  }).join('');
+  wrap.style.display=chk.checked?'block':'none';
+}
+
+function pfOnFileSelect(files){
+  const f=files&&files[0];if(!f)return;
+  $('pfFileName').textContent='📄 '+f.name;
+  window._pfPendingFile=f;
+  // If no label typed yet, seed a suggestion from the filename
+  if(!$('pfLabel').value.trim()){
+    const stem=f.name.replace(/\.[a-z0-9]+$/i,'').replace(/[_-]+/g,' ');
+    $('pfLabel').value=stem;
+  }
+}
+
+function pfResetForm(){
+  const els=['pfProj','pfCat','pfLabel','pfLevel','pfArea','pfSupersedes'];
+  els.forEach(id=>{const e=$(id);if(e)e.value=e.tagName==='SELECT'?'':''});
+  const cat=$('pfCat');if(cat)cat.value='marking_plan';
+  const projRadio=document.querySelector('input[name="pfScope"][value="project"]');if(projRadio)projRadio.checked=true;
+  $('pfScopeFields').style.display='none';
+  $('pfFileName').textContent='';$('pfFileInp').value='';
+  window._pfPendingFile=null;
+  const chk=$('pfSuperseding');if(chk)chk.checked=false;
+  $('pfSupersedeWrap').style.display='none';
+  $('pfUploadErr').innerHTML='';$('pfUploadInfo').innerHTML='';
+}
+
+function pfToggleSuperseded(v){pfShowSuperseded=v;renderAdminFilesList()}
+
+// Wire the supersedes-checkbox to show/hide the dropdown
+document.addEventListener('change',e=>{
+  if(e.target&&e.target.id==='pfSuperseding'){
+    $('pfSupersedeWrap').style.display=e.target.checked?'block':'none';
+  }
+});
+
+async function pfUpload(){
+  const err=$('pfUploadErr'),info=$('pfUploadInfo');err.innerHTML='';info.innerHTML='';
+  const proj=$('pfProj').value;
+  const cat=$('pfCat').value;
+  const scope=document.querySelector('input[name="pfScope"]:checked').value;
+  const label=$('pfLabel').value.trim();
+  const level=scope==='level_area'?$('pfLevel').value:null;
+  const area=scope==='level_area'?$('pfArea').value:null;
+  const file=window._pfPendingFile;
+  const supersedes=$('pfSuperseding').checked?parseInt($('pfSupersedes').value,10)||null:null;
+  if(!proj){err.innerHTML='<div class="error-msg">Choose a project</div>';return}
+  if(!label){err.innerHTML='<div class="error-msg">Enter a friendly label</div>';return}
+  if(!file){err.innerHTML='<div class="error-msg">Choose a file</div>';return}
+  if(scope==='level_area'&&(!level||!area)){err.innerHTML='<div class="error-msg">Choose level and area for level+area-specific files</div>';return}
+  if($('pfSuperseding').checked&&!supersedes){err.innerHTML='<div class="error-msg">Choose the file being superseded, or untick the box</div>';return}
+  const btn=$('pfUploadBtn');btn.disabled=true;info.innerHTML='<div class="info-msg">Uploading…</div>';
+  try{
+    // Upload to project-files bucket
+    const safe=file.name.replace(/[^a-zA-Z0-9._-]/g,'_'),ts=Date.now()+'_'+Math.floor(Math.random()*9999);
+    const folder=proj.replace(/[^a-zA-Z0-9._-]/g,'_');
+    const path=`${folder}/${ts}_${safe}`;
+    const{error:upErr}=await sb.storage.from(FILE_BUCKET).upload(path,file,{upsert:false});
+    if(upErr)throw upErr;
+    const publicUrl=sb.storage.from(FILE_BUCKET).getPublicUrl(path).data.publicUrl;
+    // Insert row
+    const{data,error:insErr}=await sb.from('project_files').insert({
+      project_name:proj,category:cat,scope,level,area,label,
+      file_url:publicUrl,file_name:file.name,uploaded_by:userName||'Unknown'
+    }).select().single();
+    if(insErr)throw insErr;
+    // If superseding, mark the old row
+    if(supersedes){
+      const{error:supErr}=await sb.from('project_files').update({
+        superseded:true,superseded_by_id:data.id,superseded_at:new Date().toISOString()
+      }).eq('id',supersedes);
+      if(supErr)console.warn('[REO] supersede update failed:',supErr.message);
+      await auditLog({action:'UPDATE',field_changed:'project_file_superseded',new_value:`Superseded file #${supersedes} with new #${data.id} (${proj}/${label})`});
+    }
+    await auditLog({action:'CREATE',field_changed:'project_file',new_value:`${proj}/${label} [${cat}${scope==='level_area'?', '+level+'/'+area:''}]`});
+    info.innerHTML='<div class="info-msg" style="background:var(--success-lt);color:var(--success);border-color:var(--success-lt)">✓ Uploaded</div>';
+    pfResetForm();await loadProjectFiles();renderAdminFilesList();
+  }catch(e){
+    err.innerHTML='<div class="error-msg">'+esc(e.message||'Upload failed')+'</div>';
+  }
+  btn.disabled=false;
+}
+
+function renderAdminFilesList(){
+  const w=$('pfList');if(!w)return;
+  const visible=projectFiles.filter(f=>pfShowSuperseded||!f.superseded);
+  $('pfCount').textContent=visible.length;
+  if(!visible.length){w.innerHTML='<div style="font-size:12px;color:var(--muted);font-style:italic;padding:12px">No files yet. Upload the first one above.</div>';return}
+  // Group by project → category
+  const byProj={};visible.forEach(f=>{(byProj[f.project_name]=byProj[f.project_name]||[]).push(f)});
+  const sortedProjects=Object.keys(byProj).sort();
+  w.innerHTML=sortedProjects.map(proj=>{
+    const files=byProj[proj].slice().sort((a,b)=>{
+      // project scope first, then by category, then by uploaded date desc
+      if(a.scope!==b.scope)return a.scope==='project'?-1:1;
+      if(a.category!==b.category)return a.category.localeCompare(b.category);
+      return new Date(b.uploaded_at)-new Date(a.uploaded_at);
+    });
+    return `<div style="margin-bottom:18px;border:1px solid var(--border);border-radius:8px;overflow:hidden">
+      <div style="padding:10px 14px;background:#FAFAF8;border-bottom:1px solid var(--border);font-weight:600;color:var(--gray-dk);font-size:13px">${esc(proj)} <span style="font-weight:400;color:var(--muted);font-size:11px">(${files.length} file${files.length===1?'':'s'})</span></div>
+      <div>${files.map(f=>renderPfRow(f)).join('')}</div>
+    </div>`;
+  }).join('');
+}
+
+function renderPfRow(f){
+  const cat=FILE_CATEGORIES.find(c=>c.id===f.category);
+  const catBadge=cat?`<span style="display:inline-block;background:var(--accent-lt);color:var(--accent-dk);padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600">${cat.icon} ${cat.label}</span>`:esc(f.category);
+  const scopeBadge=f.scope==='project'
+    ? '<span style="display:inline-block;background:#E8F5E9;color:#2E7D32;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600">Project-wide</span>'
+    : `<span style="display:inline-block;background:#FFF3E0;color:#E65100;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600">${esc(f.level)} / ${esc(f.area)}</span>`;
+  const supBadge=f.superseded?'<span style="display:inline-block;background:#F5F5F5;color:#999;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;text-decoration:line-through">Superseded</span>':'';
+  const uploaded=new Date(f.uploaded_at).toLocaleDateString('en-AU',{day:'2-digit',month:'2-digit',year:'2-digit'});
+  return `<div style="padding:10px 14px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap${f.superseded?';opacity:.65':''}">
+    <div style="flex:1;min-width:250px">
+      <div style="font-weight:600;color:var(--text);font-size:13px;margin-bottom:3px"><a href="${esc(f.file_url)}" target="_blank" rel="noopener" style="color:var(--accent-dk);text-decoration:none" title="${esc(f.file_name)}">${esc(f.label)}</a></div>
+      <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:3px">${catBadge}${scopeBadge}${supBadge}</div>
+      <div style="font-size:11px;color:var(--muted)">By ${esc(f.uploaded_by)} on ${uploaded}</div>
+    </div>
+    <button class="btn btn-err btn-sm" onclick="pfDelete(${f.id})" style="width:auto;font-size:11px;padding:5px 10px">Delete</button>
+  </div>`;
+}
+
+function pfDelete(id){
+  const f=projectFiles.find(x=>x.id===id);if(!f)return;
+  confirmDialog('Delete file?','Delete "'+esc(f.label)+'" from '+esc(f.project_name)+'? The file will be removed from storage and cannot be recovered. Any comments or emails that linked to it will show a broken link.','Delete','btn-err',async()=>{
+    // Try to remove from storage (best-effort; row deletion happens regardless)
+    try{
+      const url=f.file_url;const idx=url.indexOf('/'+FILE_BUCKET+'/');
+      if(idx>=0){const path=url.slice(idx+FILE_BUCKET.length+2);await sb.storage.from(FILE_BUCKET).remove([decodeURIComponent(path)])}
+    }catch(e){console.warn('[REO] storage remove failed:',e.message)}
+    await sb.from('project_files').delete().eq('id',id);
+    await auditLog({action:'CANCEL',field_changed:'project_file',old_value:`${f.project_name}/${f.label}`,new_value:'deleted'});
+    await loadProjectFiles();renderAdminFilesList();
+  });
+}
+
+// ── Dashboard badge (b5.6) — small 📎 indicator on rows whose project has reference files.
+//    Filtered to what's relevant to THIS row (project-wide + matching level/area).
+//    stopPropagation on the click so it doesn't also open the comment editor. ──
+function rowFilesBadge(e){
+  const files=projectFilesFor(e.project,e.level,e.area,{scope:'row'});
+  if(!files.length)return '';
+  return ` <span class="pf-row-badge" title="${files.length} reference file${files.length===1?'':'s'} available — click to view" onclick="event.stopPropagation();openProjectFilesViewer('${esc(e.project).replace(/'/g,"\\'")}',${e.level?"'"+esc(e.level).replace(/'/g,"\\'")+"'":'null'},${e.area?"'"+esc(e.area).replace(/'/g,"\\'")+"'":'null'})">📎 ${files.length}</span>`;
+}
+
+// ── File viewer modal — for a given project + optional level/area context. ──
+function openProjectFilesViewer(project,level,area){
+  const files=projectFilesFor(project,level,area,{scope:'row'});
+  const projectWide=files.filter(f=>f.scope==='project');
+  const specific=files.filter(f=>f.scope==='level_area');
+  const contextLine=level&&area
+    ? `<p style="font-size:12px;color:var(--muted);margin-bottom:14px">Showing files for <b>${esc(project)}</b> — project-wide docs plus anything specific to ${esc(level)} / ${esc(area)}.</p>`
+    : `<p style="font-size:12px;color:var(--muted);margin-bottom:14px">Showing all files for <b>${esc(project)}</b>.</p>`;
+  const renderGroup=(title,arr)=>{
+    if(!arr.length)return '';
+    // Group by category
+    const byCat={};arr.forEach(f=>{(byCat[f.category]=byCat[f.category]||[]).push(f)});
+    const cats=FILE_CATEGORIES.filter(c=>byCat[c.id]);
+    return `<div style="margin-bottom:16px">
+      <div style="font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--gray-dk);margin-bottom:8px;padding-bottom:4px;border-bottom:1px solid var(--border)">${title}</div>
+      ${cats.map(c=>`<div style="margin-bottom:8px">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:4px">${c.icon} ${c.label}</div>
+        ${byCat[c.id].map(f=>{
+          const loc=f.scope==='level_area'?` <span style="font-size:10px;color:#E65100">(${esc(f.level)}/${esc(f.area)})</span>`:'';
+          const date=new Date(f.uploaded_at).toLocaleDateString('en-AU',{day:'2-digit',month:'2-digit',year:'2-digit'});
+          return `<div style="padding:6px 10px;background:#FAFAF8;border:1px solid var(--border);border-radius:6px;margin-bottom:4px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <a href="${esc(f.file_url)}" target="_blank" rel="noopener" style="flex:1;min-width:200px;color:var(--accent-dk);font-weight:600;text-decoration:none;font-size:13px" title="${esc(f.file_name)}">📄 ${esc(f.label)}${loc}</a>
+            <span style="font-size:11px;color:var(--muted)">${esc(f.uploaded_by)} · ${date}</span>
+          </div>`;
+        }).join('')}
+      </div>`).join('')}
+    </div>`;
+  };
+  const body=(!files.length)
+    ?'<div style="padding:20px;text-align:center;color:var(--muted);font-size:13px">No reference files uploaded for this project yet.</div>'
+    :(renderGroup('Project-wide',projectWide)+renderGroup('Level/Area specific',specific));
+  $('viewerModal').innerHTML=`<h3>📎 Reference Files<button class="modal-close" onclick="closeOv('viewerOv')">&times;</button></h3>
+    ${contextLine}
+    ${body}
+    <div style="display:flex;justify-content:flex-end;margin-top:14px"><button class="btn btn-sec btn-sm" onclick="closeOv('viewerOv')" style="width:auto">Close</button></div>`;
+  $('viewerOv').classList.add('show');
+}
+
+// ── Helper: insert file links into the active comment textarea. ──
+// Used inside the comment editor (editChunkComment modal). Shows a picker of
+// project files relevant to the entry, ticked files get appended as markdown
+// links to the "Add new comment" textarea. Existing chunk textareas are left alone.
+function pfAttachToComment(entryId){
+  const e=entries.find(x=>x.id===entryId);if(!e)return;
+  const files=projectFilesFor(e.project,e.level,e.area,{scope:'row'});
+  if(!files.length){
+    alert('No reference files uploaded for '+e.project+' yet. Add them under Admin → Project Files.');
+    return;
+  }
+  const byCat={};files.forEach(f=>{(byCat[f.category]=byCat[f.category]||[]).push(f)});
+  const cats=FILE_CATEGORIES.filter(c=>byCat[c.id]);
+  const html=cats.map(c=>`<div style="margin-bottom:10px"><div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:4px">${c.icon} ${c.label}</div>${byCat[c.id].map(f=>{
+    const loc=f.scope==='level_area'?` <span style="color:#E65100;font-size:11px">(${esc(f.level)}/${esc(f.area)})</span>`:'';
+    return `<label style="display:flex;gap:8px;align-items:center;padding:6px 10px;background:#FAFAF8;border:1px solid var(--border);border-radius:6px;margin-bottom:4px;cursor:pointer;font-weight:400;color:var(--text)">
+      <input type="checkbox" class="pf-att-box" data-url="${esc(f.file_url)}" data-label="${esc(f.label)}">
+      <span style="flex:1;font-size:13px">${esc(f.label)}${loc}</span>
+    </label>`;
+  }).join('')}</div>`).join('');
+  // Reuse the weightModal as a lightweight picker
+  $('weightModal').innerHTML=`<h3>Attach Reference Files<button class="modal-close" onclick="closeOv('weightOv')">&times;</button></h3>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:12px">Tick files to insert as links into your comment.</p>
+    ${html}
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
+      <button class="btn btn-sec btn-sm" onclick="closeOv('weightOv')" style="width:auto">Cancel</button>
+      <button class="btn btn-sm" onclick="pfConfirmAttach()" style="width:auto">Insert</button>
+    </div>`;
+  $('weightOv').classList.add('show');
+}
+
+function pfConfirmAttach(){
+  const picked=[];
+  document.querySelectorAll('.pf-att-box:checked').forEach(b=>{
+    picked.push({url:b.getAttribute('data-url'),label:b.getAttribute('data-label')});
+  });
+  if(!picked.length){closeOv('weightOv');return}
+  // Markdown-style link syntax that chunksToHtml renders as a real link
+  const md=picked.map(p=>`[📎 ${p.label}](${p.url})`).join('  ');
+  const ta=$('newChunkInp');if(ta){
+    const cur=ta.value.trim();
+    ta.value=cur?(cur+'\n'+md):md;
+    ta.focus();
+  }
+  closeOv('weightOv');
+}
+
+
 
 /* ═══ ADMIN: DELIVERY PROGRAM ═══ */
 function renderAdminProgram(){
