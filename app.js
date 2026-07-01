@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b5.6';
+const APP_VERSION='b5.6.1';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const ADMIN_PIN='7519', BUCKET='schedules';
@@ -2038,7 +2038,19 @@ async function pfUpload(){
     info.innerHTML='<div class="info-msg" style="background:var(--success-lt);color:var(--success);border-color:var(--success-lt)">✓ Uploaded</div>';
     pfResetForm();await loadProjectFiles();renderAdminFilesList();
   }catch(e){
-    err.innerHTML='<div class="error-msg">'+esc(e.message||'Upload failed')+'</div>';
+    // Clear the "Uploading…" bar so it doesn't stay stuck when something goes wrong.
+    info.innerHTML='';
+    const msg=e.message||String(e)||'Upload failed';
+    // Detect the most common setup mistake — the storage bucket hasn't been created yet
+    // (the SQL migration adds the table, but the bucket must be created via the Supabase dashboard).
+    if(/bucket.*not.*found|not.*found.*bucket|Bucket not found/i.test(msg)){
+      err.innerHTML='<div class="error-msg"><b>Supabase Storage bucket "project-files" not found.</b><br>Create it in the Supabase dashboard: Storage → New bucket → name <b>project-files</b>, public, then add anon-open policies. See migration_b5.6.sql for full steps.</div>';
+    }else if(/policy|permission|not authorized|unauthorized|row-level security/i.test(msg)){
+      err.innerHTML='<div class="error-msg"><b>Storage policy error:</b> '+esc(msg)+'<br>The bucket exists but doesn\'t have anon-open SELECT/INSERT policies. Add them in Storage → project-files → Policies.</div>';
+    }else{
+      err.innerHTML='<div class="error-msg">'+esc(msg)+'</div>';
+    }
+    console.warn('[REO] pfUpload error:',e);
   }
   btn.disabled=false;
 }
