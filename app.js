@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b5.6.1';
+const APP_VERSION='b5.6.2';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const ADMIN_PIN='7519', BUCKET='schedules';
@@ -1906,7 +1906,7 @@ function renderAdminFiles(){
       <div class="fg" style="margin-top:10px"><label>File</label>
         <div class="fzone" id="pfDropZone" onclick="document.getElementById('pfFileInp').click()">
           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="#7A7A7A" stroke-width="1.5" style="margin-bottom:8px"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-          <p><strong>Choose file</strong> — PDF or image (up to 50 MB)</p>
+          <p><strong>Drop a file here</strong> or <span style="text-decoration:underline;color:var(--accent-dk)">click to choose</span> — PDF or image (up to 50 MB)</p>
           <p id="pfFileName" style="font-size:12px;margin-top:4px;color:var(--accent-dk);font-weight:600"></p>
           <input type="file" id="pfFileInp" accept=".pdf,.jpg,.jpeg,.png,.gif,.webp" onchange="pfOnFileSelect(this.files)">
         </div>
@@ -1935,6 +1935,14 @@ function renderAdminFiles(){
     </div>`;
   pfResetForm();
   renderAdminFilesList();
+  // Wire drag-and-drop on the drop zone (same pattern as formDropZone / multiDropZone).
+  // Done here rather than in setupDragDrop() because this zone is rendered dynamically each
+  // time the user opens the Files tab, not once at page load.
+  const dz=$('pfDropZone');if(dz){
+    ['dragenter','dragover'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.add('dragover')}));
+    ['dragleave','drop'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.classList.remove('dragover')}));
+    dz.addEventListener('drop',e=>{if(e.dataTransfer.files.length)pfOnFileSelect(e.dataTransfer.files)});
+  }
 }
 
 function pfOnProjChange(){
