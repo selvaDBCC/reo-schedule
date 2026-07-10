@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b5.6.3';
+const APP_VERSION='b5.6.5';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const ADMIN_PIN='7519', BUCKET='schedules';
@@ -838,8 +838,19 @@ function parseReoText(pageOneText, allText){
   const miscSummary=sectionTotal('MISCELLANEOUS PRODUCT SUMMARY','([\\d.,]+)');
 
   // ── Body line items: starter bars + bar fallback ──
-  // Starter bars: a Bar Mark ending in "-SB" followed by a real bar product (N/Y/R). Detected by
-  // the mark suffix ALONE — the "STARTER BARS" description is corroborating but never required.
+  // STARTER BAR DETECTION (broad, per Selva's confirmed rule at b5.6.5):
+  //   • Mark contains "SB" as a distinct token — bounded by separators (-, _, /) or by the start
+  //     or end of the mark. Catches: -SB, -SB1, -SB2, SB-, _SB, /SB, SB1, standalone SB. Does NOT
+  //     catch letters that only happen to include "SB" (USB1, MSB4, SBW-1) because those don't
+  //     have SB as a bounded token.
+  //   • OR the notes/description column contains the word "STARTER" (case-insensitive).
+  //   • OR the notes/description column contains the word "SB" as a distinct token
+  //     (case-insensitive), e.g. "PRECAST SB", "COLUMN SB".
+  // Any of these three signals is sufficient. A matched body line is counted exactly once.
+  // Case-insensitive throughout (mark uppercase-normalised, description matched case-insensitively).
+  const STARTER_MARK_RE=/(?:^|[-_/])SB\d*(?:$|[-_/])/i;   // bounded SB in the bar mark
+  const STARTER_DESC_RE=/\bstarter\b/i;                    // "STARTER" as a word in the line
+  const STARTER_DESC_SB_RE=/\bSB\b/i;                      // standalone "SB" as a word in the line
   let bodyStarter=0,starterCount=0,bodyBarSum=0,bodyBarFound=false;
   for(const line of a.split('\n')){
     // <mark> <product Nxx/Yxx/Rxx> <qty> ... <tonne at end>
@@ -847,7 +858,9 @@ function parseReoText(pageOneText, allText){
     if(bm){
       const mark=bm[1].toUpperCase(),tonne=reoNum2(bm[4]);
       if(isNaN(tonne)||tonne<=0)continue;
-      if(/-SB$/.test(mark)){bodyStarter+=tonne;starterCount++;}
+      const markIsStarter=STARTER_MARK_RE.test(mark);
+      const descIsStarter=STARTER_DESC_RE.test(line)||STARTER_DESC_SB_RE.test(line);
+      if(markIsStarter||descIsStarter){bodyStarter+=tonne;starterCount++;}
       bodyBarSum+=tonne;bodyBarFound=true;
     }
   }
@@ -2324,10 +2337,181 @@ function renderAdminFixers(){
     <select id="sfArea" onchange="renderSfTable()"><option value="">All Areas</option>${areas.map(a=>`<option>${esc(a)}</option>`).join('')}</select>
     <input type="text" id="sfSearch" placeholder="Search schedule..." oninput="renderSfTable()">
     <button class="btn btn-sec btn-sm" onclick="exportSfCSV()">Export CSV</button>
+    <button class="btn btn-sec btn-sm" onclick="recalcOpenPreview()" title="Re-run the current parser against every uploaded PDF and preview the changes before applying">🔄 Recalculate All</button>
   </div>
 </div>
 <div class="tcard"><div class="tscroll" id="sfTable"></div></div>`;
   renderSfTable()}
+
+/* ═══ RECALCULATE ALL (b5.6.5) ═══
+   Re-run the current parser against every uploaded PDF and preview the changes before applying.
+   Purpose: after any parser improvement (like the b5.6.5 broadened starter detection), existing
+   entries still hold the OLD extracted values. This tool fetches each PDF, re-parses, and shows
+   a diff so admins can confirm and apply the corrections in bulk instead of re-uploading manually.
+   Admin-PIN gated. Every change is audit-logged. */
+let recalcResults=[]; // [{entry, oldValues, newValues, delta, error}]
+async function recalcOpenPreview(){
+  if(!adminUnlocked){alert('Admin only. Enter the admin PIN first.');return}
+  const list=entries.filter(e=>e.schedule&&e.file_url&&!e.deleted_at);
+  if(!list.length){alert('No schedules to recalculate.');return}
+  if(!confirm(`This will fetch and re-parse ${list.length} PDF schedules. Nothing is changed until you review the preview and confirm. Continue?`))return;
+  // Show progress modal
+  $('viewerModal').innerHTML=`<h3>Recalculating…<button class="modal-close" onclick="closeOv('viewerOv')">&times;</button></h3>
+    <div id="rcProgress" style="padding:20px 4px">
+      <div style="font-size:13px;color:var(--gray-dk);margin-bottom:8px">Fetching and re-parsing schedules…</div>
+      <div style="background:var(--input);border-radius:6px;height:14px;overflow:hidden;margin-bottom:6px"><div id="rcBar" style="background:var(--accent);height:100%;width:0%;transition:width .2s"></div></div>
+      <div id="rcStatus" style="font-size:11px;color:var(--muted)">Starting…</div>
+    </div>`;
+  $('viewerOv').classList.add('show');
+  recalcResults=[];
+  for(let i=0;i<list.length;i++){
+    const e=list[i];
+    $('rcBar').style.width=Math.round(((i+1)/list.length)*100)+'%';
+    $('rcStatus').textContent=`Schedule ${i+1} of ${list.length}: ${e.schedule||'?'} (${e.project})`;
+    try{
+      // Fetch the PDF as a Blob so we can feed it into the same parser used at upload time
+      const resp=await fetch(e.file_url,{cache:'no-store'});
+      if(!resp.ok)throw new Error('HTTP '+resp.status);
+      const blob=await resp.blob();
+      const file=new File([blob],e.file_name||'schedule.pdf',{type:'application/pdf'});
+      const native=await getPdfNativeText(file);
+      if(!native.hasText){
+        recalcResults.push({entry:e,error:'No text layer (image-only PDF)'});continue;
+      }
+      const parsed=parseReoText(native.pageOneText,native.allText);
+      const oldValues={
+        total_weight:e.total_weight, bar_weight:e.bar_weight, starter_weight:e.starter_weight,
+        mesh_sqm:e.mesh_sqm, trench_mesh_lm:e.trench_mesh_lm,
+        recon_status:e.recon_status, recon_diff:e.recon_diff
+      };
+      const newValues={
+        total_weight:parsed.weight!=null?parsed.weight:null,
+        bar_weight:parsed.barWeight!=null?parsed.barWeight:null,
+        starter_weight:parsed.starterWeight!=null?parsed.starterWeight:null,
+        mesh_sqm:parsed.meshSqm!=null?parsed.meshSqm:null,
+        trench_mesh_lm:parsed.trenchLm!=null?parsed.trenchLm:null,
+        recon_status:parsed.reconStatus||null,
+        recon_diff:parsed.reconDiff!=null?parsed.reconDiff:null,
+        recon_reason:parsed.reconReason||null
+      };
+      // Detect any changed field
+      const changed=['total_weight','bar_weight','starter_weight','mesh_sqm','trench_mesh_lm','recon_status'].some(k=>{
+        const a=oldValues[k],b=newValues[k];
+        // treat null/undefined as equal to each other; compare numbers with tiny tolerance
+        if(a==null&&b==null)return false;
+        if(a==null||b==null)return true;
+        if(typeof a==='number'||typeof b==='number'){return Math.abs((+a)-(+b))>0.0005}
+        return String(a)!==String(b);
+      });
+      recalcResults.push({entry:e,oldValues,newValues,changed});
+    }catch(err){
+      recalcResults.push({entry:e,error:err.message||String(err)});
+    }
+  }
+  renderRecalcPreview();
+}
+
+function renderRecalcPreview(){
+  const changed=recalcResults.filter(r=>r.changed&&!r.error);
+  const errors=recalcResults.filter(r=>r.error);
+  const unchanged=recalcResults.filter(r=>!r.changed&&!r.error);
+  const fmt=v=>v==null?'<span style="color:#ccc">—</span>':(typeof v==='number'?parseFloat(v).toFixed(3):esc(String(v)));
+  const diff=(o,n,k)=>{
+    if(o==null&&n==null)return fmt(n);
+    if(o==null||n==null||(typeof o==='number'&&Math.abs(o-n)>0.0005)||(typeof o!=='number'&&o!==n))
+      return `<span style="color:#999;text-decoration:line-through">${fmt(o)}</span> → <b style="color:var(--accent-dk)">${fmt(n)}</b>`;
+    return fmt(n);
+  };
+  let body='';
+  if(!changed.length&&!errors.length){
+    body=`<div class="info-msg" style="background:var(--success-lt);color:var(--success);border-color:var(--success-lt);margin:14px 0">✓ All ${recalcResults.length} schedules already match the current parser — no changes to apply.</div>`;
+  }else{
+    if(changed.length){
+      body+=`<p style="font-size:13px;color:var(--gray-dk);margin:10px 0 8px"><b>${changed.length} schedule${changed.length===1?'':'s'}</b> will change. Tick to apply. ${unchanged.length} unchanged.</p>`;
+      body+=`<div style="margin-bottom:8px;display:flex;gap:8px"><button class="btn btn-sec btn-sm" onclick="rcSelectAll(true)" style="width:auto;font-size:11px;padding:4px 10px">Select all</button><button class="btn btn-sec btn-sm" onclick="rcSelectAll(false)" style="width:auto;font-size:11px;padding:4px 10px">Deselect all</button></div>`;
+      body+=`<div style="max-height:400px;overflow:auto;border:1px solid var(--border);border-radius:6px">
+        <table style="width:100%;font-size:12px;border-collapse:collapse">
+          <thead style="position:sticky;top:0;background:#FAFAF8;z-index:1"><tr>
+            <th style="padding:8px;border-bottom:1px solid var(--border);text-align:left;width:30px"></th>
+            <th style="padding:8px;border-bottom:1px solid var(--border);text-align:left">Schedule</th>
+            <th style="padding:8px;border-bottom:1px solid var(--border);text-align:left">Project / Level / Area</th>
+            <th style="padding:8px;border-bottom:1px solid var(--border);text-align:right">Total</th>
+            <th style="padding:8px;border-bottom:1px solid var(--border);text-align:right">Bar</th>
+            <th style="padding:8px;border-bottom:1px solid var(--border);text-align:right">Starter</th>
+            <th style="padding:8px;border-bottom:1px solid var(--border);text-align:right">Mesh (m²)</th>
+            <th style="padding:8px;border-bottom:1px solid var(--border);text-align:right">Trench (LM)</th>
+            <th style="padding:8px;border-bottom:1px solid var(--border);text-align:center">Recon</th>
+          </tr></thead><tbody>`;
+      changed.forEach((r,i)=>{
+        const e=r.entry;
+        body+=`<tr style="border-top:1px solid var(--border)">
+          <td style="padding:6px 8px"><input type="checkbox" class="rc-apply-box" data-idx="${i}" checked></td>
+          <td style="padding:6px 8px;font-weight:600"><a href="${esc(e.file_url)}" target="_blank" rel="noopener" style="color:var(--accent-dk);text-decoration:none">${esc(e.schedule||'?')}</a></td>
+          <td style="padding:6px 8px;color:var(--muted);font-size:11px">${esc(e.project||'')}<br>${esc(e.level||'—')} / ${esc(e.area||'—')}</td>
+          <td style="padding:6px 8px;text-align:right">${diff(r.oldValues.total_weight,r.newValues.total_weight,'total_weight')}</td>
+          <td style="padding:6px 8px;text-align:right">${diff(r.oldValues.bar_weight,r.newValues.bar_weight,'bar_weight')}</td>
+          <td style="padding:6px 8px;text-align:right">${diff(r.oldValues.starter_weight,r.newValues.starter_weight,'starter_weight')}</td>
+          <td style="padding:6px 8px;text-align:right">${diff(r.oldValues.mesh_sqm,r.newValues.mesh_sqm,'mesh_sqm')}</td>
+          <td style="padding:6px 8px;text-align:right">${diff(r.oldValues.trench_mesh_lm,r.newValues.trench_mesh_lm,'trench_mesh_lm')}</td>
+          <td style="padding:6px 8px;text-align:center">${diff(r.oldValues.recon_status,r.newValues.recon_status,'recon_status')}</td>
+        </tr>`;
+      });
+      body+=`</tbody></table></div>`;
+    }
+    if(errors.length){
+      body+=`<div style="margin-top:14px"><h4 style="font-size:13px;color:var(--err);margin-bottom:6px">${errors.length} error${errors.length===1?'':'s'}</h4><div style="max-height:150px;overflow:auto;font-size:11px;background:#FDF6F6;border:1px solid #F5C6C6;border-radius:6px;padding:8px">`;
+      errors.forEach(r=>{body+=`<div style="margin-bottom:4px"><b>${esc(r.entry.schedule||'?')}</b> (${esc(r.entry.project||'')}): ${esc(r.error)}</div>`});
+      body+=`</div></div>`;
+    }
+  }
+  const applyBtn=changed.length?`<button class="btn btn-sm" onclick="recalcApply()" id="rcApplyBtn" style="width:auto">Apply Changes</button>`:'';
+  $('viewerModal').innerHTML=`<h3>Recalculation Preview<button class="modal-close" onclick="closeOv('viewerOv')">&times;</button></h3>
+    ${body}
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px">
+      <button class="btn btn-sec btn-sm" onclick="closeOv('viewerOv')" style="width:auto">Cancel</button>
+      ${applyBtn}
+    </div>`;
+}
+
+function rcSelectAll(v){document.querySelectorAll('.rc-apply-box').forEach(b=>b.checked=v)}
+
+async function recalcApply(){
+  const boxes=[...document.querySelectorAll('.rc-apply-box:checked')];
+  if(!boxes.length){alert('No changes selected.');return}
+  const changed=recalcResults.filter(r=>r.changed&&!r.error);
+  const btn=$('rcApplyBtn');btn.disabled=true;btn.textContent='Applying…';
+  let ok=0,fail=0;
+  for(const box of boxes){
+    const idx=parseInt(box.getAttribute('data-idx'),10);
+    const r=changed[idx];if(!r)continue;
+    try{
+      // Reset recon_reviewed on any row whose recon_status is changing — the review flag was
+      // set against the OLD values, so if the reconciliation status changes, the review needs
+      // to be re-done. If recon_status is unchanged, leave the review flag alone.
+      const update={...r.newValues};
+      if(r.oldValues.recon_status!==r.newValues.recon_status){
+        update.recon_reviewed=false;update.recon_reviewed_by=null;
+      }
+      const{error}=await sb.from('entries').update(update).eq('id',r.entry.id);
+      if(error)throw error;
+      // Audit log — record the change with old→new for the key fields
+      const summary=['bar_weight','starter_weight','mesh_sqm','trench_mesh_lm','recon_status'].filter(k=>{
+        const a=r.oldValues[k],b=r.newValues[k];
+        if(a==null&&b==null)return false;
+        if(a==null||b==null)return true;
+        if(typeof a==='number'||typeof b==='number')return Math.abs((+a)-(+b))>0.0005;
+        return String(a)!==String(b);
+      }).map(k=>`${k}: ${r.oldValues[k]??'—'} → ${r.newValues[k]??'—'}`).join('; ');
+      await auditLog({entry_id:r.entry.id,action:'UPDATE',field_changed:'recalculated',new_value:summary});
+      ok++;
+    }catch(err){
+      console.warn('[REO] recalc apply failed for entry',r.entry.id,':',err.message);fail++;
+    }
+  }
+  await loadEntries();renderAdminFixers();
+  closeOv('viewerOv');
+  alert(`Recalculation complete. Updated ${ok} schedule${ok===1?'':'s'}${fail?` — ${fail} failed (see console)`:''}.`);
+}
 
 function getSfFiltered(){
   const fp=$('sfProj').value,fl=$('sfLevel').value,fa=$('sfArea').value,fq=($('sfSearch').value||'').toLowerCase().trim();
