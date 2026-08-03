@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b5.7';
+const APP_VERSION='b5.7.1';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const BUCKET='schedules';
@@ -1837,8 +1837,8 @@ function goSite(){location.href='?view=site'}
 
 /* ═══ NAV ═══ */
 function showPage(p){
-  // Suppliers can't reach Admin or Notifications — bounce to the dashboard.
-  if(isSupplier()&&(p==='admin'||p==='notif'))p='dash';
+  // Suppliers can't reach Admin (Notifications is allowed — scoped to their own projects by RLS).
+  if(isSupplier()&&p==='admin')p='dash';
   document.querySelectorAll('.page').forEach(el=>el.classList.remove('active'));
   document.querySelectorAll('.nav-tab').forEach(el=>el.classList.remove('active'));
   $({form:'pageForm',dash:'pageDash',notif:'pageNotif',admin:'pageAdmin'}[p]).classList.add('active');
