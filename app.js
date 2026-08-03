@@ -1,8 +1,11 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b5.6.5';
+const APP_VERSION='b5.7';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
-const ADMIN_PIN='7519', BUCKET='schedules';
+const BUCKET='schedules';
+// Admin is now gated by the login (DBCC session) — no separate in-app admin PIN. The old
+// ADMIN_PIN constant was removed so no admin secret lives in the source.
+const AUTH_FN=SUPA_URL+'/functions/v1/reo-auth';
 const SEEDS=[
 {name:"Marymede Catholic College Stage 5",levels:["GRD","GRD-L1","L1","L1-L2","L2"],areas:["BORED PIERS","COLUMNS","CONVENTIONAL STAIRS / SUSPENDED","LIFT BASE & PIT WALLS","PAD & STRIP FOOTINGS - EXTERNAL CANOPY","RAFT & PAD FOOTINGS","SCREED","SUSPENDED FLOOR"]},
 {name:"Qudos Port Arlington",levels:["B1","B1-LOWER GRD","GRD","GRD-UPPER GRD","GRD-UPPER GRD (S041)","GRD-UPPER GRD (S042)","GRD-UPPER GRD (S043)","L1 (S051)","L1 (S052)","L1 - L2 (S051)","L1 - L2 (S052)","L1-L2","L2 (S056)","L2 (S057)","LOWER GRD","LOWER GRD - GRD (S036)","LOWER GRD - GRD (S037)","LOWER GRD - GRD (S038)","ROOF (S053)","ROOF (S061)","ROOF (S062)","UPPER GRD (S046)","UPPER GRD (S047)","UPPER GRD (S048)","UPPER GRD - L1","UPPER GRD - L1 (S046)","UPPER GRD - L1 (S047)"],areas:["CAPPING BEAM","COLUMNS","DINCEL WALLS","HOBS","INSITU WALLS","LSCAPE TERRACE BONDECK","PAD FOOTINGS","PAD FOOTINGS & PILE CAP","PILE CAP & BEAM","PILES","RC POOL","SHOTCRETE UNDERSPRAY","SHOTCRETE WALL","SOG & RAMP","STAIR & LIFT RAFT","STAIR LID","STAIRFORM STAIRS / SUSPENDED","SUSPENDED FLOOR","WET JOINTS"]},
@@ -24,6 +27,11 @@ let projectFiles=[];
 // b5.3 multi-upload: each item = {id, file, splitRef, supDate, schedule, weight, drawing, extracted, status}
 let multiUploadItems=[],multiUploadSeq=0;
 let sortCol="created_at",sortAsc=false,userName=localStorage.getItem('reo_user_name')||'';
+// Stage 3 auth: role/supplier come from the reo-auth Edge Function session (app_metadata on the JWT).
+//   authRole: 'dbcc' | 'supplier'   authSupplier: 'ARC' | 'Aus Reo' | null   authCompany: 'DBCC' | 'ARC' | 'Aus Reo'
+let authRole=null,authSupplier=null,authCompany=null;
+function isDbcc(){return authRole==='dbcc'}
+function isSupplier(){return authRole==='supplier'}
 let currentEntryType='scheduled',selectedOrderId=null,selectedIds=new Set(),dpSelected={},pdfjsLoaded=false;
 
 /* ═══ HELPERS ═══ */
@@ -222,7 +230,11 @@ async function init(){
       renderForeman();
     }catch(e){$('loadingScreen').innerHTML='<div style="text-align:center;padding:20px"><h2 style="color:var(--err)">Connection Error</h2><p style="color:var(--muted);font-size:13px">'+esc(e.message)+'</p><button class="btn btn-sm" onclick="location.reload()" style="width:auto;margin-top:12px">Retry</button></div>'}
     return}
-  $('userChip').textContent=userName;
+  // Login gate (company → PIN). Foreman/Site views returned above and are untouched.
+  // ensureAuth() restores an existing session or shows the login overlay and returns false.
+  if(!(await ensureAuth()))return;
+  applyRolePermissions();   // set the role class NOW, before any data loads, so it can't be left stale
+  $('userChip').textContent=userName+(authCompany?(' · '+authCompany):'');
   // Name gate — the dashboard is the only view that lets a user write changes (create entries,
   // upload schedules, send emails, cancel, etc.) so every audit row must have a name attached.
   // If localStorage doesn't have a name (cleared / new browser / incognito), show the prompt
@@ -236,7 +248,7 @@ async function init(){
   $('nameOverlay').classList.remove('show');
   try{
     await loadProjects();if(projects.length===0)await seedProjects();
-    await loadEntries();await loadEmailContacts();
+    await loadEntries();await loadEmailContacts();await loadProjectSchedulers();
     await loadPeople();await loadAssignments();await loadAppSettings();
     await loadProjectFiles();
     populateDropdowns();subscribeRealtime();
@@ -247,14 +259,106 @@ async function init(){
 
 function saveName(){const n=$('nameInput').value.trim();if(!n)return alert('Please enter your name');localStorage.setItem('reo_user_name',n);userName=n;$('nameOverlay').classList.remove('show');$('loadingScreen').style.display='flex';$('loadingScreen').innerHTML='<div class="spinner"></div><p style="color:var(--muted);font-size:13px">Loading your data...</p>';init()}
 
+/* ═══ LOGIN GATE (Stage 3) — company → PIN → name, via the reo-auth Edge Function ═══
+   Only the main dashboard is gated. The ?view=foreman / ?view=site paths return earlier in
+   init() and are untouched. On success we store a real Supabase session on `sb`, so every
+   subsequent query runs authenticated (which is what RLS keys off in Stage 5). */
+async function ensureAuth(){
+  // Restore an existing session (survives refresh) and derive role from the JWT's app_metadata.
+  try{
+    const{data:{session}}=await sb.auth.getSession();
+    if(session&&session.user){
+      const md=session.user.app_metadata||{};
+      if(md.app_role){
+        authRole=md.app_role;authSupplier=md.supplier||null;
+        authCompany=authRole==='dbcc'?'DBCC':(authSupplier||null);
+        return true;
+      }
+    }
+  }catch(_){}
+  // No valid session — show the login overlay and stop.
+  $('loadingScreen').style.display='none';
+  $('nameOverlay').classList.remove('show');
+  $('loginOverlay').classList.add('show');
+  return false;
+}
+function pickCompany(c){
+  authCompany=c;
+  document.querySelectorAll('.login-role').forEach(b=>b.classList.toggle('sel',b.dataset.company===c));
+  $('loginStep2').style.display='block';
+  $('loginName').value=localStorage.getItem('reo_user_name')||'';
+  $('loginErr').textContent='';
+  setTimeout(()=>{const p=$('loginPin');if(p)p.focus()},50);
+}
+function fmtWait(s){s=Number(s)||0;return s<60?s+' seconds':Math.ceil(s/60)+' minute'+(Math.ceil(s/60)===1?'':'s')}
+async function doLogin(){
+  const err=$('loginErr'),btn=$('loginBtn');
+  const pin=$('loginPin').value.trim(),name=$('loginName').value.trim();
+  if(!authCompany){err.textContent='Pick who you are first.';return}
+  if(!/^\d{4}$/.test(pin)){err.textContent='Enter your 4-digit PIN.';return}
+  if(!name){err.textContent='Enter your name for the record.';return}
+  btn.disabled=true;err.textContent='';
+  try{
+    const res=await fetch(AUTH_FN,{method:'POST',headers:{'Authorization':'Bearer '+SUPA_KEY,'apikey':SUPA_KEY,'Content-Type':'application/json'},body:JSON.stringify({action:'login',company:authCompany,pin,name})});
+    const j=await res.json();
+    if(j.status==='ok'){
+      await sb.auth.setSession(j.session);
+      authRole=j.app_role;authSupplier=j.supplier;authCompany=j.company;
+      userName=name;localStorage.setItem('reo_user_name',name);
+      $('loginPin').value='';$('loginOverlay').classList.remove('show');
+      $('loadingScreen').style.display='flex';
+      init();
+    }else if(j.status==='invalid'){
+      const left=Math.max(0,(j.freeTries||10)-(j.triesUsed||0));
+      err.textContent='Incorrect PIN.'+((left>0&&left<=5)?(' '+left+' attempt'+(left===1?'':'s')+' left before a wait.'):'');
+    }else if(j.status==='wait'){
+      err.textContent='Too many attempts. Please wait '+fmtWait(j.wait)+', then try again.';
+    }else if(j.status==='locked'){
+      err.textContent='This login is locked after too many failed attempts. Contact DBCC to unlock it.';
+    }else{
+      err.textContent='Sign-in failed. Please try again.';
+    }
+  }catch(e){err.textContent='Network error — check your connection and try again.'}
+  finally{btn.disabled=false}
+}
+async function doLogout(){
+  try{await sb.auth.signOut()}catch(_){}
+  authRole=authSupplier=authCompany=null;
+  location.reload();
+}
+
 /* ═══ DATA ═══ */
-async function loadProjects(){const{data,error}=await sb.from('projects').select('*').order('name');if(error)throw error;projects=data.map(p=>({id:p.id,name:p.name,levels:p.levels?p.levels.split('||').filter(Boolean):[],areas:p.areas?p.areas.split('||').filter(Boolean):[]}))}
+async function loadProjects(){const{data,error}=await sb.from('projects').select('*').order('name');if(error)throw error;let rows=data.map(p=>({id:p.id,name:p.name,supplier:p.supplier||'Aus Reo',levels:p.levels?p.levels.split('||').filter(Boolean):[],areas:p.areas?p.areas.split('||').filter(Boolean):[]}));if(isSupplier())rows=rows.filter(p=>p.supplier===authSupplier);projects=rows}
 async function seedProjects(){const rows=SEEDS.map(p=>({name:p.name,levels:p.levels.join('||'),areas:p.areas.join('||')}));await sb.from('projects').insert(rows);await loadProjects()}
-async function loadEntries(){const{data,error}=await sb.from('entries').select('*').order('created_at',{ascending:false});if(error)throw error;entries=data;$('countNum').textContent=entries.length}
+async function loadEntries(){const{data,error}=await sb.from('entries').select('*').order('created_at',{ascending:false});if(error)throw error;let rows=data;if(isSupplier()){const mine=new Set(projects.map(p=>p.name));rows=rows.filter(e=>mine.has(e.project))}entries=rows;$('countNum').textContent=entries.length}
 
 async function loadEmailContacts(){
   const{data,error}=await sb.from('email_contacts').select('*').order('sort_order',{ascending:true}).order('id',{ascending:true});
   if(error){emailContacts=[];return}emailContacts=data||[]}
+
+// Stage 4 — scheduler routing. project_schedulers maps a project to one or more email_contacts
+// (the scheduler[s] handling it). The email "To" default resolves through this per project.
+let projectSchedulers=[];
+async function loadProjectSchedulers(){
+  const{data,error}=await sb.from('project_schedulers').select('*');
+  if(error){projectSchedulers=[];return}projectSchedulers=data||[]}
+// The supplier that owns a project (for labelling the supplier comment column per project).
+function projectSupplier(name){const p=projects.find(pr=>pr.name===name);return (p&&p.supplier)||'Aus Reo'}
+// Contacts assigned as scheduler(s) for a given project name.
+function schedulersForProject(name){
+  const ids=projectSchedulers.filter(s=>s.project_name===name).map(s=>s.contact_id);
+  return emailContacts.filter(c=>ids.includes(c.id));
+}
+// Comma-joined default recipient(s) for an email about a project: assigned schedulers first,
+// otherwise fall back to the global default contact (legacy behaviour).
+function defaultRecipientsFor(projectName){
+  if(projectName){
+    const sched=schedulersForProject(projectName);
+    if(sched.length)return sched.map(c=>c.email).join(', ');
+  }
+  const def=emailContacts.find(c=>c.is_default);
+  return def?def.email:'';
+}
 
 // b5.6 — Load project reference files. Includes superseded rows; UI filters them by default.
 async function loadProjectFiles(){
@@ -1164,9 +1268,9 @@ function renderDash(){
   if(!f.length){w.innerHTML=`<div class="empty"><p>${all.length===0?'No entries yet.':'No matches.'}</p></div>`;return}
   const ar=c=>sortCol===c?(sortAsc?' ▲':' ▼'):'';
   const allCk=f.every(e=>selectedIds.has(e.id));
-  w.innerHTML=`<table><thead><tr><th class="no-sort" style="width:36px"><input type="checkbox" ${allCk?'checked':''} onchange="toggleAll(this.checked)"></th><th onclick="tSort('project')">Project${ar('project')}</th><th onclick="tSort('level')">Level${ar('level')}</th><th onclick="tSort('area')">Area${ar('area')}</th><th onclick="tSort('schedule')">Schedule${ar('schedule')}</th><th onclick="tSort('total_weight')">Wt${ar('total_weight')}</th><th onclick="tSort('status')">Status${ar('status')}</th><th onclick="tSort('our_delivery_date')">Ordered Delivery${ar('our_delivery_date')}</th><th onclick="tSort('supplier_delivery_date')">Supplier${ar('supplier_delivery_date')}</th><th onclick="tSort('entry_date')">Submitted${ar('entry_date')}</th><th class="no-sort">Schedule File</th><th class="no-sort">Markup Plans</th><th class="no-sort" style="max-width:120px">Aus Reo Comments</th><th class="no-sort" style="max-width:120px">DBCC Comments</th><th class="no-sort">Actions</th></tr></thead><tbody>${f.map(e=>{
+  w.innerHTML=`<table><thead><tr><th class="no-sort" style="width:36px"><input type="checkbox" ${allCk?'checked':''} onchange="toggleAll(this.checked)"></th><th onclick="tSort('project')">Project${ar('project')}</th><th onclick="tSort('level')">Level${ar('level')}</th><th onclick="tSort('area')">Area${ar('area')}</th><th onclick="tSort('schedule')">Schedule${ar('schedule')}</th><th onclick="tSort('total_weight')">Wt${ar('total_weight')}</th><th onclick="tSort('status')">Status${ar('status')}</th><th onclick="tSort('our_delivery_date')">Ordered Delivery${ar('our_delivery_date')}</th><th onclick="tSort('supplier_delivery_date')">Supplier${ar('supplier_delivery_date')}</th><th onclick="tSort('entry_date')">Submitted${ar('entry_date')}</th><th class="no-sort">Schedule File</th><th class="no-sort">Markup Plans</th><th class="no-sort" style="max-width:120px">${esc(isSupplier()?authSupplier:'Supplier')} Comments</th><th class="no-sort" style="max-width:120px">DBCC Comments</th><th class="no-sort">Actions</th></tr></thead><tbody>${f.map(e=>{
     const mm=hasMismatch(e),cn=e.status==='Cancelled',mp=e.markup_plans?JSON.parse(e.markup_plans):[];
-    return`<tr class="${cn?'cancelled':''}${e.on_hold?' on-hold':''}" ondragover="event.preventDefault();this.classList.add('drag-over')" ondragleave="this.classList.remove('drag-over')" ondrop="handleRowDrop(event,${e.id});this.classList.remove('drag-over')">
+    return`<tr class="${cn?'cancelled':''}${e.on_hold?' on-hold':''}${mm?' mismatch':''}" ondragover="event.preventDefault();this.classList.add('drag-over')" ondragleave="this.classList.remove('drag-over')" ondrop="handleRowDrop(event,${e.id});this.classList.remove('drag-over')">
 <td class="td-check"><input type="checkbox" ${selectedIds.has(e.id)?'checked':''} onchange="toggleSel(${e.id},this.checked)"></td>
 <td class="proj-td" title="${esc(e.project)}">${esc(e.project)}${e.unmatched?'<span class="unmatched-icon" title="No placeholder existed">⚠</span>':''}</td>
 <td>${esc(e.level||'—')}${e.split_reference?' <span style="font-size:10px;color:var(--accent-dk);font-weight:600">('+esc(e.split_reference)+')</span>':''}</td>
@@ -1188,6 +1292,7 @@ ${['Scheduled','Ordered'].includes(e.status)?`<button class="action-btn deliver"
 ${e.status!=='Cancelled'&&e.status!=='Delivered'?`<button class="action-btn cancel" onclick="cancelEntry(${e.id})">✗</button>`:''}
 ${e.status==='Cancelled'?`<button class="action-btn reinstate" onclick="reinstateEntry(${e.id})">↺</button>`:''}
 ${mm?`<button class="action-btn resolve" onclick="resolveMismatch(${e.id})">Fix</button><button class="action-btn mail" onclick="openMismatchEmail(${e.id})">✉</button>`:''}
+${cn?'':`<button class="action-btn mail dbcc-only" onclick="openOrderDateEmail(${e.id})" title="Send delivery-date email to supplier">📅✉</button>`}
 </div></td></tr>`}).join('')}</tbody></table>`}
 
 function tSort(c){if(sortCol===c)sortAsc=!sortAsc;else{sortCol=c;sortAsc=true}renderDash()}
@@ -1350,7 +1455,7 @@ function editChunkComment(id,col){
   // col = 'aus_reo' or 'dbcc'
   const e=entries.find(x=>x.id===id);if(!e)return;
   const colName=col==='aus_reo'?'aus_reo_comment':'dbcc_comment';
-  const colLabel=col==='aus_reo'?'Aus Reo Comments':'DBCC Comments';
+  const colLabel=col==='aus_reo'?(projectSupplier(e.project)+' Comments'):'DBCC Comments';
   const chunks=parseChunks(e[colName]);
   // Render existing chunks as textareas (one per chunk) so they can be edited individually.
   const chunkHtml=chunks.map((c,i)=>{
@@ -1407,8 +1512,9 @@ async function saveChunkComment(id,col){
   closeOv('commentOv');await loadEntries();renderDash();}
 
 function clearChunkComment(id,col){
+  const _e=entries.find(x=>x.id===id);
   const colName=col==='aus_reo'?'aus_reo_comment':'dbcc_comment';
-  const colLabel=col==='aus_reo'?'Aus Reo Comments':'DBCC Comments';
+  const colLabel=col==='aus_reo'?((_e?projectSupplier(_e.project):'Supplier')+' Comments'):'DBCC Comments';
   confirmDialog(`Clear all ${colLabel}?`,'This will remove every line in this column. Audit log captures who cleared it. This cannot be undone.','Clear All','btn-err',async()=>{
     const e=entries.find(x=>x.id===id);if(!e)return;
     const old=parseChunks(e[colName]);
@@ -1452,7 +1558,7 @@ ${e.cancel_reason?`<div class="drow"><div class="dlbl">Cancel Reason</div><div c
 <div class="drow"><div class="dlbl">Ordered Delivery</div><div class="dval">${fmtDate(e.our_delivery_date)||'—'}</div></div>
 <div class="drow"><div class="dlbl">Supplier Date</div><div class="dval">${fmtDate(e.supplier_delivery_date)||'—'}${mm?' ⚠️':''}</div></div>
 <div class="drow"><div class="dlbl">Submitted</div><div class="dval">${fmtDate(e.entry_date)||'—'}</div></div>
-<div class="drow"><div class="dlbl">Aus Reo Comments</div><div class="dval">${chunksToHtml(parseChunks(e.aus_reo_comment))}</div></div>
+<div class="drow"><div class="dlbl">${esc(projectSupplier(e.project))} Comments</div><div class="dval">${chunksToHtml(parseChunks(e.aus_reo_comment))}</div></div>
 <div class="drow"><div class="dlbl">DBCC Comments</div><div class="dval">${chunksToHtml(parseChunks(e.dbcc_comment))}</div></div>
 <div class="drow"><div class="dlbl">Schedule File</div><div class="dval">${e.file_url?`<a class="att-link" href="${e.file_url}" target="_blank">📄 ${esc(e.file_name)}</a>`:'None'}</div></div>
 <div class="drow"><div class="dlbl">Markup Plans</div><div class="dval">${mp.length?mp.map(m=>`<a class="att-link markup-link" href="${m.url}" target="_blank">📐 ${esc(m.name)}</a>`).join(' '):'None'}</div></div>
@@ -1503,10 +1609,10 @@ function openEditEntry(id){const e=entries.find(x=>x.id===id);if(!e)return;
 <div class="fg"><label>Project</label><select id="ed_proj">${projects.map(p=>`<option${p.name===e.project?' selected':''}>${esc(p.name)}</option>`).join('')}</select></div>
 <div class="row2"><div class="fg"><label>Level</label><select id="ed_level"><option value="">None</option>${(proj?proj.levels:[]).map(l=>`<option${l===e.level?' selected':''}>${esc(l)}</option>`).join('')}</select></div><div class="fg"><label>Area</label><select id="ed_area"><option value="">None</option>${(proj?proj.areas:[]).map(a=>`<option${a===e.area?' selected':''}>${esc(a)}</option>`).join('')}</select></div></div>
 <div class="row2"><div class="fg"><label>Schedule</label><input type="text" id="ed_sched" value="${esc(e.schedule||'')}" style="font-family:'JetBrains Mono',monospace"></div><div class="fg"><label>Submission Date</label><input type="date" id="ed_date" value="${e.entry_date||''}"></div></div>
-<div class="row2"><div class="fg"><label>Ordered Delivery Date</label><input type="date" id="ed_ourD" value="${e.our_delivery_date||''}"></div><div class="fg"><label>Supplier Delivery Date</label><input type="date" id="ed_supD" value="${e.supplier_delivery_date||''}"></div></div>
+<div class="row2"><div class="fg"><label>Ordered Delivery Date${isSupplier()?' <span style="font-weight:400;color:var(--muted);font-size:11px">(DBCC only)</span>':''}</label><input type="date" id="ed_ourD" value="${e.our_delivery_date||''}"${isSupplier()?' disabled title="Only DBCC can change the ordered delivery date"':''}></div><div class="fg"><label>Supplier Delivery Date</label><input type="date" id="ed_supD" value="${e.supplier_delivery_date||''}"></div></div>
 <div class="row2"><div class="fg"><label>Drawing Reference</label><input type="text" id="ed_draw" value="${esc(e.drawing_reference||'')}"></div><div class="fg"><label>Weight (T)</label><input type="number" step="0.001" id="ed_wt" value="${e.total_weight||''}" style="font-family:'JetBrains Mono',monospace"></div></div>
 <div class="fg"><label>Split Reference</label><input type="text" id="ed_split" value="${esc(e.split_reference||'')}"></div>
-<div class="info-msg" style="margin-top:8px;font-size:12px;background:#F0F5FF;border-color:#C7D2FE;color:var(--info)">💡 Comments are now edited directly on the dashboard — click the Aus Reo Comments or DBCC Comments cell on the row.</div>
+<div class="info-msg" style="margin-top:8px;font-size:12px;background:#F0F5FF;border-color:#C7D2FE;color:var(--info)">💡 Comments are now edited directly on the dashboard — click the Supplier Comments or DBCC Comments cell on the row.</div>
 ${dangerSection}
 <div id="edErr"></div>
 <div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-sec btn-sm" onclick="closeOv('editOv')">Cancel</button><button class="btn btn-sm" onclick="saveEdit(${id})" style="width:auto">Save</button></div>`;
@@ -1562,6 +1668,8 @@ async function removeMarkupFromEdit(id,idx){
 async function saveEdit(id){const e=entries.find(x=>x.id===id);if(!e)return;const err=$('edErr');err.innerHTML='';
   const nv={project:$('ed_proj').value,level:$('ed_level').value||null,area:$('ed_area').value||null,schedule:$('ed_sched').value.trim()||null,entry_date:$('ed_date').value||null,our_delivery_date:$('ed_ourD').value||null,supplier_delivery_date:$('ed_supD').value||null,drawing_reference:$('ed_draw').value.trim()||null,total_weight:$('ed_wt').value?parseFloat($('ed_wt').value):null,split_reference:$('ed_split').value.trim()||null};
   if(!nv.project)return err.innerHTML='<div class="error-msg">Project required</div>';
+  // Suppliers can never change the ordered (our) delivery date — that's DBCC's. Server-enforced in Stage 5.
+  if(isSupplier())nv.our_delivery_date=e.our_delivery_date;
   if(e.status==='Not Ordered'&&nv.our_delivery_date)nv.status='Ordered';
   if((e.status==='Not Ordered'||e.status==='Ordered')&&nv.schedule)nv.status='Scheduled';
   if(nv.our_delivery_date&&nv.supplier_delivery_date&&nv.our_delivery_date!==nv.supplier_delivery_date&&(e.our_delivery_date!==nv.our_delivery_date||e.supplier_delivery_date!==nv.supplier_delivery_date)){nv.mismatch_resolved=false}
@@ -1584,9 +1692,13 @@ async function deleteEntry(id){
 
 /* ═══ EMAIL DRAFTS ═══ */
 function emailModal(subject,body,entryId,auditContext,projectName){
-  const def=emailContacts.find(c=>c.is_default);
-  const others=emailContacts.filter(c=>!c.is_default);
-  const toVal=def?def.email:'';
+  // Resolve the project so the To field can default to that project's scheduler(s).
+  let pname=projectName;
+  if(!pname&&entryId){const e=entries.find(x=>x.id===entryId);if(e)pname=e.project;}
+  const toVal=defaultRecipientsFor(pname);
+  // CC list = every saved contact not already in the To line.
+  const toSet=new Set(toVal.split(',').map(s=>s.trim().toLowerCase()).filter(Boolean));
+  const others=emailContacts.filter(c=>!toSet.has((c.email||'').toLowerCase()));
   const ccCheckboxes=others.length
     ? `<div style="display:flex;flex-direction:column;gap:6px;background:var(--input);border:1px solid var(--border);border-radius:6px;padding:10px 12px">${others.map((c,i)=>`<label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--gray-dk);cursor:pointer"><input type="checkbox" class="em_cc_box" data-email="${esc(c.email)}" style="width:auto"> <b>${esc(c.label)}</b> <span style="color:var(--muted);font-family:'JetBrains Mono',monospace;font-size:11px">${esc(c.email)}</span></label>`).join('')}</div>`
     : '<p style="font-size:11px;color:var(--muted);margin:0;font-style:italic">No additional contacts saved. Add them in Admin → Email Contacts.</p>';
@@ -1646,6 +1758,23 @@ function openHoldEmail(id){const e=entries.find(x=>x.id===id);if(!e)return;
   const body=`Hi,\n\nThe following schedule has been placed ON HOLD:\n\nProject: ${e.project}\nLevel: ${e.level||'—'} / Area: ${e.area||'—'}${e.split_reference?' ('+e.split_reference+')':''}\nSchedule: ${e.schedule||'—'}\nOrdered Delivery Date: ${fmtDate(e.our_delivery_date)||'Not set'}\n\nPlease pause any processing on this item until further notice. We will confirm when the hold is lifted.${EMAIL_FOOTER_TEXT}\n\nRegards,\n${userName}\nDebono Bros Concreting`;
   emailModal(subject,body,id,'on_hold')}
 
+// Manual re-open of the delivery-date email for one row (DBCC). For when the auto-popup on a
+// date change was missed — no need to change the date and change it back.
+function openOrderDateEmail(id){const e=entries.find(x=>x.id===id);if(!e)return;
+  const subject=`Delivery Date — ${e.project} / ${e.level||''} / ${e.area||''}`;
+  const body=`Hi,\n\nPlease confirm delivery against our ordered delivery date for the following:\n\nProject: ${e.project}\nLevel: ${e.level||'—'} / Area: ${e.area||'—'}${e.split_reference?' ('+e.split_reference+')':''}\nSchedule: ${e.schedule||'—'}\n\nOrdered Delivery Date: ${fmtDate(e.our_delivery_date)||'Not set'}\n\nPlease confirm receipt and your supplier delivery date.${EMAIL_FOOTER_TEXT}\n\nRegards,\n${userName}\nDebono Bros Concreting`;
+  emailModal(subject,body,id,'date_change');}
+
+// Manual re-open of the bulk "orders created" email for the project chosen in the dashboard
+// Project filter (DBCC). For when the popup at order-creation time was missed.
+function openBulkOrderEmailForFilter(){
+  const pn=$('fProj').value;
+  if(!pn)return alert('Pick a single project in the Project filter first, then re-open its order email.');
+  const rows=entries.filter(e=>e.project===pn&&e.our_delivery_date&&e.status!=='Cancelled');
+  if(!rows.length)return alert('No entries with an ordered delivery date for '+pn+'.');
+  openOrderCreatedEmail(rows,pn);
+}
+
 async function sendEmail(id,context){
   const to=$('em_to').value.trim(),sub=$('em_sub').value.trim();
   let body=$('em_body').value.trim();
@@ -1680,13 +1809,36 @@ async function sendEmail(id,context){
 
 /* ═══ EXPORT ═══ */
 function exportCSV(){const d=getFiltered();if(!d.length)return alert('No data');
-  const h=['Project','Level','Area','Split','Schedule','Drawing','Weight','Status','On Hold','Type','Ordered Delivery','Supplier Date','Submitted','Aus Reo Comments','DBCC Comments','File'];
+  const h=['Project','Level','Area','Split','Schedule','Drawing','Weight','Status','On Hold','Type','Ordered Delivery','Supplier Date','Submitted','Supplier Comments','DBCC Comments','File'];
   const rows=d.map(e=>[e.project,e.level||'',e.area||'',e.split_reference||'',e.schedule||'',e.drawing_reference||'',e.total_weight||'',e.status,e.on_hold?'Yes':'',e.entry_type,e.our_delivery_date||'',e.supplier_delivery_date||'',e.entry_date||'',chunksToPlain(parseChunks(e.aus_reo_comment))||e.comments||'',chunksToPlain(parseChunks(e.dbcc_comment))||'',e.file_name||'']);
   const csv=[h,...rows].map(r=>r.map(c=>`"${String(c||'').replace(/"/g,'""')}"`).join(',')).join('\n');
   const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download=`reo-${today()}.csv`;a.click()}
 
+/* ═══ ROLE PERMISSIONS (Stage 3) ═══
+   DBCC sees everything and skips the inner admin PIN (already authenticated at login).
+   Suppliers see only their own projects/entries; Admin + Notifications tabs are hidden,
+   and they cannot open those pages even by other means. Finer per-row restrictions
+   (e.g. cannot edit our_delivery_date, cannot send date-change emails) are tagged
+   .dbcc-only and hidden via CSS for body.role-supplier. */
+function applyRolePermissions(){
+  document.body.classList.remove('role-dbcc','role-supplier');
+  document.body.classList.add(isDbcc()?'role-dbcc':'role-supplier');
+  if(isDbcc()){
+    adminUnlocked=true;
+    const pg=$('pinGate'),ac=$('adminContent');
+    if(pg)pg.style.display='none';
+    if(ac)ac.style.display='block';
+  }else{
+    adminUnlocked=false;
+  }
+}
+function goForeman(){location.href='?view=foreman'}
+function goSite(){location.href='?view=site'}
+
 /* ═══ NAV ═══ */
 function showPage(p){
+  // Suppliers can't reach Admin or Notifications — bounce to the dashboard.
+  if(isSupplier()&&(p==='admin'||p==='notif'))p='dash';
   document.querySelectorAll('.page').forEach(el=>el.classList.remove('active'));
   document.querySelectorAll('.nav-tab').forEach(el=>el.classList.remove('active'));
   $({form:'pageForm',dash:'pageDash',notif:'pageNotif',admin:'pageAdmin'}[p]).classList.add('active');
@@ -1839,31 +1991,117 @@ function renderNotif(){
     return `<div class="notif-item"><div class="notif-icon ${icon}">${iconChar}</div><div class="notif-body"><div class="notif-time">${t}<span class="audit-user">${esc(a.user_identifier||'?')}</span></div><div class="notif-msg">${msg}</div></div></div>`}).join('')}
 
 /* ═══ ADMIN ═══ */
-function checkPin(){
-  if($('pinInp').value===ADMIN_PIN){adminUnlocked=true;$('pinGate').style.display='none';$('adminContent').style.display='block';showAdminSub('proj');$('pinInp').value='';$('pinErr').innerHTML=''}
-  else{$('pinErr').innerHTML='<div class="error-msg">Wrong PIN</div>';$('pinInp').value=''}}
-function lockAdmin(){adminUnlocked=false;$('pinGate').style.display='block';$('adminContent').style.display='none'}
-function showAdminSub(s){['proj','files','program','fixers','people','assign','account','contacts','audit'].forEach(t=>{
+// Admin is unlocked by the DBCC login (applyRolePermissions). This legacy gate is only reachable
+// by an already-authenticated DBCC session, so it just reveals the panel — no PIN.
+function checkPin(){if(!isDbcc())return;adminUnlocked=true;$('pinGate').style.display='none';$('adminContent').style.display='block';showAdminSub('proj')}
+// "Lock" now means sign out (the login is the gate).
+function lockAdmin(){doLogout()}
+function showAdminSub(s){['proj','files','program','fixers','people','assign','account','contacts','security','audit'].forEach(t=>{
   const tab=$('at'+t.charAt(0).toUpperCase()+t.slice(1));if(tab)tab.classList.toggle('active',t===s);
   const panel=$('admin'+t.charAt(0).toUpperCase()+t.slice(1));if(panel)panel.style.display=t===s?'block':'none'});
   if(s==='proj')renderAdminProj();if(s==='files')renderAdminFiles();if(s==='program')renderAdminProgram();if(s==='fixers')renderAdminFixers();
   if(s==='people')renderAdminPeople();if(s==='assign')renderAdminAssign();if(s==='account')renderAdminAccount();
-  if(s==='contacts')renderAdminContacts();if(s==='audit')loadAuditLog()}
+  if(s==='contacts')renderAdminContacts();if(s==='security')renderAdminSecurity();if(s==='audit')loadAuditLog()}
+
+/* ═══ ADMIN: LOGINS & SECURITY (Stage 4) ═══
+   Break-in report + PIN management. All server-verified DBCC-only in the reo-auth Edge Function. */
+async function authFnCall(action,payload){
+  const{data:{session}}=await sb.auth.getSession();
+  const tok=session?session.access_token:SUPA_KEY;
+  const res=await fetch(AUTH_FN,{method:'POST',headers:{'Authorization':'Bearer '+tok,'apikey':SUPA_KEY,'Content-Type':'application/json'},body:JSON.stringify({action,...payload})});
+  return res.json();
+}
+function fmtDateTime(iso){if(!iso)return'';const d=new Date(iso);if(isNaN(d))return esc(iso);return d.toLocaleString('en-AU',{day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'})}
+async function renderAdminSecurity(){
+  const el=$('adminSecurity');if(!el)return;
+  el.innerHTML='<div class="card"><p style="color:var(--muted);font-size:13px">Loading…</p></div>';
+  let st,at;
+  try{[st,at]=await Promise.all([authFnCall('status',{}),authFnCall('attempts',{limit:100})]);}
+  catch(e){el.innerHTML='<div class="card"><p style="color:var(--err)">Could not load security data: '+esc(e.message)+'</p></div>';return}
+  const order={'DBCC':0,'Aus Reo':1,'ARC':2};
+  const companies=((st&&st.companies)||[]).slice().sort((a,b)=>(order[a.company]??9)-(order[b.company]??9));
+  const pinRows=companies.map(c=>{
+    const lockedPill=c.manually_locked
+      ? '<span class="pill" style="background:#FDECEA;color:#C62828;font-size:10px;padding:2px 8px">LOCKED</span>'
+      : '<span class="pill" style="background:#E8F5E9;color:#2E7D32;font-size:10px;padding:2px 8px">Active</span>';
+    const unlockBtn=c.manually_locked?`<button class="btn btn-err btn-sm" onclick="doUnlock('${esc(c.company)}')" style="width:auto">Unlock</button>`:'';
+    return `<div class="proj-item"><div class="proj-item-info"><h4>${esc(c.company)} ${lockedPill}</h4><div class="sum">${c.supplier?('Supplier login · '+esc(c.supplier)):'DBCC admin login'}</div></div><div class="proj-actions"><button class="btn btn-sec btn-sm" onclick="promptSetPin('${esc(c.company)}')" style="width:auto">Change PIN</button>${unlockBtn}</div></div>`;
+  }).join('');
+  const attempts=(at&&at.attempts)||[];
+  const failCount=attempts.filter(a=>!a.success).length;
+  const rows=attempts.map(a=>`<tr><td style="white-space:nowrap;font-size:11px">${fmtDateTime(a.created_at)}</td><td>${esc(a.company||'')}</td><td>${esc(a.name||'')}</td><td>${a.success?'<span style="color:#2E7D32;font-weight:600">✓ success</span>':'<span style="color:#C62828;font-weight:600">✗ failed</span>'}</td><td style="font-family:'JetBrains Mono',monospace;font-size:11px">${esc(a.ip||'')}</td></tr>`).join('');
+  el.innerHTML=`
+    <div class="card" style="margin-bottom:18px"><h3 style="font-size:15px;font-weight:700;margin-bottom:6px;color:var(--gray-dk)">Company PINs</h3>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:12px">Change a login PIN, or unlock a company locked out after too many failed attempts. Changing a PIN also clears its lockout.</p>
+      <div class="proj-list">${pinRows||'<div class="empty">No companies</div>'}</div></div>
+    <div class="card"><h3 style="font-size:15px;font-weight:700;margin-bottom:6px;color:var(--gray-dk)">Login Attempts <span style="font-weight:400;color:var(--muted);font-size:12px">— recent ${attempts.length}, ${failCount} failed</span></h3>
+      <p style="font-size:12px;color:var(--muted);margin-bottom:10px">A burst of failed attempts on one company is a sign someone's guessing a PIN.</p>
+      <div class="tscroll"><table><thead><tr><th>When</th><th>Company</th><th>Name</th><th>Result</th><th>IP</th></tr></thead><tbody>${rows||'<tr><td colspan="5" style="color:var(--muted);padding:12px">No login attempts logged yet.</td></tr>'}</tbody></table></div>
+      <div style="margin-top:12px"><button class="btn btn-ghost btn-sm" onclick="renderAdminSecurity()" style="width:auto">Refresh</button></div></div>`;
+}
+function promptSetPin(company){
+  const p=prompt('New 4-digit PIN for '+company+':');
+  if(p==null)return;
+  if(!/^\d{4}$/.test(p.trim()))return alert('PIN must be exactly 4 digits.');
+  authFnCall('set-pin',{targetCompany:company,newPin:p.trim()}).then(r=>{
+    if(r&&r.status==='ok'){alert(company+' PIN updated.');renderAdminSecurity();}
+    else alert('Failed to update PIN: '+((r&&r.error)||'unknown error'));
+  });
+}
+function doUnlock(company){
+  confirmDialog('Unlock '+esc(company)+'?','This clears the failed-attempt lockout so '+esc(company)+' can sign in again.','Unlock','',()=>{
+    authFnCall('unlock',{targetCompany:company}).then(r=>{
+      if(r&&r.status==='ok')renderAdminSecurity();
+      else alert('Failed to unlock: '+((r&&r.error)||'unknown error'));
+    });
+  });
+}
 
 /* ═══ ADMIN: PROJECTS ═══ */
 function renderAdminProj(){
-  $('adminProj').innerHTML=`<div class="card" style="margin-bottom:18px"><h3 style="font-size:15px;font-weight:700;margin-bottom:14px;color:var(--gray-dk)" id="aFormTitle">Add New Project</h3><div class="fg"><label>Project Name</label><input type="text" id="newProjName" placeholder="e.g. New School Stage 2"></div><div class="row2"><div class="fg"><label>Levels <span style="font-weight:400;color:var(--muted);font-size:11px">(one per line)</span></label><textarea id="newLevels" rows="6" style="font-family:'JetBrains Mono',monospace;font-size:12px"></textarea></div><div class="fg"><label>Areas <span style="font-weight:400;color:var(--muted);font-size:11px">(one per line)</span></label><textarea id="newAreas" rows="6" style="font-family:'JetBrains Mono',monospace;font-size:12px"></textarea></div></div><div style="display:flex;gap:10px;margin-top:14px"><button class="btn btn-sm" onclick="saveProject()" id="saveProjBtn" style="width:auto">Add Project</button><button class="btn btn-sec btn-sm" onclick="cancelPE()" id="cancelPE" style="display:none;width:auto">Cancel</button></div><div id="projErr"></div></div><div class="card"><h3 style="font-size:15px;font-weight:700;margin-bottom:12px;color:var(--gray-dk)">Projects (<span id="projCount">${projects.length}</span>)</h3><div class="proj-list" id="projList"></div></div>`;renderProjList()}
+  $('adminProj').innerHTML=`<div class="card" style="margin-bottom:18px"><h3 style="font-size:15px;font-weight:700;margin-bottom:14px;color:var(--gray-dk)" id="aFormTitle">Add New Project</h3><div class="row2"><div class="fg"><label>Project Name</label><input type="text" id="newProjName" placeholder="e.g. New School Stage 2"></div><div class="fg"><label>Supplier</label><select id="newProjSupplier"><option value="Aus Reo">Aus Reo</option><option value="ARC">ARC</option></select></div></div><div class="row2"><div class="fg"><label>Levels <span style="font-weight:400;color:var(--muted);font-size:11px">(one per line)</span></label><textarea id="newLevels" rows="6" style="font-family:'JetBrains Mono',monospace;font-size:12px"></textarea></div><div class="fg"><label>Areas <span style="font-weight:400;color:var(--muted);font-size:11px">(one per line)</span></label><textarea id="newAreas" rows="6" style="font-family:'JetBrains Mono',monospace;font-size:12px"></textarea></div></div><div style="display:flex;gap:10px;margin-top:14px"><button class="btn btn-sm" onclick="saveProject()" id="saveProjBtn" style="width:auto">Add Project</button><button class="btn btn-sec btn-sm" onclick="cancelPE()" id="cancelPE" style="display:none;width:auto">Cancel</button></div><div id="projErr"></div></div><div class="card"><h3 style="font-size:15px;font-weight:700;margin-bottom:12px;color:var(--gray-dk)">Projects (<span id="projCount">${projects.length}</span>)</h3><div class="proj-list" id="projList"></div></div>`;renderProjList()}
 
 function renderProjList(){$('projCount').textContent=projects.length;
-  $('projList').innerHTML=projects.length?projects.map(p=>`<div class="proj-item"><div class="proj-item-info"><h4>${esc(p.name)}</h4><div class="counts"><b>${p.levels.length}</b> levels · <b>${p.areas.length}</b> areas</div><div class="sum">${esc(p.levels.slice(0,6).join(', '))}</div></div><div class="proj-actions"><button class="btn btn-sec btn-sm" onclick="editProj(${p.id})">Edit</button><button class="btn btn-err btn-sm" onclick="deleteProj(${p.id})">Delete</button></div></div>`).join(''):'<div class="empty">No projects</div>'}
+  $('projList').innerHTML=projects.length?projects.map(p=>{
+    const sched=schedulersForProject(p.name);
+    const schedTxt=sched.length?('Scheduler(s): '+sched.map(c=>esc(c.label)).join(', ')):'<span style="color:var(--muted)">No scheduler assigned</span>';
+    const isArc=(p.supplier==='ARC');
+    const supBadge=`<span class="pill" style="background:${isArc?'#E3F2FD':'#FFF3E0'};color:${isArc?'#1565C0':'#E65100'};font-size:10px;padding:2px 8px;margin-left:6px">${esc(p.supplier||'Aus Reo')}</span>`;
+    return `<div class="proj-item"><div class="proj-item-info"><h4>${esc(p.name)}${supBadge}</h4><div class="counts"><b>${p.levels.length}</b> levels · <b>${p.areas.length}</b> areas</div><div class="sum">${schedTxt}</div></div><div class="proj-actions"><button class="btn btn-sec btn-sm" onclick="openSchedulerModal(${p.id})">Schedulers</button><button class="btn btn-sec btn-sm" onclick="editProj(${p.id})">Edit</button><button class="btn btn-err btn-sm" onclick="deleteProj(${p.id})">Delete</button></div></div>`;
+  }).join(''):'<div class="empty">No projects</div>'}
 
-function editProj(id){const p=projects.find(pr=>pr.id===id);if(!p)return;editingId=id;$('aFormTitle').textContent='Edit Project';$('newProjName').value=p.name;$('newLevels').value=p.levels.join('\n');$('newAreas').value=p.areas.join('\n');$('saveProjBtn').textContent='Save';$('cancelPE').style.display='inline-block'}
-function cancelPE(){editingId=null;$('aFormTitle').textContent='Add New Project';$('newProjName').value='';$('newLevels').value='';$('newAreas').value='';$('saveProjBtn').textContent='Add Project';$('cancelPE').style.display='none';$('projErr').innerHTML=''}
+// Assign scheduler contact(s) to a project (Stage 4). DBCC-only (lives in the Projects admin).
+function openSchedulerModal(projectId){
+  const p=projects.find(pr=>pr.id===projectId);if(!p)return;
+  const sup=p.supplier||'Aus Reo';
+  const supplierContacts=emailContacts.filter(c=>(c.supplier||'Aus Reo')===sup);
+  const assigned=new Set(schedulersForProject(p.name).map(c=>c.id));
+  const list=supplierContacts.length
+    ? supplierContacts.map(c=>`<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--gray-dk);cursor:pointer;padding:6px 0"><input type="checkbox" class="sched_box" data-id="${c.id}" ${assigned.has(c.id)?'checked':''} style="width:auto"> <b>${esc(c.label)}</b> <span style="color:var(--muted);font-family:'JetBrains Mono',monospace;font-size:11px">${esc(c.email)}</span></label>`).join('')
+    : `<p style="font-size:12px;color:var(--muted)">No ${esc(sup)} contacts yet. Add them in Admin → Email Contacts (tag their supplier).</p>`;
+  $('schedModal').innerHTML=`<h3>Schedulers — ${esc(p.name)}<button class="modal-close" onclick="closeOv('schedOv')">&times;</button></h3>
+    <p style="font-size:12px;color:var(--muted);margin-bottom:12px">Pick the ${esc(sup)} scheduler(s) for this project. Their emails auto-fill the To field on order &amp; date-change emails for this project.</p>
+    <div style="max-height:300px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:8px 12px">${list}</div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn btn-sec btn-sm" onclick="closeOv('schedOv')">Cancel</button><button class="btn btn-sm" onclick="saveSchedulers(${p.id})" style="width:auto">Save</button></div>`;
+  $('schedOv').classList.add('show');
+}
+async function saveSchedulers(projectId){
+  const p=projects.find(pr=>pr.id===projectId);if(!p)return;
+  const ids=[...document.querySelectorAll('.sched_box:checked')].map(b=>Number(b.dataset.id));
+  await sb.from('project_schedulers').delete().eq('project_name',p.name);
+  if(ids.length){const{error}=await sb.from('project_schedulers').insert(ids.map(id=>({project_name:p.name,contact_id:id})));if(error){alert('Save failed: '+error.message);return}}
+  await auditLog({action:'SCHEDULER_ASSIGN',field_changed:p.name,new_value:ids.length+' scheduler(s)'});
+  await loadProjectSchedulers();closeOv('schedOv');renderProjList();
+}
+
+function editProj(id){const p=projects.find(pr=>pr.id===id);if(!p)return;editingId=id;$('aFormTitle').textContent='Edit Project';$('newProjName').value=p.name;if($('newProjSupplier'))$('newProjSupplier').value=p.supplier||'Aus Reo';$('newLevels').value=p.levels.join('\n');$('newAreas').value=p.areas.join('\n');$('saveProjBtn').textContent='Save';$('cancelPE').style.display='inline-block'}
+function cancelPE(){editingId=null;$('aFormTitle').textContent='Add New Project';$('newProjName').value='';if($('newProjSupplier'))$('newProjSupplier').value='Aus Reo';$('newLevels').value='';$('newAreas').value='';$('saveProjBtn').textContent='Add Project';$('cancelPE').style.display='none';$('projErr').innerHTML=''}
 
 async function saveProject(){const err=$('projErr');err.innerHTML='';
   const name=$('newProjName').value.trim(),levels=$('newLevels').value.split('\n').map(s=>s.trim()).filter(Boolean),areas=$('newAreas').value.split('\n').map(s=>s.trim()).filter(Boolean);
   if(!name)return err.innerHTML='<div class="error-msg">Name required</div>';
-  const data={name,levels:levels.join('||'),areas:areas.join('||')};
+  const supplier=($('newProjSupplier')&&$('newProjSupplier').value)||'Aus Reo';
+  const data={name,supplier,levels:levels.join('||'),areas:areas.join('||')};
   if(editingId){const old=projects.find(p=>p.id===editingId);const{error}=await sb.from('projects').update(data).eq('id',editingId);if(error)return err.innerHTML='<div class="error-msg">'+esc(error.message)+'</div>';
     await auditLog({action:'PROJECT_EDIT',field_changed:name,old_value:`${old.name} (${old.levels.length}L)`,new_value:`${name} (${levels.length}L)`});
   }else{if(projects.find(p=>p.name.toLowerCase()===name.toLowerCase()))return err.innerHTML='<div class="error-msg">Already exists</div>';

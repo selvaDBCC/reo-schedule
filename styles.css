@@ -97,6 +97,10 @@ tr:hover td{background:#FAFAF8}
 tr.cancelled td{opacity:.6}
 tr.on-hold td{background:#FFF8E7}
 tr.on-hold:hover td{background:#FEF0D0}
+/* Delivery-date mismatch: highlight the row so suppliers/DBCC notice our date ≠ supplier date. */
+tr.mismatch td{background:#FFF3F0}
+tr.mismatch:hover td{background:#FFE8E2}
+tr.mismatch td:first-child{box-shadow:inset 3px 0 0 var(--err,#e53935)}
 tr.drag-over td{background:var(--accent-lt)!important;outline:2px dashed var(--accent)}
 .td-check{width:36px}
 .td-check input[type=checkbox]{width:16px;height:16px;accent-color:var(--accent);cursor:pointer}
@@ -174,6 +178,12 @@ tr.drag-over td{background:var(--accent-lt)!important;outline:2px dashed var(--a
 .empty p{font-size:13px;margin-bottom:14px}
 .overlay{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.4);z-index:200;align-items:center;justify-content:center;padding:20px;backdrop-filter:blur(2px)}
 .overlay.show{display:flex}
+.login-roles{display:flex;gap:8px}
+.login-role{flex:1;padding:12px 8px;border:2px solid var(--line,#e2e5ea);border-radius:10px;background:var(--card);color:var(--gray-dk);font-size:13px;font-weight:600;cursor:pointer;transition:all .15s}
+.login-role:hover{border-color:var(--accent,#F7941D)}
+.login-role.sel{border-color:var(--accent,#F7941D);background:var(--accent,#F7941D);color:#fff}
+/* Role gating: elements tagged .dbcc-only are hidden when a supplier is signed in. */
+body.role-supplier .dbcc-only{display:none!important}
 .modal{background:var(--card);border-radius:14px;padding:30px;max-width:520px;width:100%;max-height:88vh;overflow-y:auto;box-shadow:var(--shadow-lg);animation:popIn .22s ease}
 .modal-lg{max-width:700px}
 .modal h3{font-size:17px;font-weight:700;margin-bottom:18px;display:flex;align-items:center;justify-content:space-between;color:var(--gray-dk)}

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>REO Schedule Management | Debono Bros Concreting</title>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=b5.6.5">
+<link rel="stylesheet" href="styles.css?v=b5.7">
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 </head>
@@ -25,6 +25,30 @@
     <p style="color:var(--muted);font-size:13px;margin-bottom:18px">Enter your name or initials — this helps track who made changes.</p>
     <input type="text" id="nameInput" placeholder="e.g. John D" style="text-align:center;font-size:15px" maxlength="30" onkeyup="if(event.key==='Enter')saveName()">
     <button class="btn" onclick="saveName()">Continue</button>
+  </div>
+</div>
+
+<!-- LOGIN GATE (company -> PIN -> name). Main dashboard only; foreman/site views are unaffected. -->
+<div id="loginOverlay" class="overlay" style="background:var(--bg)">
+  <div class="modal" style="max-width:440px;text-align:center">
+    <div style="margin:0 auto 16px;display:flex;justify-content:center">
+      <img src="https://selvadbcc.github.io/reo-schedule/logo.png" alt="Debono Bros Concreting" style="height:90px;width:auto">
+    </div>
+    <h3 style="margin-bottom:8px;justify-content:center;color:var(--gray-dk)">Sign in</h3>
+    <p style="color:var(--muted);font-size:13px;margin-bottom:16px">Choose who you are, then enter your PIN.</p>
+    <div class="login-roles" id="loginRoles">
+      <button type="button" class="login-role" data-company="DBCC" onclick="pickCompany('DBCC')">DBCC (Admin)</button>
+      <button type="button" class="login-role" data-company="Aus Reo" onclick="pickCompany('Aus Reo')">Aus Reo</button>
+      <button type="button" class="login-role" data-company="ARC" onclick="pickCompany('ARC')">ARC</button>
+    </div>
+    <div id="loginStep2" style="display:none;margin-top:16px">
+      <input type="password" inputmode="numeric" id="loginPin" placeholder="4-digit PIN" maxlength="4" autocomplete="off"
+             style="text-align:center;font-size:18px;letter-spacing:6px" onkeyup="if(event.key==='Enter')doLogin()">
+      <input type="text" id="loginName" placeholder="Your name (for the record)" maxlength="30"
+             style="text-align:center;font-size:15px;margin-top:10px" onkeyup="if(event.key==='Enter')doLogin()">
+      <button class="btn" id="loginBtn" onclick="doLogin()" style="margin-top:12px">Sign in</button>
+      <p id="loginErr" style="color:var(--err);font-size:12px;min-height:16px;margin-top:8px"></p>
+    </div>
   </div>
 </div>
 
@@ -48,17 +72,20 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg>
       Dashboard
     </button>
-    <button class="nav-tab" onclick="showPage('notif')" id="tabNotif">
+    <button class="nav-tab dbcc-only" onclick="showPage('notif')" id="tabNotif">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 01-3.46 0"/></svg>
       Notifications
     </button>
-    <button class="nav-tab" onclick="showPage('admin')" id="tabAdmin">
+    <button class="nav-tab dbcc-only" onclick="showPage('admin')" id="tabAdmin">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
       Admin
     </button>
   </div>
   <div class="nav-right">
+    <button class="btn btn-ghost btn-sm dbcc-only" onclick="goForeman()" style="width:auto" title="Open the site foreman view">👷 Foreman</button>
+    <button class="btn btn-ghost btn-sm dbcc-only" onclick="goSite()" style="width:auto" title="Open the steel-fixers site view">🏗️ Site</button>
     <span class="user-chip" id="userChip"></span>
+    <button class="btn btn-ghost btn-sm" id="logoutBtn" onclick="doLogout()" style="width:auto" title="Sign out">Sign out</button>
     <span class="badge" id="countBadge">
       <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
       <span id="countNum">0</span> entries
@@ -181,6 +208,7 @@
       <button class="btn btn-ghost btn-sm" onclick="clearSel()">Clear</button>
     </div>
     <div class="exp-bar">
+      <button class="btn btn-sec btn-sm dbcc-only" onclick="openBulkOrderEmailForFilter()" title="Re-open the order email for the selected project">✉ Order Email</button>
       <button class="btn btn-sec btn-sm" onclick="exportCSV()">Export CSV</button>
       <button class="btn btn-ghost btn-sm" onclick="refreshAll()">Refresh</button>
     </div>
@@ -235,7 +263,7 @@
   <div id="adminContent" style="display:none;max-width:1600px;margin:0 auto">
     <div style="display:flex;align-items:center;justify-content:space-between;padding:8px 0 20px">
       <div><h1 style="font-size:22px;font-weight:700;color:var(--gray-dk)">Admin Panel</h1><p style="font-size:13px;color:var(--muted);margin-top:3px">Projects, delivery program, steel fixers, and audit history</p></div>
-      <button class="btn btn-sec btn-sm" onclick="lockAdmin()">🔒 Lock</button>
+      <button class="btn btn-sec btn-sm" onclick="lockAdmin()">🔒 Sign out</button>
     </div>
     <div style="display:flex;gap:4px;margin-bottom:20px;border-bottom:1px solid var(--border);overflow-x:auto">
       <button class="nav-tab active" onclick="showAdminSub('proj')" id="atProj" style="height:42px">Projects</button>
@@ -246,6 +274,7 @@
       <button class="nav-tab" onclick="showAdminSub('assign')" id="atAssign" style="height:42px">Project Assignments</button>
       <button class="nav-tab" onclick="showAdminSub('account')" id="atAccount" style="height:42px">Accountability</button>
       <button class="nav-tab" onclick="showAdminSub('contacts')" id="atContacts" style="height:42px">Email Contacts</button>
+      <button class="nav-tab" onclick="showAdminSub('security')" id="atSecurity" style="height:42px">🔐 Logins & Security</button>
       <button class="nav-tab" onclick="showAdminSub('audit')" id="atAudit" style="height:42px">Audit Log</button>
     </div>
     <div id="adminProj"></div>
@@ -256,6 +285,7 @@
     <div id="adminAssign" style="display:none"></div>
     <div id="adminAccount" style="display:none"></div>
     <div id="adminContacts" style="display:none"></div>
+    <div id="adminSecurity" style="display:none"></div>
     <div id="adminAudit" style="display:none"></div>
   </div>
 </div>
@@ -350,6 +380,7 @@
 <div class="overlay" id="editOv" onclick="if(event.target===this)closeOv('editOv')"><div class="modal modal-lg" id="editModal"></div></div>
 <div class="overlay" id="cancelOv" onclick="if(event.target===this)closeOv('cancelOv')"><div class="modal" style="max-width:420px" id="cancelModal"></div></div>
 <div class="overlay" id="emailOv" onclick="if(event.target===this)closeOv('emailOv')"><div class="modal modal-lg" id="emailModal"></div></div>
+<div class="overlay" id="schedOv" onclick="if(event.target===this)closeOv('schedOv')"><div class="modal" id="schedModal"></div></div>
 <div class="overlay" id="weightOv" onclick="if(event.target===this)closeOv('weightOv')"><div class="modal" style="max-width:360px" id="weightModal"></div></div>
 <div class="overlay" id="markupOv" onclick="if(event.target===this)closeOv('markupOv')"><div class="modal" id="markupModal"></div></div>
 <div class="overlay" id="commentOv" onclick="if(event.target===this)closeOv('commentOv')"><div class="modal" style="max-width:420px" id="commentModal"></div></div>
@@ -357,6 +388,6 @@
 
 <div id="versionBadge" style="position:fixed;bottom:6px;right:8px;font-size:11px;color:#999;font-family:'JetBrains Mono',monospace;pointer-events:none;z-index:1;user-select:none;background:rgba(255,255,255,0.85);padding:2px 6px;border-radius:4px"></div>
 
-<script src="app.js?v=b5.6.5"></script>
+<script src="app.js?v=b5.7"></script>
 </body>
 </html>
