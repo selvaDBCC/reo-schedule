@@ -1288,10 +1288,10 @@ function renderDash(){
 <td><div class="action-cell">
 ${e.status!=='Cancelled'?`<span class="hold-toggle${e.on_hold?' on':''}" onclick="toggleHold(${e.id})" title="Toggle On Hold"><span class="hold-slider"></span></span>`:''}
 <button class="action-btn view" onclick="showDetail(${e.id})">View</button>
-${['Scheduled','Ordered'].includes(e.status)?`<button class="action-btn deliver" onclick="markDelivered(${e.id})">✓</button>`:''}
-${e.status!=='Cancelled'&&e.status!=='Delivered'?`<button class="action-btn cancel" onclick="cancelEntry(${e.id})">✗</button>`:''}
-${e.status==='Cancelled'?`<button class="action-btn reinstate" onclick="reinstateEntry(${e.id})">↺</button>`:''}
-${mm?`<button class="action-btn resolve" onclick="resolveMismatch(${e.id})">Fix</button><button class="action-btn mail" onclick="openMismatchEmail(${e.id})">✉</button>`:''}
+${['Scheduled','Ordered'].includes(e.status)?`<button class="action-btn deliver" onclick="markDelivered(${e.id})" title="Mark as delivered">✓</button>`:''}
+${e.status!=='Cancelled'&&e.status!=='Delivered'?`<button class="action-btn cancel" onclick="cancelEntry(${e.id})" title="Cancel this order">✗</button>`:''}
+${e.status==='Cancelled'?`<button class="action-btn reinstate" onclick="reinstateEntry(${e.id})" title="Reinstate (undo cancel)">↺</button>`:''}
+${mm?`<button class="action-btn resolve" onclick="resolveMismatch(${e.id})" title="Resolve date mismatch">Fix</button><button class="action-btn mail" onclick="openMismatchEmail(${e.id})" title="Email supplier about the date mismatch">✉</button>`:''}
 ${cn?'':`<button class="action-btn mail dbcc-only" onclick="openOrderDateEmail(${e.id})" title="Send delivery-date email to supplier">📅✉</button>`}
 </div></td></tr>`}).join('')}</tbody></table>`}
 
