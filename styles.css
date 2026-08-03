@@ -97,10 +97,12 @@ tr:hover td{background:#FAFAF8}
 tr.cancelled td{opacity:.6}
 tr.on-hold td{background:#FFF8E7}
 tr.on-hold:hover td{background:#FEF0D0}
-/* Delivery-date mismatch: highlight the row so suppliers/DBCC notice our date ≠ supplier date. */
-tr.mismatch td{background:#FFF3F0}
-tr.mismatch:hover td{background:#FFE8E2}
-tr.mismatch td:first-child{box-shadow:inset 3px 0 0 var(--err,#e53935)}
+/* Delivery-date mismatch: pastel-orange row, with the two date cells in a darker shade. */
+tr.mismatch td{background:#FFF4E5}
+tr.mismatch:hover td{background:#FFECD1}
+tr.mismatch td:first-child{box-shadow:inset 3px 0 0 var(--accent,#F7941D)}
+td.mismatch-date{background:#FFCC80 !important;color:#8A4B00;font-weight:700}
+tr.mismatch:hover td.mismatch-date{background:#FFBE66 !important}
 tr.drag-over td{background:var(--accent-lt)!important;outline:2px dashed var(--accent)}
 .td-check{width:36px}
 .td-check input[type=checkbox]{width:16px;height:16px;accent-color:var(--accent);cursor:pointer}

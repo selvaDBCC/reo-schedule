@@ -1278,8 +1278,8 @@ function renderDash(){
 <td class="sched-td">${e.schedule?esc(e.schedule):'<span style="color:#ccc">—</span>'}${e.extraction_method==='ocr'?' <span class="ocr-badge" title="Extracted via OCR — verify values">🔍</span>':''}</td>
 <td>${e.total_weight?`<span class="weight-td" onclick="editWeight(${e.id})">${e.total_weight}T</span>`:`<span style="color:#ccc;cursor:pointer" onclick="editWeight(${e.id})">—</span>`}</td>
 <td>${getStatusPill(e.status,e.entry_type,e.on_hold)}</td>
-<td style="white-space:nowrap;font-size:11px">${fmtDate(e.our_delivery_date)||'<span style="color:#ccc">—</span>'}</td>
-<td style="white-space:nowrap;font-size:11px">${fmtDate(e.supplier_delivery_date)||'<span style="color:#ccc">—</span>'}${mm?'<span class="mismatch-icon" title="Dates mismatch">⚠️</span>':''}</td>
+<td class="${mm?'mismatch-date':''}" style="white-space:nowrap;font-size:11px">${fmtDate(e.our_delivery_date)||'<span style="color:#ccc">—</span>'}</td>
+<td class="${mm?'mismatch-date':''}" style="white-space:nowrap;font-size:11px">${fmtDate(e.supplier_delivery_date)||'<span style="color:#ccc">—</span>'}${mm?'<span class="mismatch-icon" title="Dates mismatch">⚠️</span>':''}</td>
 <td style="white-space:nowrap;font-size:11px">${fmtDate(e.entry_date)||'—'}</td>
 <td>${e.file_url?`<a class="att-link" href="${e.file_url}" target="_blank">📄 ${esc((e.file_name||'').slice(0,14))}</a>`:`<button class="action-btn" onclick="uploadScheduleFile(${e.id})" style="color:var(--accent-dk);font-size:10px">+ Upload</button>`}</td>
 <td>${mp.length?`<button class="att-link markup-link" onclick="viewMarkups(${e.id})">📐 ${mp.length}</button>`:''}<button class="action-btn" onclick="uploadMarkup(${e.id})" style="font-size:10px;color:var(--info)">+📐</button></td>
@@ -1768,8 +1768,17 @@ function openOrderDateEmail(id){const e=entries.find(x=>x.id===id);if(!e)return;
 // Manual re-open of the bulk "orders created" email for the project chosen in the dashboard
 // Project filter (DBCC). For when the popup at order-creation time was missed.
 function openBulkOrderEmailForFilter(){
+  // If specific rows are ticked, draft the order email for just those; otherwise use the project filter.
+  if(selectedIds&&selectedIds.size>0){
+    const rows=entries.filter(e=>selectedIds.has(e.id)&&e.status!=='Cancelled');
+    if(!rows.length)return alert('The ticked rows are all cancelled — nothing to email.');
+    const projs=[...new Set(rows.map(e=>e.project))];
+    if(projs.length>1)return alert('Your ticked rows span '+projs.length+' projects (different suppliers). Tick rows from a single project, or clear the selection and use the Project filter.');
+    openOrderCreatedEmail(rows,projs[0]);
+    return;
+  }
   const pn=$('fProj').value;
-  if(!pn)return alert('Pick a single project in the Project filter first, then re-open its order email.');
+  if(!pn)return alert('Tick the rows you want, OR pick a single project in the Project filter, then click Order Email.');
   const rows=entries.filter(e=>e.project===pn&&e.our_delivery_date&&e.status!=='Cancelled');
   if(!rows.length)return alert('No entries with an ordered delivery date for '+pn+'.');
   openOrderCreatedEmail(rows,pn);
