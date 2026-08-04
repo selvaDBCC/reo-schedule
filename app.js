@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b5.7.1';
+const APP_VERSION='b5.7.2';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const BUCKET='schedules';
@@ -203,6 +203,7 @@ async function init(){
   // Site View (steel fixers — read-only, no login)
   if(isSiteViewMode()){
     try{
+      await ensureCrewSession();
       await loadProjects();await loadEntries();
       populateSiteDropdowns();subscribeSiteRealtime();
       $('loadingScreen').style.display='none';
@@ -214,6 +215,7 @@ async function init(){
   // Foreman View (site foreman — mark delivered + install dates, name required for audit)
   if(isForemanViewMode()){
     try{
+      await ensureCrewSession();
       await loadProjects();await loadEntries();
       populateForemanDropdowns();subscribeForemanRealtime();
       $('loadingScreen').style.display='none';
@@ -265,15 +267,18 @@ function saveName(){const n=$('nameInput').value.trim();if(!n)return alert('Plea
    subsequent query runs authenticated (which is what RLS keys off in Stage 5). */
 async function ensureAuth(){
   // Restore an existing session (survives refresh) and derive role from the JWT's app_metadata.
+  // Only DBCC / supplier sessions belong in the main app — a leftover 'crew' session (from the
+  // Site/Foreman views on the same device) must NOT log someone into the dashboard.
   try{
     const{data:{session}}=await sb.auth.getSession();
     if(session&&session.user){
       const md=session.user.app_metadata||{};
-      if(md.app_role){
+      if(md.app_role==='dbcc'||md.app_role==='supplier'){
         authRole=md.app_role;authSupplier=md.supplier||null;
         authCompany=authRole==='dbcc'?'DBCC':(authSupplier||null);
         return true;
       }
+      if(md.app_role==='crew'){try{await sb.auth.signOut()}catch(_){}}  // clear crew session before login
     }
   }catch(_){}
   // No valid session — show the login overlay and stop.
@@ -281,6 +286,21 @@ async function ensureAuth(){
   $('nameOverlay').classList.remove('show');
   $('loginOverlay').classList.add('show');
   return false;
+}
+// Site/Foreman views (no login UI): reuse an existing session, else silently sign in as the
+// read-only "Site" crew account so they can read under RLS. Crew PIN 0000 is intentionally simple
+// — the link isn't shared outside DBCC, and the crew role only ever reads schedules.
+async function ensureCrewSession(){
+  try{
+    const{data:{session}}=await sb.auth.getSession();
+    if(session&&session.user&&(session.user.app_metadata||{}).app_role)return true;
+  }catch(_){}
+  try{
+    const res=await fetch(AUTH_FN,{method:'POST',headers:{'Authorization':'Bearer '+SUPA_KEY,'apikey':SUPA_KEY,'Content-Type':'application/json'},body:JSON.stringify({action:'login',company:'Site',pin:'0000',name:'Site'})});
+    const j=await res.json();
+    if(j.status==='ok'){await sb.auth.setSession(j.session);return true;}
+  }catch(_){}
+  return false;  // fall through — if RLS is off the anon read still works; if on, view will be empty
 }
 function pickCompany(c){
   authCompany=c;
