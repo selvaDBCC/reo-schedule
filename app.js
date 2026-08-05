@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b5.7.2';
+const APP_VERSION='b5.7.3';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const BUCKET='schedules';
@@ -113,10 +113,11 @@ function appendAuthor(existing,name){
 // Days between a date string (yyyy-mm-dd) and today. Positive = past, negative = future.
 function daysAgo(d){if(!d)return null;const ms=Date.now()-new Date(d).getTime();return Math.floor(ms/86400000)}
 
-// Is the install overdue? Schedule attached, supplier_delivery_date passed by N days,
-// and not yet marked installed and not yet "Delivered"/"Cancelled".
+// Is the install overdue? Schedule attached, no install date recorded, not Cancelled, and the
+// supplier delivery date passed by N+ days — regardless of whether it's been marked Delivered
+// (installing happens after delivery, so Delivered-but-not-installed items must still count).
 function isOverdueInstall(e){
-  if(!e.file_url||e.installed_date||e.status==='Cancelled'||e.status==='Delivered')return false;
+  if(!e.file_url||e.installed_date||e.status==='Cancelled')return false;
   const d=daysAgo(e.supplier_delivery_date);
   return d!=null&&d>=(appSettings.overdue_install_days||3)}
 
