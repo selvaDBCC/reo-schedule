@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b5.7.3';
+const APP_VERSION='b5.8';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const BUCKET='schedules';
@@ -1129,17 +1129,87 @@ async function getPdfOcrText(file,onProgress){
 
 // Main entry point. Tries native text first; if PDF is image-only, returns _needsOcr=true
 // for the caller to decide whether to invoke OCR (so UI can show the warning first).
+/* ═══ ARC PARSER (b5.8) ═══
+   ARC schedules are a different format from Aus Reo: one PDF per product type (REO/MESH/DOWEL/ACCS/
+   BEAM), a "Total Tonnes" in the header, and a per-row Mass column. Same RULES carry over — deduct
+   starters, exclude accessories/mesh from bar weight — just read ARC's columns. Returns the SAME
+   shape as parseReoText (ctrlCode/weight/drawing/barWeight/meshSqm/trenchLm/starterWeight/recon*). */
+function looksLikeArc(t){
+  t=t||'';
+  if(/Ctrl Code/i.test(t)||/BAR SUMMARY/i.test(t))return false; // that's Aus Reo
+  let s=0;
+  if(/Total Tonnes/i.test(t))s++;
+  if(/Max\.?\s*Sling Weight/i.test(t))s++;
+  if(/Supply Site/i.test(t))s++;
+  if(/Prod Code/i.test(t))s++;
+  if(/No distribution allowed/i.test(t))s++;
+  if(/Bar Mark\s+Product\s+No\.Off/i.test(t)||/Sundry items/i.test(t)||/\bMeshes\b/i.test(t))s++;
+  return s>=3;
+}
+// [ARC STARTER RULE — PROVISIONAL, pending ARC confirmation] A bar is a starter if its Bar Mark /
+// comment carries an SB token or "STARTER", OR it sits in an ARC element named "STARTER ..." (ARC
+// groups starter bars under such elements, e.g. "STARTER STAIR"). Isolated so it's a one-spot change.
+function arcRowIsStarter(mark,comment){
+  const m=String(mark||''),c=String(comment||'');
+  return /(?:^|[-_/])SB\d*(?:$|[-_/])/i.test(m)||/\bstarter\b/i.test(c)||/\bSB\b/i.test(c);
+}
+function parseArcText(pageOneText,allText){
+  const t=allText||pageOneText||'';
+  const e={_arc:true};
+  const tot=t.match(/Total Tonnes\s+([\d.]+)/i);
+  e.weight=tot?parseFloat(tot[1]):null;                    // total_weight
+  e.ctrlCode=(t.match(/\b(JLF\d+)\b/)||[])[1]||null;       // schedule id (ARC prod code)
+  const dwg=(t.match(/DWG NO\.:\s*(.+?)\s+REV/i)||[])[1];
+  e.drawing=dwg?dwg.trim():null;
+  const type=/Sundry items/i.test(t)?'accessory':(/\bMeshes\b/i.test(t)?'mesh':(/Bar Mark\s+Product\s+No\.Off/i.test(t)?'bar':'unknown'));
+  e._arcType=type;
+  if(type==='bar'){
+    const ROW=/(\S+)\s+(\d+)\s+(\d+)\s+(\d+\.\d+)\s+(.*?)((?:CB|SL)[NRY]\d+)\s+([A-Z0-9]+)\s+(\d+)/g;
+    let sum=0,starter=0;const starters=[];
+    t.split(/Element\s*:/).forEach(seg=>{
+      const elemStarter=/\bstarter\b/i.test(seg.slice(0,200));  // element name/comment near segment top
+      let m;ROW.lastIndex=0;
+      while((m=ROW.exec(seg))){const mass=parseFloat(m[4]);sum+=mass;
+        if(elemStarter||arcRowIsStarter(m[1],m[5].trim())){starter+=mass;starters.push(m[1]);}}
+    });
+    const total=e.weight!=null?e.weight:sum;
+    e.barWeight=Math.round((total-starter)*1000)/1000;
+    e.starterWeight=starter>0?Math.round(starter*1000)/1000:null;
+    e.meshSqm=null;e.trenchLm=null;
+    if(e.weight!=null){
+      e.reconDiff=Math.round((sum-e.weight)*1000)/1000;
+      e.reconStatus=Math.abs(e.reconDiff)<=0.03?'reconciled':'review';
+      let r='ARC bar: header '+e.weight.toFixed(3)+'T';
+      if(starter>0)r+=' − '+starter.toFixed(3)+'T starter ['+starters.join(', ')+'] (PROVISIONAL — confirm ARC rule)';
+      if(e.reconStatus==='review')r+=' · ⚠ rows '+sum.toFixed(3)+'T ≠ header — verify';
+      e.reconReason=r;
+    }
+    if(starter>0)e.reconStatus='review'; // force human review whenever a (provisional) starter deduction happened
+  }else if(type==='mesh'){
+    const ME=/(\d+)\s+SHT\s+(\d+\.\d+)\s+((?:SL|RL)\d+)/g;let sq=0,m;while((m=ME.exec(t)))sq+=parseInt(m[1],10)*14.4;
+    e.barWeight=0;e.starterWeight=null;e.meshSqm=sq>0?Math.round(sq*10)/10:null;e.trenchLm=null;
+    e.reconStatus=null;e.reconDiff=null;e.reconReason='ARC mesh — '+(e.meshSqm||0)+' m² (est. @14.4 m²/sheet); no bar weight';
+  }else if(type==='accessory'){
+    e.barWeight=0;e.starterWeight=null;e.meshSqm=null;e.trenchLm=null;
+    e.reconStatus=null;e.reconDiff=null;e.reconReason='ARC accessories/dowels — excluded from bar weight';
+  }else{
+    e.barWeight=null;e.starterWeight=null;e.meshSqm=null;e.trenchLm=null;
+    e.reconStatus='review';e.reconReason='ARC schedule — product type not recognised; verify manually';
+  }
+  return e;
+}
+
 async function doPdfExtract(file){
   const native=await getPdfNativeText(file);
   if(!native.hasText){return {_needsOcr:true,_numPages:native.numPages,_extractionMethod:null}}
-  const parsed=parseReoText(native.pageOneText,native.allText);
+  const parsed=looksLikeArc(native.allText)?parseArcText(native.pageOneText,native.allText):parseReoText(native.pageOneText,native.allText);
   parsed._extractionMethod='native';
   return parsed}
 
 // Run OCR on a PDF and return parsed fields. Caller must supply a progress callback for the UI.
 async function doPdfOcrExtract(file,onProgress){
   const ocr=await getPdfOcrText(file,onProgress);
-  const parsed=parseReoText(ocr.pageOneText,ocr.allText);
+  const parsed=looksLikeArc(ocr.allText)?parseArcText(ocr.pageOneText,ocr.allText):parseReoText(ocr.pageOneText,ocr.allText);
   parsed._extractionMethod='ocr';
   return parsed}
 
