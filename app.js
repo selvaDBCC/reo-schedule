@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b5.8';
+const APP_VERSION='b5.8.1';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const BUCKET='schedules';
@@ -1506,7 +1506,13 @@ function cancelEntry(id){const e=entries.find(x=>x.id===id);if(!e)return;
   $('cancelModal').innerHTML=`<h3>Cancel Entry<button class="modal-close" onclick="closeOv('cancelOv')">&times;</button></h3><p style="font-size:13px;color:var(--mid);margin-bottom:14px">Cancel "${esc(e.schedule||e.project)}"?</p><div class="fg"><label>Reason <span class="req">*</span></label><textarea id="cancelR"></textarea></div><div id="cancelErr"></div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn btn-sec btn-sm" onclick="closeOv('cancelOv')">Keep</button><button class="btn btn-err btn-sm" onclick="doCancel(${id})">Cancel Entry</button></div>`;
   $('cancelOv').classList.add('show')}
 async function doCancel(id){const r=$('cancelR').value.trim();if(!r)return $('cancelErr').innerHTML='<div class="error-msg">Reason required</div>';
-  const e=entries.find(x=>x.id===id);await sb.from('entries').update({status:'Cancelled',cancel_reason:r,on_hold:false}).eq('id',id);
+  const e=entries.find(x=>x.id===id);
+  // Record the cancellation reason as a comment chunk in the actor's own column (DBCC vs Supplier),
+  // attributed to whoever cancelled it — so the reason shows on the dashboard, not just the audit log.
+  const col=isSupplier()?'aus_reo_comment':'dbcc_comment';
+  const chunks=parseChunks(e[col]);
+  chunks.push({text:'Cancelled: '+r,authors:[userName],created_at:new Date().toISOString()});
+  await sb.from('entries').update({status:'Cancelled',cancel_reason:r,on_hold:false,[col]:chunksToJson(chunks)}).eq('id',id);
   await auditLog({entry_id:id,action:'CANCEL',field_changed:'status',old_value:e.status,new_value:'Cancelled: '+r});closeOv('cancelOv');await loadEntries();renderDash()}
 
 function reinstateEntry(id){const e=entries.find(x=>x.id===id);if(!e)return;
