@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b5.9';
+const APP_VERSION='b5.9.1';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const BUCKET='schedules';
@@ -3759,8 +3759,17 @@ function generateForemanReport(){
 }
 function printForemanReport(){
   const d=window._reoReport;if(!d)return;
-  const rows=d.rows.map(r=>`<tr style="background:${r.state.bg}"><td>${esc(r.e.schedule||'—')}</td><td>${esc(r.e.project)}</td><td>${esc((r.e.level||'—')+' / '+(r.e.area||'—'))}</td><td>${fmtDate(r.e.supplier_delivery_date||r.e.our_delivery_date)||'—'}</td><td>${fmtDate(r.e.installed_date)||'—'}</td><td>${r.e.progress_pct!=null?r.e.progress_pct+'%':'—'}</td><td style="color:${r.state.fg};font-weight:bold">${r.state.label}</td><td>${esc(chunksToPlain(parseChunks(r.e.foreman_notes)))}</td></tr>`).join('');
-  const html=`<!doctype html><html><head><meta charset="utf-8"><title>REO Delivery & Install Report</title><style>body{font-family:Arial,Helvetica,sans-serif;padding:22px;color:#222}h2{margin:0 0 4px}.sub{color:#666;font-size:12px;margin-bottom:12px}table{border-collapse:collapse;width:100%}th,td{border:1px solid #bbb;padding:6px 8px;text-align:left;font-size:11px}th{background:#eee}@media print{body{padding:0}}</style></head><body><h2>REO — Delivery & Install Report</h2><div class="sub">${esc(d.summary)} · ${d.rows.length} rows · generated ${new Date().toLocaleString('en-AU')}</div><table><thead><tr><th>Control Code</th><th>Project</th><th>Level / Area</th><th>Delivered</th><th>Installed</th><th>Progress</th><th>Status</th><th>Notes</th></tr></thead><tbody>${rows}</tbody></table></body></html>`;
+  const rows=d.rows.map(r=>`<tr style="background:${r.state.bg}"><td class="nc">${esc(r.e.schedule||'—')}</td><td>${esc(r.e.project)}</td><td>${esc((r.e.level||'—')+' / '+(r.e.area||'—'))}</td><td class="nc">${fmtDate(r.e.supplier_delivery_date||r.e.our_delivery_date)||'—'}</td><td class="nc">${fmtDate(r.e.installed_date)||'—'}</td><td class="nc">${r.e.progress_pct!=null?r.e.progress_pct+'%':'—'}</td><td style="color:${r.state.fg};font-weight:bold">${r.state.label}</td><td>${esc(chunksToPlain(parseChunks(r.e.foreman_notes)))}</td></tr>`).join('');
+  const html=`<!doctype html><html><head><meta charset="utf-8"><title>REO Delivery & Install Report</title><style>
+@page{size:A4 landscape;margin:8mm}
+body{font-family:Arial,Helvetica,sans-serif;padding:16px;color:#222}
+h2{margin:0 0 4px;font-size:16px}.sub{color:#666;font-size:11px;margin-bottom:10px}
+table{border-collapse:collapse;width:100%;table-layout:fixed}
+th,td{border:1px solid #bbb;padding:3px 5px;text-align:left;font-size:10px;vertical-align:top;overflow-wrap:anywhere}
+th{background:#eee}
+.nc{white-space:nowrap}
+col.c-code{width:58px}col.c-proj{width:92px}col.c-la{width:140px}col.c-d{width:58px}col.c-i{width:58px}col.c-p{width:40px}col.c-s{width:66px}
+</style></head><body><h2>REO — Delivery & Install Report</h2><div class="sub">${esc(d.summary)} · ${d.rows.length} rows · generated ${new Date().toLocaleString('en-AU')}</div><table><colgroup><col class="c-code"><col class="c-proj"><col class="c-la"><col class="c-d"><col class="c-i"><col class="c-p"><col class="c-s"><col></colgroup><thead><tr><th>Control Code</th><th>Project</th><th>Level / Area</th><th>Delivered</th><th>Installed</th><th>Prog</th><th>Status</th><th>Notes</th></tr></thead><tbody>${rows}</tbody></table></body></html>`;
   const w=window.open('','_blank');if(!w){alert('Popup blocked — allow popups to print the report.');return}
   w.document.write(html);w.document.close();w.focus();setTimeout(()=>w.print(),350);
 }
