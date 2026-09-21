@@ -131,6 +131,14 @@ tr.drag-over td{background:var(--accent-lt)!important;outline:2px dashed var(--a
 .fm-action-btn.install:hover{background:var(--accent-lt)}
 .fm-installed{width:100%;display:flex;align-items:center;justify-content:center;gap:8px;font-size:13px;color:var(--success);font-weight:600;background:var(--success-lt);border-radius:8px;padding:10px 14px;flex-wrap:wrap;box-sizing:border-box}
 .fm-mini-btn{background:transparent;border:none;color:var(--accent-dk);font-size:11px;cursor:pointer;text-decoration:underline;font-weight:500;white-space:nowrap}
+.fm-progress{display:flex;align-items:center;gap:8px;margin-top:10px}
+.fm-bar{flex:1;height:8px;background:#eee;border-radius:4px;overflow:hidden}
+.fm-bar-fill{height:100%;border-radius:4px;transition:width .2s}
+.fm-pct{font-size:12px;font-weight:700;color:var(--gray-dk);min-width:36px;text-align:right}
+.fm-notes{margin-top:8px}
+.fm-note{font-size:12px;color:var(--gray-dk);line-height:1.4;margin-bottom:3px}
+.fm-note-meta{color:var(--muted);font-size:10px}
+.fm-note-empty{font-size:11px;color:var(--muted);margin-bottom:3px}
 .sched-td{font-family:'JetBrains Mono',monospace;font-weight:500;font-size:11px;color:var(--text)}
 .weight-td{font-family:'JetBrains Mono',monospace;font-size:11px;cursor:pointer;color:var(--text)}
 .weight-td:hover{color:var(--accent-dk);text-decoration:underline}

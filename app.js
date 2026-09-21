@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b5.8.1';
+const APP_VERSION='b5.9';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const BUCKET='schedules';
@@ -1351,6 +1351,17 @@ function getFiltered(){
     if(sortCol==='total_weight'){va=parseFloat(va)||0;vb=parseFloat(vb)||0;return sortAsc?va-vb:vb-va}
     return sortAsc?String(va).localeCompare(String(vb)):String(vb).localeCompare(String(va))});return list}
 
+// Compact dashboard cell showing the foreman's progress % (colour-coded) + a 📝 with the site notes on hover.
+function foremanCell(e){
+  const pct=e.progress_pct;
+  const notes=parseChunks(e.foreman_notes);
+  if(pct==null && !notes.length)return '<span style="color:#ccc">—</span>';
+  const color=pct>=100?'#2E7D32':(pct>0?'#1565C0':'#999');
+  const pctTxt=pct!=null?`<b style="color:${color}">${pct}%</b>`:'';
+  const noteIcon=notes.length?` <span title="${esc(chunksToPlain(notes))}" style="cursor:help">📝${notes.length}</span>`:'';
+  return pctTxt+noteIcon||'<span style="color:#ccc">—</span>';
+}
+
 function renderDash(){
   const all=entries,f=getFiltered(),mc=all.filter(e=>hasMismatch(e)).length,hc=all.filter(e=>e.on_hold).length;
   $('statsArea').innerHTML=[{n:all.length,l:"Total",c:"var(--accent-dk)"},{n:all.filter(e=>e.status==="Not Ordered").length,l:"Not Ordered",c:"var(--gray)"},{n:all.filter(e=>e.status==="Ordered").length,l:"Ordered",c:"var(--info)"},{n:all.filter(e=>e.status==="Scheduled").length,l:"Scheduled",c:"var(--accent-dk)"},{n:all.filter(e=>e.status==="Delivered").length,l:"Delivered",c:"var(--success)"},{n:hc,l:"⏸ On Hold",c:"var(--warn)"},{n:mc,l:"⚠ Mismatches",c:"var(--warn)"}].map(s=>`<div class="stat"><div class="stat-n" style="color:${s.c}">${s.n}</div><div class="stat-l">${s.l}</div></div>`).join('');
@@ -1359,7 +1370,7 @@ function renderDash(){
   if(!f.length){w.innerHTML=`<div class="empty"><p>${all.length===0?'No entries yet.':'No matches.'}</p></div>`;return}
   const ar=c=>sortCol===c?(sortAsc?' ▲':' ▼'):'';
   const allCk=f.every(e=>selectedIds.has(e.id));
-  w.innerHTML=`<table><thead><tr><th class="no-sort" style="width:36px"><input type="checkbox" ${allCk?'checked':''} onchange="toggleAll(this.checked)"></th><th onclick="tSort('project')">Project${ar('project')}</th><th onclick="tSort('level')">Level${ar('level')}</th><th onclick="tSort('area')">Area${ar('area')}</th><th onclick="tSort('schedule')">Schedule${ar('schedule')}</th><th onclick="tSort('total_weight')">Wt${ar('total_weight')}</th><th onclick="tSort('status')">Status${ar('status')}</th><th onclick="tSort('our_delivery_date')">Ordered Delivery${ar('our_delivery_date')}</th><th onclick="tSort('supplier_delivery_date')">Supplier${ar('supplier_delivery_date')}</th><th onclick="tSort('entry_date')">Submitted${ar('entry_date')}</th><th class="no-sort">Schedule File</th><th class="no-sort">Markup Plans</th><th class="no-sort" style="max-width:120px">${esc(isSupplier()?authSupplier:'Supplier')} Comments</th><th class="no-sort" style="max-width:120px">DBCC Comments</th><th class="no-sort">Actions</th></tr></thead><tbody>${f.map(e=>{
+  w.innerHTML=`<table><thead><tr><th class="no-sort" style="width:36px"><input type="checkbox" ${allCk?'checked':''} onchange="toggleAll(this.checked)"></th><th onclick="tSort('project')">Project${ar('project')}</th><th onclick="tSort('level')">Level${ar('level')}</th><th onclick="tSort('area')">Area${ar('area')}</th><th onclick="tSort('schedule')">Schedule${ar('schedule')}</th><th onclick="tSort('total_weight')">Wt${ar('total_weight')}</th><th onclick="tSort('status')">Status${ar('status')}</th><th onclick="tSort('our_delivery_date')">Ordered Delivery${ar('our_delivery_date')}</th><th onclick="tSort('supplier_delivery_date')">Supplier${ar('supplier_delivery_date')}</th><th onclick="tSort('entry_date')">Submitted${ar('entry_date')}</th><th class="no-sort" title="Foreman progress % + site notes">Progress</th><th class="no-sort">Schedule File</th><th class="no-sort">Markup Plans</th><th class="no-sort" style="max-width:120px">${esc(isSupplier()?authSupplier:'Supplier')} Comments</th><th class="no-sort" style="max-width:120px">DBCC Comments</th><th class="no-sort">Actions</th></tr></thead><tbody>${f.map(e=>{
     const mm=hasMismatch(e),cn=e.status==='Cancelled',mp=e.markup_plans?JSON.parse(e.markup_plans):[];
     return`<tr class="${cn?'cancelled':''}${e.on_hold?' on-hold':''}${mm?' mismatch':''}" ondragover="event.preventDefault();this.classList.add('drag-over')" ondragleave="this.classList.remove('drag-over')" ondrop="handleRowDrop(event,${e.id});this.classList.remove('drag-over')">
 <td class="td-check"><input type="checkbox" ${selectedIds.has(e.id)?'checked':''} onchange="toggleSel(${e.id},this.checked)"></td>
@@ -1372,6 +1383,7 @@ function renderDash(){
 <td class="${mm?'mismatch-date':''}" style="white-space:nowrap;font-size:11px">${fmtDate(e.our_delivery_date)||'<span style="color:#ccc">—</span>'}</td>
 <td class="${mm?'mismatch-date':''}" style="white-space:nowrap;font-size:11px">${fmtDate(e.supplier_delivery_date)||'<span style="color:#ccc">—</span>'}${mm?'<span class="mismatch-icon" title="Dates mismatch">⚠️</span>':''}</td>
 <td style="white-space:nowrap;font-size:11px">${fmtDate(e.entry_date)||'—'}</td>
+<td style="white-space:nowrap;font-size:11px">${foremanCell(e)}</td>
 <td>${e.file_url?`<a class="att-link" href="${e.file_url}" target="_blank">📄 ${esc((e.file_name||'').slice(0,14))}</a>`:`<button class="action-btn" onclick="uploadScheduleFile(${e.id})" style="color:var(--accent-dk);font-size:10px">+ Upload</button>`}</td>
 <td>${mp.length?`<button class="att-link markup-link" onclick="viewMarkups(${e.id})">📐 ${mp.length}</button>`:''}<button class="action-btn" onclick="uploadMarkup(${e.id})" style="font-size:10px;color:var(--info)">+📐</button></td>
 <td class="comment-td" onclick="editChunkComment(${e.id},'aus_reo')" title="${esc(chunksToPlain(parseChunks(e.aus_reo_comment)))}"><div class="comment-preview">${chunksToCell(parseChunks(e.aus_reo_comment))}</div></td>
@@ -1655,6 +1667,8 @@ ${e.cancel_reason?`<div class="drow"><div class="dlbl">Cancel Reason</div><div c
 <div class="drow"><div class="dlbl">Ordered Delivery</div><div class="dval">${fmtDate(e.our_delivery_date)||'—'}</div></div>
 <div class="drow"><div class="dlbl">Supplier Date</div><div class="dval">${fmtDate(e.supplier_delivery_date)||'—'}${mm?' ⚠️':''}</div></div>
 <div class="drow"><div class="dlbl">Submitted</div><div class="dval">${fmtDate(e.entry_date)||'—'}</div></div>
+<div class="drow"><div class="dlbl">Progress</div><div class="dval">${e.progress_pct!=null?e.progress_pct+'%':'—'}${e.installed_date?' · installed '+fmtDate(e.installed_date):''}</div></div>
+<div class="drow"><div class="dlbl">Site Notes</div><div class="dval">${(function(){const n=parseChunks(e.foreman_notes);return n.length?n.map(c=>esc(c.text)+' <span style="color:var(--muted);font-size:11px">— '+esc((c.authors||[]).join(', '))+'</span>').join('<br>'):'—'})()}</div></div>
 <div class="drow"><div class="dlbl">${esc(projectSupplier(e.project))} Comments</div><div class="dval">${chunksToHtml(parseChunks(e.aus_reo_comment))}</div></div>
 <div class="drow"><div class="dlbl">DBCC Comments</div><div class="dval">${chunksToHtml(parseChunks(e.dbcc_comment))}</div></div>
 <div class="drow"><div class="dlbl">Schedule File</div><div class="dval">${e.file_url?`<a class="att-link" href="${e.file_url}" target="_blank">📄 ${esc(e.file_name)}</a>`:'None'}</div></div>
@@ -1915,8 +1929,8 @@ async function sendEmail(id,context){
 
 /* ═══ EXPORT ═══ */
 function exportCSV(){const d=getFiltered();if(!d.length)return alert('No data');
-  const h=['Project','Level','Area','Split','Schedule','Drawing','Weight','Status','On Hold','Type','Ordered Delivery','Supplier Date','Submitted','Supplier Comments','DBCC Comments','File'];
-  const rows=d.map(e=>[e.project,e.level||'',e.area||'',e.split_reference||'',e.schedule||'',e.drawing_reference||'',e.total_weight||'',e.status,e.on_hold?'Yes':'',e.entry_type,e.our_delivery_date||'',e.supplier_delivery_date||'',e.entry_date||'',chunksToPlain(parseChunks(e.aus_reo_comment))||e.comments||'',chunksToPlain(parseChunks(e.dbcc_comment))||'',e.file_name||'']);
+  const h=['Project','Level','Area','Split','Schedule','Drawing','Weight','Status','On Hold','Type','Ordered Delivery','Supplier Date','Submitted','Installed','Progress %','Site Notes','Supplier Comments','DBCC Comments','File'];
+  const rows=d.map(e=>[e.project,e.level||'',e.area||'',e.split_reference||'',e.schedule||'',e.drawing_reference||'',e.total_weight||'',e.status,e.on_hold?'Yes':'',e.entry_type,e.our_delivery_date||'',e.supplier_delivery_date||'',e.entry_date||'',e.installed_date||'',e.progress_pct!=null?e.progress_pct:'',chunksToPlain(parseChunks(e.foreman_notes)),chunksToPlain(parseChunks(e.aus_reo_comment))||e.comments||'',chunksToPlain(parseChunks(e.dbcc_comment))||'',e.file_name||'']);
   const csv=[h,...rows].map(r=>r.map(c=>`"${String(c||'').replace(/"/g,'""')}"`).join(',')).join('\n');
   const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download=`reo-${today()}.csv`;a.click()}
 
@@ -3634,6 +3648,13 @@ function renderForeman(){
     const deliveredHtml=delivered
       ? `<button class="fm-action-btn undo" onclick="foremanUndoDelivered(${e.id})">↩ Undo Delivered</button>`
       : `<button class="fm-action-btn deliver" onclick="foremanMarkDelivered(${e.id})">✓ Mark Delivered</button>`;
+    // Progress bar (0-100). Green at 100, blue in progress, grey at 0.
+    const pct=e.progress_pct!=null?e.progress_pct:0;
+    const pctColor=pct>=100?'#2E7D32':(pct>0?'#1565C0':'#ccc');
+    const progressHtml=`<div class="fm-progress"><div class="fm-bar"><div class="fm-bar-fill" style="width:${pct}%;background:${pctColor}"></div></div><span class="fm-pct">${pct}%</span><button class="fm-mini-btn" onclick="foremanSetProgress(${e.id})">Set %</button></div>`;
+    // Foreman notes (who did what) — attributed chunks.
+    const fnotes=parseChunks(e.foreman_notes);
+    const notesHtml=`<div class="fm-notes">${fnotes.length?fnotes.map(c=>`<div class="fm-note">📝 ${esc(c.text)} <span class="fm-note-meta">— ${esc((c.authors||[]).join(', '))}${c.created_at?' · '+fmtDate(c.created_at.slice(0,10)):''}</span></div>`).join(''):'<div class="fm-note-empty">No notes yet</div>'}<button class="fm-mini-btn" onclick="foremanAddNote(${e.id})">+ Note</button></div>`;
     return `<div class="sv-card${cls}">
       <div class="sv-card-head">
         <div style="flex:1;min-width:0">
@@ -3645,6 +3666,8 @@ function renderForeman(){
       <div class="sv-date">📅 Delivery: <b>${fmtDate(e.our_delivery_date)||'Not set'}</b> · ${statusPill}</div>
       <div class="sv-files">${filesHtml}</div>
       <div class="fm-actions">${deliveredHtml}${installHtml}</div>
+      ${progressHtml}
+      ${notesHtml}
     </div>`}).join('')+'</div>'}
 
 async function foremanMarkDelivered(id){
@@ -3668,9 +3691,85 @@ function foremanSetInstall(id){
 }
 async function foremanSaveInstall(id){
   const v=$('fmDateInp').value,nv=v||null;const e=entries.find(x=>x.id===id);
-  await sb.from('entries').update({installed_date:nv}).eq('id',id);
+  const upd={installed_date:nv};
+  if(nv)upd.progress_pct=100;   // installed on site = 100% done
+  await sb.from('entries').update(upd).eq('id',id);
   await foremanAudit({entry_id:id,action:'UPDATE',field_changed:'installed_date',old_value:String(e.installed_date||''),new_value:String(nv||'')});
   closeOv('weightOv');await loadEntries();renderForeman();
+}
+function foremanSetProgress(id){
+  const e=entries.find(x=>x.id===id);if(!e)return;
+  $('weightModal').innerHTML=`<h3>Progress %<button class="modal-close" onclick="closeOv('weightOv')">&times;</button></h3><p style="font-size:12px;color:var(--muted);margin-bottom:10px">${esc(e.project)} / ${esc(e.level||'—')} / ${esc(e.area||'—')}${e.schedule?' · '+esc(e.schedule):''}</p><div class="fg"><label style="display:block;margin-bottom:4px">How much is installed? (0–100%)</label><input type="number" min="0" max="100" id="fmPctInp" value="${e.progress_pct!=null?e.progress_pct:''}" placeholder="0"></div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn btn-sec btn-sm" onclick="closeOv('weightOv')">Cancel</button><button class="btn btn-sm" onclick="foremanSaveProgress(${id})" style="width:auto">Save</button></div>`;
+  $('weightOv').classList.add('show');
+  setTimeout(()=>{const t=$('fmPctInp');if(t)t.focus()},60);
+}
+async function foremanSaveProgress(id){
+  let v=parseInt($('fmPctInp').value,10);if(isNaN(v))v=0;v=Math.max(0,Math.min(100,v));
+  const e=entries.find(x=>x.id===id);
+  await sb.from('entries').update({progress_pct:v}).eq('id',id);
+  await foremanAudit({entry_id:id,action:'UPDATE',field_changed:'progress_pct',old_value:String(e.progress_pct==null?'':e.progress_pct),new_value:String(v)});
+  closeOv('weightOv');await loadEntries();renderForeman();
+}
+function foremanAddNote(id){
+  const e=entries.find(x=>x.id===id);if(!e)return;
+  $('weightModal').innerHTML=`<h3>Add Note<button class="modal-close" onclick="closeOv('weightOv')">&times;</button></h3><p style="font-size:12px;color:var(--muted);margin-bottom:10px">${esc(e.project)} / ${esc(e.level||'—')} / ${esc(e.area||'—')}${e.schedule?' · '+esc(e.schedule):''}</p><div class="fg"><label style="display:block;margin-bottom:4px">Note — who did what / detail</label><textarea id="fmNoteInp" rows="3" placeholder="e.g. Slab crew installed top mesh, 60% done"></textarea></div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn btn-sec btn-sm" onclick="closeOv('weightOv')">Cancel</button><button class="btn btn-sm" onclick="foremanSaveNote(${id})" style="width:auto">Add</button></div>`;
+  $('weightOv').classList.add('show');
+  setTimeout(()=>{const t=$('fmNoteInp');if(t)t.focus()},60);
+}
+async function foremanSaveNote(id){
+  const txt=$('fmNoteInp').value.trim();if(!txt)return;
+  const e=entries.find(x=>x.id===id);
+  const chunks=parseChunks(e.foreman_notes);
+  chunks.push({text:txt,authors:[foremanName||'Foreman'],created_at:new Date().toISOString()});
+  await sb.from('entries').update({foreman_notes:chunksToJson(chunks)}).eq('id',id);
+  await foremanAudit({entry_id:id,action:'UPDATE',field_changed:'foreman_notes',new_value:'Note added: '+txt.slice(0,60)});
+  closeOv('weightOv');await loadEntries();renderForeman();
+}
+
+/* ═══ FOREMAN REPORT (delivery / install, colour-coded, PDF + CSV) ═══ */
+function reoRowState(e){
+  if(e.installed_date)return{label:'Installed',bg:'#E8F5E9',fg:'#2E7D32'};
+  if(isOverdueInstall(e))return{label:'Overdue install',bg:'#FDECEA',fg:'#C62828'};
+  if(e.status==='Delivered')return{label:'Delivered',bg:'#FFF4E5',fg:'#E65100'};
+  if((e.progress_pct||0)>0)return{label:'In progress',bg:'#E3F2FD',fg:'#1565C0'};
+  return{label:e.status||'—',bg:'#fff',fg:'#555'};
+}
+function openForemanReport(){
+  const projOpts=['<option value="">All projects</option>'].concat(projects.map(p=>`<option>${esc(p.name)}</option>`)).join('');
+  $('reportModal').innerHTML=`<h3>Delivery / Install Report<button class="modal-close" onclick="closeOv('reportOv')">&times;</button></h3>
+    <div class="row2"><div class="fg"><label>Project</label><select id="rpProj">${projOpts}</select></div>
+    <div class="fg"><label>Filter dates by</label><select id="rpDateType"><option value="installed_date">Installed date</option><option value="supplier_delivery_date">Delivery date</option><option value="our_delivery_date">Ordered delivery date</option></select></div></div>
+    <div class="row2"><div class="fg"><label>From</label><input type="date" id="rpFrom"></div><div class="fg"><label>To</label><input type="date" id="rpTo"></div></div>
+    <div style="margin-top:6px"><button class="btn btn-sm" onclick="generateForemanReport()" style="width:auto">Generate</button></div>
+    <div id="rpResult" style="margin-top:14px"></div>`;
+  $('reportOv').classList.add('show');
+}
+function generateForemanReport(){
+  const proj=$('rpProj').value,dt=$('rpDateType').value,from=$('rpFrom').value,to=$('rpTo').value;
+  let list=entries.filter(e=>e.status!=='Cancelled');
+  if(proj)list=list.filter(e=>e.project===proj);
+  if(from||to)list=list.filter(e=>{const d=e[dt];if(!d)return false;if(from&&d<from)return false;if(to&&d>to)return false;return true});
+  list.sort((a,b)=>String((a.project||'')+(a.level||'')+(a.area||'')).localeCompare(String((b.project||'')+(b.level||'')+(b.area||''))));
+  const rows=list.map(e=>({e,state:reoRowState(e)}));
+  const dtLabel={installed_date:'Installed date',supplier_delivery_date:'Delivery date',our_delivery_date:'Ordered delivery date'}[dt];
+  const summary=(proj||'All projects')+' · '+dtLabel+(from||to?(' · '+(from?fmtDate(from):'…')+' to '+(to?fmtDate(to):'…')):' · all dates');
+  window._reoReport={rows,summary};
+  const body=rows.length?`<div class="tscroll"><table><thead><tr><th>Code</th><th>Project</th><th>Level / Area</th><th>Delivered</th><th>Installed</th><th>%</th><th>Status</th></tr></thead><tbody>${rows.map(r=>`<tr style="background:${r.state.bg}"><td style="font-family:'JetBrains Mono',monospace">${esc(r.e.schedule||'—')}</td><td>${esc(r.e.project)}</td><td>${esc((r.e.level||'—')+' / '+(r.e.area||'—'))}</td><td style="white-space:nowrap">${fmtDate(r.e.supplier_delivery_date||r.e.our_delivery_date)||'—'}</td><td style="white-space:nowrap">${fmtDate(r.e.installed_date)||'—'}</td><td>${r.e.progress_pct!=null?r.e.progress_pct+'%':'—'}</td><td style="color:${r.state.fg};font-weight:700;white-space:nowrap">${r.state.label}</td></tr>`).join('')}</tbody></table></div>`:'<p style="color:var(--muted)">No rows match those filters.</p>';
+  $('rpResult').innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap"><span style="font-size:12px;color:var(--muted)">${esc(summary)} · ${rows.length} rows</span><div style="display:flex;gap:8px">${rows.length?'<button class="btn btn-sm" onclick="printForemanReport()" style="width:auto">🖨 Print / PDF</button><button class="btn btn-sec btn-sm" onclick="foremanReportCSV()" style="width:auto">CSV</button>':''}</div></div>${body}`;
+}
+function printForemanReport(){
+  const d=window._reoReport;if(!d)return;
+  const rows=d.rows.map(r=>`<tr style="background:${r.state.bg}"><td>${esc(r.e.schedule||'—')}</td><td>${esc(r.e.project)}</td><td>${esc((r.e.level||'—')+' / '+(r.e.area||'—'))}</td><td>${fmtDate(r.e.supplier_delivery_date||r.e.our_delivery_date)||'—'}</td><td>${fmtDate(r.e.installed_date)||'—'}</td><td>${r.e.progress_pct!=null?r.e.progress_pct+'%':'—'}</td><td style="color:${r.state.fg};font-weight:bold">${r.state.label}</td><td>${esc(chunksToPlain(parseChunks(r.e.foreman_notes)))}</td></tr>`).join('');
+  const html=`<!doctype html><html><head><meta charset="utf-8"><title>REO Delivery & Install Report</title><style>body{font-family:Arial,Helvetica,sans-serif;padding:22px;color:#222}h2{margin:0 0 4px}.sub{color:#666;font-size:12px;margin-bottom:12px}table{border-collapse:collapse;width:100%}th,td{border:1px solid #bbb;padding:6px 8px;text-align:left;font-size:11px}th{background:#eee}@media print{body{padding:0}}</style></head><body><h2>REO — Delivery & Install Report</h2><div class="sub">${esc(d.summary)} · ${d.rows.length} rows · generated ${new Date().toLocaleString('en-AU')}</div><table><thead><tr><th>Control Code</th><th>Project</th><th>Level / Area</th><th>Delivered</th><th>Installed</th><th>Progress</th><th>Status</th><th>Notes</th></tr></thead><tbody>${rows}</tbody></table></body></html>`;
+  const w=window.open('','_blank');if(!w){alert('Popup blocked — allow popups to print the report.');return}
+  w.document.write(html);w.document.close();w.focus();setTimeout(()=>w.print(),350);
+}
+function foremanReportCSV(){
+  const d=window._reoReport;if(!d)return;
+  const h=['Control Code','Project','Level','Area','Delivered','Installed','Progress %','Status','Notes'];
+  const rows=d.rows.map(r=>[r.e.schedule||'',r.e.project,r.e.level||'',r.e.area||'',r.e.supplier_delivery_date||r.e.our_delivery_date||'',r.e.installed_date||'',r.e.progress_pct!=null?r.e.progress_pct:'',r.state.label,chunksToPlain(parseChunks(r.e.foreman_notes))]);
+  const csv=[h,...rows].map(x=>x.map(c=>`"${String(c||'').replace(/"/g,'""')}"`).join(',')).join('\n');
+  const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download='reo-report-'+today()+'.csv';a.click();
 }
 async function foremanClearInstall(id){
   const e=entries.find(x=>x.id===id);
