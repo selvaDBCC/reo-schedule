@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b5.9.1';
+const APP_VERSION='b5.9.2';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const BUCKET='schedules';
@@ -1391,7 +1391,7 @@ function renderDash(){
 <td><div class="action-cell">
 ${e.status!=='Cancelled'?`<span class="hold-toggle${e.on_hold?' on':''}" onclick="toggleHold(${e.id})" title="Toggle On Hold"><span class="hold-slider"></span></span>`:''}
 <button class="action-btn view" onclick="showDetail(${e.id})">View</button>
-${['Scheduled','Ordered'].includes(e.status)?`<button class="action-btn deliver" onclick="markDelivered(${e.id})" title="Mark as delivered">✓</button>`:''}
+${e.status!=='Delivered'&&e.status!=='Cancelled'?`<button class="action-btn deliver" onclick="markDelivered(${e.id})" title="Mark as delivered">✓</button>`:''}
 ${e.status!=='Cancelled'&&e.status!=='Delivered'?`<button class="action-btn cancel" onclick="cancelEntry(${e.id})" title="Cancel this order">✗</button>`:''}
 ${e.status==='Cancelled'?`<button class="action-btn reinstate" onclick="reinstateEntry(${e.id})" title="Reinstate (undo cancel)">↺</button>`:''}
 ${mm?`<button class="action-btn resolve" onclick="resolveMismatch(${e.id})" title="Resolve date mismatch">Fix</button><button class="action-btn mail" onclick="openMismatchEmail(${e.id})" title="Email supplier about the date mismatch">✉</button>`:''}
