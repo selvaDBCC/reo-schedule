@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b5.9.2';
+const APP_VERSION='b5.9.3';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const BUCKET='schedules';
@@ -481,7 +481,7 @@ function onLevelAreaChange(){
   let html='<p style="font-size:12px;color:var(--muted);margin-bottom:10px">Orders for <b>'+esc(proj)+'</b>'+(level?' / '+esc(level):'')+(area?' / '+esc(area):'')+':</p>';
   matching.forEach(e=>{
     const has=!!e.schedule,can=!has&&e.status!=='Cancelled'&&e.status!=='Delivered';
-    html+=`<div class="order-item${selectedOrderId===e.id?' selected':''}${can?'':' disabled'}" ${can?`onclick="selectOrder(${e.id})"`:''}><div class="order-item-info"><div class="oi-title">${esc(e.level||'—')} / ${esc(e.area||'—')}${e.split_reference?' <span style="color:var(--accent-dk)">('+esc(e.split_reference)+')</span>':''}</div><div class="oi-meta">Ordered Delivery: ${fmtDate(e.our_delivery_date)||'Not set'} · ${e.status}${has?' · '+esc(e.schedule):''}</div></div><div>${has?'<span class="pill pill-scheduled">Has Schedule</span>':can?'<span class="pill pill-ordered">Attach →</span>':'<span class="pill pill-cancelled">'+esc(e.status)+'</span>'}</div></div>`});
+    html+=`<div class="order-item${selectedOrderId===e.id?' selected':''}${can?'':' disabled'}" ${can?`onclick="selectOrder(${e.id})"`:''}><div class="order-item-info"><div class="oi-title">${esc(e.level||'—')} / ${esc(e.area||'—')}${e.split_reference?' <span style="color:var(--accent-dk)">('+esc(e.split_reference)+')</span>':''}</div><div class="oi-meta">DBCC Requested Delivery: ${fmtDate(e.our_delivery_date)||'Not set'} · ${e.status}${has?' · '+esc(e.schedule):''}</div></div><div>${has?'<span class="pill pill-scheduled">Has Schedule</span>':can?'<span class="pill pill-ordered">Attach →</span>':'<span class="pill pill-cancelled">'+esc(e.status)+'</span>'}</div></div>`});
   // Always offer an escape hatch: even when matching orders exist (e.g. all "Has Schedule"),
   // the user might need to create another entry — common case is when a single placeholder was
   // created but the actual delivery is being split into multiple parts and Aus Reo is uploading
@@ -651,7 +651,7 @@ function renderMultiUploadList(){
           <div class="fg" style="margin:0"><label style="font-size:11px">Split Reference</label><input type="text" value="${esc(item.splitRef)}" oninput="updateMultiItem(${item.id},'splitRef',this.value)" placeholder="e.g. Part ${idx+1}" style="font-size:12px;padding:6px 8px"></div>
         </div>
         <div class="row2" style="margin-top:6px">
-          <div class="fg" style="margin:0"><label style="font-size:11px">Supplier Delivery Date</label><input type="date" value="${esc(item.supDate)}" oninput="updateMultiItem(${item.id},'supDate',this.value)" style="font-size:12px;padding:6px 8px"></div>
+          <div class="fg" style="margin:0"><label style="font-size:11px">Production Delivery Date</label><input type="date" value="${esc(item.supDate)}" oninput="updateMultiItem(${item.id},'supDate',this.value)" style="font-size:12px;padding:6px 8px"></div>
           <div class="fg" style="margin:0"><label style="font-size:11px">Weight (T)</label><input type="number" step="0.001" value="${esc(item.weight)}" oninput="updateMultiItem(${item.id},'weight',this.value)" style="font-family:'JetBrains Mono',monospace;font-size:12px;padding:6px 8px"></div>
         </div>`;
     return `<div class="sel-item" style="${disabled}">
@@ -1370,7 +1370,7 @@ function renderDash(){
   if(!f.length){w.innerHTML=`<div class="empty"><p>${all.length===0?'No entries yet.':'No matches.'}</p></div>`;return}
   const ar=c=>sortCol===c?(sortAsc?' ▲':' ▼'):'';
   const allCk=f.every(e=>selectedIds.has(e.id));
-  w.innerHTML=`<table><thead><tr><th class="no-sort" style="width:36px"><input type="checkbox" ${allCk?'checked':''} onchange="toggleAll(this.checked)"></th><th onclick="tSort('project')">Project${ar('project')}</th><th onclick="tSort('level')">Level${ar('level')}</th><th onclick="tSort('area')">Area${ar('area')}</th><th onclick="tSort('schedule')">Schedule${ar('schedule')}</th><th onclick="tSort('total_weight')">Wt${ar('total_weight')}</th><th onclick="tSort('status')">Status${ar('status')}</th><th onclick="tSort('our_delivery_date')">Ordered Delivery${ar('our_delivery_date')}</th><th onclick="tSort('supplier_delivery_date')">Supplier${ar('supplier_delivery_date')}</th><th onclick="tSort('entry_date')">Submitted${ar('entry_date')}</th><th class="no-sort" title="Foreman progress % + site notes">Progress</th><th class="no-sort">Schedule File</th><th class="no-sort">Markup Plans</th><th class="no-sort" style="max-width:120px">${esc(isSupplier()?authSupplier:'Supplier')} Comments</th><th class="no-sort" style="max-width:120px">DBCC Comments</th><th class="no-sort">Actions</th></tr></thead><tbody>${f.map(e=>{
+  w.innerHTML=`<table><thead><tr><th class="no-sort" style="width:36px"><input type="checkbox" ${allCk?'checked':''} onchange="toggleAll(this.checked)"></th><th onclick="tSort('project')">Project${ar('project')}</th><th onclick="tSort('level')">Level${ar('level')}</th><th onclick="tSort('area')">Area${ar('area')}</th><th onclick="tSort('schedule')">Schedule${ar('schedule')}</th><th onclick="tSort('total_weight')">Wt${ar('total_weight')}</th><th onclick="tSort('status')">Status${ar('status')}</th><th onclick="tSort('our_delivery_date')">DBCC Requested Delivery Date${ar('our_delivery_date')}</th><th onclick="tSort('entry_date')">Scheduler Entry Date${ar('entry_date')}</th><th onclick="tSort('supplier_delivery_date')">Production Delivery Date${ar('supplier_delivery_date')}</th><th class="no-sort" title="Foreman progress % + site notes">Progress</th><th class="no-sort">Schedule File</th><th class="no-sort">Markup Plans</th><th class="no-sort" style="max-width:120px">${esc(isSupplier()?authSupplier:'Supplier')} Comments</th><th class="no-sort" style="max-width:120px">DBCC Comments</th><th class="no-sort">Actions</th></tr></thead><tbody>${f.map(e=>{
     const mm=hasMismatch(e),cn=e.status==='Cancelled',mp=e.markup_plans?JSON.parse(e.markup_plans):[];
     return`<tr class="${cn?'cancelled':''}${e.on_hold?' on-hold':''}${mm?' mismatch':''}" ondragover="event.preventDefault();this.classList.add('drag-over')" ondragleave="this.classList.remove('drag-over')" ondrop="handleRowDrop(event,${e.id});this.classList.remove('drag-over')">
 <td class="td-check"><input type="checkbox" ${selectedIds.has(e.id)?'checked':''} onchange="toggleSel(${e.id},this.checked)"></td>
@@ -1381,8 +1381,8 @@ function renderDash(){
 <td>${e.total_weight?`<span class="weight-td" onclick="editWeight(${e.id})">${e.total_weight}T</span>`:`<span style="color:#ccc;cursor:pointer" onclick="editWeight(${e.id})">—</span>`}</td>
 <td>${getStatusPill(e.status,e.entry_type,e.on_hold)}</td>
 <td class="${mm?'mismatch-date':''}" style="white-space:nowrap;font-size:11px">${fmtDate(e.our_delivery_date)||'<span style="color:#ccc">—</span>'}</td>
-<td class="${mm?'mismatch-date':''}" style="white-space:nowrap;font-size:11px">${fmtDate(e.supplier_delivery_date)||'<span style="color:#ccc">—</span>'}${mm?'<span class="mismatch-icon" title="Dates mismatch">⚠️</span>':''}</td>
 <td style="white-space:nowrap;font-size:11px">${fmtDate(e.entry_date)||'—'}</td>
+<td class="${mm?'mismatch-date':''}" style="white-space:nowrap;font-size:11px">${fmtDate(e.supplier_delivery_date)||'<span style="color:#ccc">—</span>'}${mm?'<span class="mismatch-icon" title="Dates mismatch">⚠️</span>':''}</td>
 <td style="white-space:nowrap;font-size:11px">${foremanCell(e)}</td>
 <td>${e.file_url?`<a class="att-link" href="${e.file_url}" target="_blank">📄 ${esc((e.file_name||'').slice(0,14))}</a>`:`<button class="action-btn" onclick="uploadScheduleFile(${e.id})" style="color:var(--accent-dk);font-size:10px">+ Upload</button>`}</td>
 <td>${mp.length?`<button class="att-link markup-link" onclick="viewMarkups(${e.id})">📐 ${mp.length}</button>`:''}<button class="action-btn" onclick="uploadMarkup(${e.id})" style="font-size:10px;color:var(--info)">+📐</button></td>
@@ -1444,7 +1444,7 @@ function openAttachModal(id,file){
   $('detailModal').innerHTML=`<h3>Attach Schedule<button class="modal-close" onclick="closeOv('detailOv')">&times;</button></h3>
 <div class="info-msg" style="margin-top:0;margin-bottom:14px">Attaching <b>${esc(file.name)}</b> to: <b>${esc(e.project)}</b> / ${esc(e.level||'—')} / ${esc(e.area||'—')}${e.split_reference?' ('+esc(e.split_reference)+')':''}</div>
 <div class="fg"><label>Schedule Number <span class="req">*</span></label><input type="text" id="att_sched" style="font-family:'JetBrains Mono',monospace"></div>
-<div class="row2"><div class="fg"><label>Supplier Delivery Date <span class="req">*</span></label><input type="date" id="att_supD"></div><div class="fg"><label>Submission Date <span class="req">*</span></label><input type="date" id="att_subD" value="${today()}"></div></div>
+<div class="row2"><div class="fg"><label>Production Delivery Date <span class="req">*</span></label><input type="date" id="att_supD"></div><div class="fg"><label>Scheduler Entry Date <span class="req">*</span></label><input type="date" id="att_subD" value="${today()}"></div></div>
 <div class="row2"><div class="fg"><label>Weight (T)</label><input type="number" step="0.001" id="att_wt" style="font-family:'JetBrains Mono',monospace"></div><div class="fg"><label>Drawing Reference</label><input type="text" id="att_draw"></div></div>
 <div id="att_info"></div><div id="att_err"></div>
 <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn btn-sec btn-sm" onclick="closeOv('detailOv')">Cancel</button><button class="btn btn-sm" onclick="confirmAttach(${id})" id="att_btn" style="width:auto">Attach</button></div>`;
@@ -1491,8 +1491,8 @@ async function confirmAttach(id){
   if(!window._attFile)return err.innerHTML='<div class="error-msg">No valid file to attach. Please re-export your PDF and try again.</div>';
   const s=$('att_sched').value.trim(),sd=$('att_supD').value,sub=$('att_subD').value,wt=$('att_wt').value,dr=$('att_draw').value.trim();
   if(!s)return err.innerHTML='<div class="error-msg">Schedule required</div>';
-  if(!sd)return err.innerHTML='<div class="error-msg">Supplier date required</div>';
-  if(!sub)return err.innerHTML='<div class="error-msg">Submission date required</div>';
+  if(!sd)return err.innerHTML='<div class="error-msg">Production delivery date required</div>';
+  if(!sub)return err.innerHTML='<div class="error-msg">Scheduler entry date required</div>';
   const btn=$('att_btn');btn.disabled=true;btn.textContent='Uploading...';
   try{const e=entries.find(x=>x.id===id),file=window._attFile,ex=window._attExt||{};
     const furl=await uploadFile(file,e.project,e.level,e.area);
@@ -1664,9 +1664,9 @@ ${e.unmatched?'<div class="warn-msg" style="margin-top:0;margin-bottom:12px">⚠
 <div class="drow"><div class="dlbl">Weight</div><div class="dval">${e.total_weight?e.total_weight+' T':'—'}</div></div>
 <div class="drow"><div class="dlbl">Status</div><div class="dval">${getStatusPill(e.status,e.entry_type,e.on_hold)}</div></div>
 ${e.cancel_reason?`<div class="drow"><div class="dlbl">Cancel Reason</div><div class="dval" style="color:var(--err)">${esc(e.cancel_reason)}</div></div>`:''}
-<div class="drow"><div class="dlbl">Ordered Delivery</div><div class="dval">${fmtDate(e.our_delivery_date)||'—'}</div></div>
-<div class="drow"><div class="dlbl">Supplier Date</div><div class="dval">${fmtDate(e.supplier_delivery_date)||'—'}${mm?' ⚠️':''}</div></div>
-<div class="drow"><div class="dlbl">Submitted</div><div class="dval">${fmtDate(e.entry_date)||'—'}</div></div>
+<div class="drow"><div class="dlbl">DBCC Requested Delivery Date</div><div class="dval">${fmtDate(e.our_delivery_date)||'—'}</div></div>
+<div class="drow"><div class="dlbl">Scheduler Entry Date</div><div class="dval">${fmtDate(e.entry_date)||'—'}</div></div>
+<div class="drow"><div class="dlbl">Production Delivery Date</div><div class="dval">${fmtDate(e.supplier_delivery_date)||'—'}${mm?' ⚠️':''}</div></div>
 <div class="drow"><div class="dlbl">Progress</div><div class="dval">${e.progress_pct!=null?e.progress_pct+'%':'—'}${e.installed_date?' · installed '+fmtDate(e.installed_date):''}</div></div>
 <div class="drow"><div class="dlbl">Site Notes</div><div class="dval">${(function(){const n=parseChunks(e.foreman_notes);return n.length?n.map(c=>esc(c.text)+' <span style="color:var(--muted);font-size:11px">— '+esc((c.authors||[]).join(', '))+'</span>').join('<br>'):'—'})()}</div></div>
 <div class="drow"><div class="dlbl">${esc(projectSupplier(e.project))} Comments</div><div class="dval">${chunksToHtml(parseChunks(e.aus_reo_comment))}</div></div>
@@ -1719,8 +1719,8 @@ function openEditEntry(id){const e=entries.find(x=>x.id===id);if(!e)return;
   $('editModal').innerHTML=`<h3>Edit Entry<button class="modal-close" onclick="closeOv('editOv')">&times;</button></h3>
 <div class="fg"><label>Project</label><select id="ed_proj">${projects.map(p=>`<option${p.name===e.project?' selected':''}>${esc(p.name)}</option>`).join('')}</select></div>
 <div class="row2"><div class="fg"><label>Level</label><select id="ed_level"><option value="">None</option>${(proj?proj.levels:[]).map(l=>`<option${l===e.level?' selected':''}>${esc(l)}</option>`).join('')}</select></div><div class="fg"><label>Area</label><select id="ed_area"><option value="">None</option>${(proj?proj.areas:[]).map(a=>`<option${a===e.area?' selected':''}>${esc(a)}</option>`).join('')}</select></div></div>
-<div class="row2"><div class="fg"><label>Schedule</label><input type="text" id="ed_sched" value="${esc(e.schedule||'')}" style="font-family:'JetBrains Mono',monospace"></div><div class="fg"><label>Submission Date</label><input type="date" id="ed_date" value="${e.entry_date||''}"></div></div>
-<div class="row2"><div class="fg"><label>Ordered Delivery Date${isSupplier()?' <span style="font-weight:400;color:var(--muted);font-size:11px">(DBCC only)</span>':''}</label><input type="date" id="ed_ourD" value="${e.our_delivery_date||''}"${isSupplier()?' disabled title="Only DBCC can change the ordered delivery date"':''}></div><div class="fg"><label>Supplier Delivery Date</label><input type="date" id="ed_supD" value="${e.supplier_delivery_date||''}"></div></div>
+<div class="row2"><div class="fg"><label>Schedule</label><input type="text" id="ed_sched" value="${esc(e.schedule||'')}" style="font-family:'JetBrains Mono',monospace"></div><div class="fg"><label>Scheduler Entry Date</label><input type="date" id="ed_date" value="${e.entry_date||''}"></div></div>
+<div class="row2"><div class="fg"><label>DBCC Requested Delivery Date${isSupplier()?' <span style="font-weight:400;color:var(--muted);font-size:11px">(DBCC only)</span>':''}</label><input type="date" id="ed_ourD" value="${e.our_delivery_date||''}"${isSupplier()?' disabled title="Only DBCC can change the DBCC requested delivery date"':''}></div><div class="fg"><label>Production Delivery Date</label><input type="date" id="ed_supD" value="${e.supplier_delivery_date||''}"></div></div>
 <div class="row2"><div class="fg"><label>Drawing Reference</label><input type="text" id="ed_draw" value="${esc(e.drawing_reference||'')}"></div><div class="fg"><label>Weight (T)</label><input type="number" step="0.001" id="ed_wt" value="${e.total_weight||''}" style="font-family:'JetBrains Mono',monospace"></div></div>
 <div class="fg"><label>Split Reference</label><input type="text" id="ed_split" value="${esc(e.split_reference||'')}"></div>
 <div class="info-msg" style="margin-top:8px;font-size:12px;background:#F0F5FF;border-color:#C7D2FE;color:var(--info)">💡 Comments are now edited directly on the dashboard — click the Supplier Comments or DBCC Comments cell on the row.</div>
@@ -1791,7 +1791,7 @@ async function saveEdit(id){const e=entries.find(x=>x.id===id);if(!e)return;cons
   closeOv('editOv');await loadEntries();renderDash();
   // Prompt for delivery date change notification
   const ourChanged=ch.find(c=>c.field==='our_delivery_date');
-  if(ourChanged){setTimeout(()=>confirmDialog('Delivery Date Changed','Ordered delivery date changed from <b>'+(fmtDate(ourChanged.old)||'not set')+'</b> to <b>'+(fmtDate(ourChanged.new)||'not set')+'</b>.<br><br>Send notification email?','Send Email','',()=>openDateChangeEmail(id,ourChanged.old,ourChanged.new)),200)}}
+  if(ourChanged){setTimeout(()=>confirmDialog('Delivery Date Changed','DBCC requested delivery date changed from <b>'+(fmtDate(ourChanged.old)||'not set')+'</b> to <b>'+(fmtDate(ourChanged.new)||'not set')+'</b>.<br><br>Send notification email?','Send Email','',()=>openDateChangeEmail(id,ourChanged.old,ourChanged.new)),200)}}
 
 async function deleteEntry(id){
   if(!adminUnlocked)return;
@@ -1856,24 +1856,24 @@ ${filesHtml}
 
 function openMismatchEmail(id){const e=entries.find(x=>x.id===id);if(!e)return;
   const subject=`Date Mismatch — ${e.project} / ${e.level||''} / ${e.area||''}`;
-  const body=`Hi,\n\nThere is a date mismatch on the following schedule:\n\nProject: ${e.project}\nLevel: ${e.level||'—'} / Area: ${e.area||'—'}${e.split_reference?' ('+e.split_reference+')':''}\nSchedule: ${e.schedule||'—'}\n\nOur Ordered Delivery Date: ${fmtDate(e.our_delivery_date)||'Not set'}\nYour Supplier Delivery Date: ${fmtDate(e.supplier_delivery_date)||'Not set'}\n\nPlease confirm the correct date.${EMAIL_FOOTER_TEXT}\n\nRegards,\n${userName}\nDebono Bros Concreting`;
+  const body=`Hi,\n\nThere is a date mismatch on the following schedule:\n\nProject: ${e.project}\nLevel: ${e.level||'—'} / Area: ${e.area||'—'}${e.split_reference?' ('+e.split_reference+')':''}\nSchedule: ${e.schedule||'—'}\n\nDBCC Requested Delivery Date: ${fmtDate(e.our_delivery_date)||'Not set'}\nProduction Delivery Date: ${fmtDate(e.supplier_delivery_date)||'Not set'}\n\nPlease confirm the correct date.${EMAIL_FOOTER_TEXT}\n\nRegards,\n${userName}\nDebono Bros Concreting`;
   emailModal(subject,body,id,'mismatch')}
 
 function openDateChangeEmail(id,oldD,newD){const e=entries.find(x=>x.id===id);if(!e)return;
   const subject=`Delivery Date Change — ${e.project} / ${e.level||''} / ${e.area||''}`;
-  const body=`Hi,\n\nOur ordered delivery date has been updated for the following:\n\nProject: ${e.project}\nLevel: ${e.level||'—'} / Area: ${e.area||'—'}${e.split_reference?' ('+e.split_reference+')':''}\nSchedule: ${e.schedule||'—'}\n\nPrevious Date: ${fmtDate(oldD)||'Not set'}\nNew Date: ${fmtDate(newD)||'Not set'}\n\nPlease confirm receipt and the revised supplier delivery date.${EMAIL_FOOTER_TEXT}\n\nRegards,\n${userName}\nDebono Bros Concreting`;
+  const body=`Hi,\n\nOur DBCC requested delivery date has been updated for the following:\n\nProject: ${e.project}\nLevel: ${e.level||'—'} / Area: ${e.area||'—'}${e.split_reference?' ('+e.split_reference+')':''}\nSchedule: ${e.schedule||'—'}\n\nPrevious Date: ${fmtDate(oldD)||'Not set'}\nNew Date: ${fmtDate(newD)||'Not set'}\n\nPlease confirm receipt and the revised production delivery date.${EMAIL_FOOTER_TEXT}\n\nRegards,\n${userName}\nDebono Bros Concreting`;
   emailModal(subject,body,id,'date_change')}
 
 function openHoldEmail(id){const e=entries.find(x=>x.id===id);if(!e)return;
   const subject=`ON HOLD — ${e.project} / ${e.level||''} / ${e.area||''}`;
-  const body=`Hi,\n\nThe following schedule has been placed ON HOLD:\n\nProject: ${e.project}\nLevel: ${e.level||'—'} / Area: ${e.area||'—'}${e.split_reference?' ('+e.split_reference+')':''}\nSchedule: ${e.schedule||'—'}\nOrdered Delivery Date: ${fmtDate(e.our_delivery_date)||'Not set'}\n\nPlease pause any processing on this item until further notice. We will confirm when the hold is lifted.${EMAIL_FOOTER_TEXT}\n\nRegards,\n${userName}\nDebono Bros Concreting`;
+  const body=`Hi,\n\nThe following schedule has been placed ON HOLD:\n\nProject: ${e.project}\nLevel: ${e.level||'—'} / Area: ${e.area||'—'}${e.split_reference?' ('+e.split_reference+')':''}\nSchedule: ${e.schedule||'—'}\nDBCC Requested Delivery Date: ${fmtDate(e.our_delivery_date)||'Not set'}\n\nPlease pause any processing on this item until further notice. We will confirm when the hold is lifted.${EMAIL_FOOTER_TEXT}\n\nRegards,\n${userName}\nDebono Bros Concreting`;
   emailModal(subject,body,id,'on_hold')}
 
 // Manual re-open of the delivery-date email for one row (DBCC). For when the auto-popup on a
 // date change was missed — no need to change the date and change it back.
 function openOrderDateEmail(id){const e=entries.find(x=>x.id===id);if(!e)return;
   const subject=`Delivery Date — ${e.project} / ${e.level||''} / ${e.area||''}`;
-  const body=`Hi,\n\nPlease confirm delivery against our ordered delivery date for the following:\n\nProject: ${e.project}\nLevel: ${e.level||'—'} / Area: ${e.area||'—'}${e.split_reference?' ('+e.split_reference+')':''}\nSchedule: ${e.schedule||'—'}\n\nOrdered Delivery Date: ${fmtDate(e.our_delivery_date)||'Not set'}\n\nPlease confirm receipt and your supplier delivery date.${EMAIL_FOOTER_TEXT}\n\nRegards,\n${userName}\nDebono Bros Concreting`;
+  const body=`Hi,\n\nPlease confirm delivery against our DBCC requested delivery date for the following:\n\nProject: ${e.project}\nLevel: ${e.level||'—'} / Area: ${e.area||'—'}${e.split_reference?' ('+e.split_reference+')':''}\nSchedule: ${e.schedule||'—'}\n\nDBCC Requested Delivery Date: ${fmtDate(e.our_delivery_date)||'Not set'}\n\nPlease confirm receipt and your production delivery date.${EMAIL_FOOTER_TEXT}\n\nRegards,\n${userName}\nDebono Bros Concreting`;
   emailModal(subject,body,id,'date_change');}
 
 // Manual re-open of the bulk "orders created" email for the project chosen in the dashboard
@@ -1891,7 +1891,7 @@ function openBulkOrderEmailForFilter(){
   const pn=$('fProj').value;
   if(!pn)return alert('Tick the rows you want, OR pick a single project in the Project filter, then click Order Email.');
   const rows=entries.filter(e=>e.project===pn&&e.our_delivery_date&&e.status!=='Cancelled');
-  if(!rows.length)return alert('No entries with an ordered delivery date for '+pn+'.');
+  if(!rows.length)return alert('No entries with a DBCC requested delivery date for '+pn+'.');
   openOrderCreatedEmail(rows,pn);
 }
 
@@ -1929,8 +1929,8 @@ async function sendEmail(id,context){
 
 /* ═══ EXPORT ═══ */
 function exportCSV(){const d=getFiltered();if(!d.length)return alert('No data');
-  const h=['Project','Level','Area','Split','Schedule','Drawing','Weight','Status','On Hold','Type','Ordered Delivery','Supplier Date','Submitted','Installed','Progress %','Site Notes','Supplier Comments','DBCC Comments','File'];
-  const rows=d.map(e=>[e.project,e.level||'',e.area||'',e.split_reference||'',e.schedule||'',e.drawing_reference||'',e.total_weight||'',e.status,e.on_hold?'Yes':'',e.entry_type,e.our_delivery_date||'',e.supplier_delivery_date||'',e.entry_date||'',e.installed_date||'',e.progress_pct!=null?e.progress_pct:'',chunksToPlain(parseChunks(e.foreman_notes)),chunksToPlain(parseChunks(e.aus_reo_comment))||e.comments||'',chunksToPlain(parseChunks(e.dbcc_comment))||'',e.file_name||'']);
+  const h=['Project','Level','Area','Split','Schedule','Drawing','Weight','Status','On Hold','Type','DBCC Requested Delivery Date','Scheduler Entry Date','Production Delivery Date','Installed','Progress %','Site Notes','Supplier Comments','DBCC Comments','File'];
+  const rows=d.map(e=>[e.project,e.level||'',e.area||'',e.split_reference||'',e.schedule||'',e.drawing_reference||'',e.total_weight||'',e.status,e.on_hold?'Yes':'',e.entry_type,e.our_delivery_date||'',e.entry_date||'',e.supplier_delivery_date||'',e.installed_date||'',e.progress_pct!=null?e.progress_pct:'',chunksToPlain(parseChunks(e.foreman_notes)),chunksToPlain(parseChunks(e.aus_reo_comment))||e.comments||'',chunksToPlain(parseChunks(e.dbcc_comment))||'',e.file_name||'']);
   const csv=[h,...rows].map(r=>r.map(c=>`"${String(c||'').replace(/"/g,'""')}"`).join(',')).join('\n');
   const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download=`reo-${today()}.csv`;a.click()}
 
@@ -2097,8 +2097,8 @@ function renderNotif(){
       }
     }
     else if(a.action==='BULK_CREATE'){icon='create';iconChar='⚡';msg=`<b>Bulk create:</b> ${esc(a.new_value)}`}
-    else if(a.action==='UPDATE'&&a.field_changed==='our_delivery_date'){icon='update';iconChar='📅';msg=`Ordered delivery date changed from <b>${fmtDate(a.old_value)||'not set'}</b> to <b>${fmtDate(a.new_value)||'not set'}</b> — ${ctx}`}
-    else if(a.action==='UPDATE'&&a.field_changed==='supplier_delivery_date'){icon='update';iconChar='📅';msg=`Supplier delivery date changed from <b>${fmtDate(a.old_value)||'not set'}</b> to <b>${fmtDate(a.new_value)||'not set'}</b> — ${ctx}`}
+    else if(a.action==='UPDATE'&&a.field_changed==='our_delivery_date'){icon='update';iconChar='📅';msg=`DBCC requested delivery date changed from <b>${fmtDate(a.old_value)||'not set'}</b> to <b>${fmtDate(a.new_value)||'not set'}</b> — ${ctx}`}
+    else if(a.action==='UPDATE'&&a.field_changed==='supplier_delivery_date'){icon='update';iconChar='📅';msg=`Production delivery date changed from <b>${fmtDate(a.old_value)||'not set'}</b> to <b>${fmtDate(a.new_value)||'not set'}</b> — ${ctx}`}
     else if(a.action==='UPDATE'&&a.field_changed==='schedule_attached'){icon='create';iconChar='📎';msg=`Schedule attached: <b>${esc(a.new_value)}</b> — ${ctx}`}
     else if(a.action==='UPDATE'&&a.field_changed==='status'){icon='update';iconChar='⇄';msg=`Status changed from <b>${esc(a.old_value)}</b> to <b>${esc(a.new_value)}</b> — ${ctx}`}
     else if(a.action==='UPDATE'){icon='update';iconChar='✎';msg=`Updated <b>${esc(a.field_changed||'entry')}</b> — ${ctx}`}
@@ -2662,7 +2662,7 @@ async function dpCreate(){const err=$('dpErr'),suc=$('dpSuc');err.innerHTML='';s
     dpSelected={};await loadEntries();renderDpGrid();suc.innerHTML=`<div class="success-msg">Created ${rows.length} entries!</div>`;
     // If any of these rows had an Ordered Delivery Date set, offer to notify
     const datedRows=rows.filter(r=>r.our_delivery_date);
-    if(datedRows.length){setTimeout(()=>confirmDialog('Notify Aus Reo','You set ordered delivery dates for <b>'+datedRows.length+'</b> '+(datedRows.length===1?'entry':'entries')+'.<br><br>Send notification email?','Send Email','',()=>openOrderCreatedEmail(datedRows,pn)),200)}
+    if(datedRows.length){setTimeout(()=>confirmDialog('Notify Aus Reo','You set DBCC requested delivery dates for <b>'+datedRows.length+'</b> '+(datedRows.length===1?'entry':'entries')+'.<br><br>Send notification email?','Send Email','',()=>openOrderCreatedEmail(datedRows,pn)),200)}
   }catch(e){err.innerHTML='<div class="error-msg">'+esc(e.message)+'</div>'}
   btn.disabled=false;btn.textContent='Create Placeholder Entries'}
 
@@ -2673,9 +2673,9 @@ function openOrderCreatedEmail(rows,projectName){
     : `Order Created — ${projectName} / ${rows[0].level||''} / ${rows[0].area||''}`;
   const lines=rows.map(r=>{const loc=`${r.level||'—'} / ${r.area||'—'}${r.split_reference?' ('+r.split_reference+')':''}`;return `${r.project} / ${loc} — ${fmtDate(r.our_delivery_date)||'TBC'}`});
   const intro=isBulk
-    ? `The following ordered delivery dates have been set:`
-    : `An ordered delivery date has been set for the following:`;
-  const body=`Hi,\n\n${intro}\n\n${lines.join('\n')}\n\nPlease confirm receipt and the supplier delivery ${isBulk?'dates':'date'}.${EMAIL_FOOTER_TEXT}\n\nRegards,\n${userName}\nDebono Bros Concreting`;
+    ? `The following DBCC requested delivery dates have been set:`
+    : `A DBCC requested delivery date has been set for the following:`;
+  const body=`Hi,\n\n${intro}\n\n${lines.join('\n')}\n\nPlease confirm receipt and the production delivery ${isBulk?'dates':'date'}.${EMAIL_FOOTER_TEXT}\n\nRegards,\n${userName}\nDebono Bros Concreting`;
   emailModal(subject,body,null,'order_created',projectName)}
 
 /* ═══ ADMIN: STEEL FIXERS ═══ */
@@ -2902,7 +2902,7 @@ function renderSfTable(){
 <th onclick="sfTSort('level')">Level${ar('level')}</th>
 <th onclick="sfTSort('area')">Area${ar('area')}</th>
 <th onclick="sfTSort('schedule')">Schedule${ar('schedule')}</th>
-<th onclick="sfTSort('our_delivery_date')">Ordered Delivery${ar('our_delivery_date')}</th>
+<th onclick="sfTSort('our_delivery_date')">DBCC Requested Delivery Date${ar('our_delivery_date')}</th>
 <th onclick="sfTSort('bar_weight')" style="text-align:right">Bar Weight (T)${ar('bar_weight')}</th>
 <th onclick="sfTSort('starter_weight')" style="text-align:right">Starter Bars (T)${ar('starter_weight')}</th>
 <th onclick="sfTSort('mesh_sqm')" style="text-align:right">Mesh (m²)${ar('mesh_sqm')}</th>
@@ -3063,7 +3063,7 @@ async function sfToggleDispute(id){
 
 function exportSfCSV(){
   const list=getSfFiltered();if(!list.length)return alert('No data');
-  const h=['Project','Level','Area','Split','Schedule','Ordered Delivery','Bar Weight (T)','Starter Bars (T)','Mesh (m²)','Trench Mesh (LM)','Reconciliation','Recon Diff (T)','Reviewed By','Markup Plans','Installed Date','File','Comment','Dispute Raised'];
+  const h=['Project','Level','Area','Split','Schedule','DBCC Requested Delivery Date','Bar Weight (T)','Starter Bars (T)','Mesh (m²)','Trench Mesh (LM)','Reconciliation','Recon Diff (T)','Reviewed By','Markup Plans','Installed Date','File','Comment','Dispute Raised'];
   // Map dispute state to a clear English label for the CSV
   const dispLabel=v=>v==='tick'?'Resolved':v==='cross'?'Disputed':v==='dash'?'N/A':'';
   const reconLabel=e=>!e.recon_status?'':e.recon_status==='reconciled'?'Reconciled':(e.recon_reviewed?'Reviewed':'REVIEW: '+(e.recon_reason||''));
@@ -3552,7 +3552,7 @@ function renderSite(){
         </div>
         ${e.schedule?`<span class="sv-sched">${esc(e.schedule)}</span>`:''}
       </div>
-      <div class="sv-date">📅 Delivery: <b>${fmtDate(e.our_delivery_date)||'Not set'}</b> · ${statusPill}</div>
+      <div class="sv-date">📅 DBCC Requested Delivery: <b>${fmtDate(e.our_delivery_date)||'Not set'}</b> · ${statusPill}</div>
       <div class="sv-files">${filesHtml}</div>
     </div>`}).join('')+'</div>'}
 
@@ -3663,7 +3663,7 @@ function renderForeman(){
         </div>
         ${e.schedule?`<span class="sv-sched">${esc(e.schedule)}</span>`:''}
       </div>
-      <div class="sv-date">📅 Delivery: <b>${fmtDate(e.our_delivery_date)||'Not set'}</b> · ${statusPill}</div>
+      <div class="sv-date">📅 DBCC Requested Delivery: <b>${fmtDate(e.our_delivery_date)||'Not set'}</b> · ${statusPill}</div>
       <div class="sv-files">${filesHtml}</div>
       <div class="fm-actions">${deliveredHtml}${installHtml}</div>
       ${progressHtml}
@@ -3738,7 +3738,7 @@ function openForemanReport(){
   const projOpts=['<option value="">All projects</option>'].concat(projects.map(p=>`<option>${esc(p.name)}</option>`)).join('');
   $('reportModal').innerHTML=`<h3>Delivery / Install Report<button class="modal-close" onclick="closeOv('reportOv')">&times;</button></h3>
     <div class="row2"><div class="fg"><label>Project</label><select id="rpProj">${projOpts}</select></div>
-    <div class="fg"><label>Filter dates by</label><select id="rpDateType"><option value="installed_date">Installed date</option><option value="supplier_delivery_date">Delivery date</option><option value="our_delivery_date">Ordered delivery date</option></select></div></div>
+    <div class="fg"><label>Filter dates by</label><select id="rpDateType"><option value="installed_date">Installed date</option><option value="supplier_delivery_date">Production delivery date</option><option value="our_delivery_date">DBCC requested delivery date</option></select></div></div>
     <div class="row2"><div class="fg"><label>From</label><input type="date" id="rpFrom"></div><div class="fg"><label>To</label><input type="date" id="rpTo"></div></div>
     <div style="margin-top:6px"><button class="btn btn-sm" onclick="generateForemanReport()" style="width:auto">Generate</button></div>
     <div id="rpResult" style="margin-top:14px"></div>`;
@@ -3751,7 +3751,7 @@ function generateForemanReport(){
   if(from||to)list=list.filter(e=>{const d=e[dt];if(!d)return false;if(from&&d<from)return false;if(to&&d>to)return false;return true});
   list.sort((a,b)=>String((a.project||'')+(a.level||'')+(a.area||'')).localeCompare(String((b.project||'')+(b.level||'')+(b.area||''))));
   const rows=list.map(e=>({e,state:reoRowState(e)}));
-  const dtLabel={installed_date:'Installed date',supplier_delivery_date:'Delivery date',our_delivery_date:'Ordered delivery date'}[dt];
+  const dtLabel={installed_date:'Installed date',supplier_delivery_date:'Production delivery date',our_delivery_date:'DBCC requested delivery date'}[dt];
   const summary=(proj||'All projects')+' · '+dtLabel+(from||to?(' · '+(from?fmtDate(from):'…')+' to '+(to?fmtDate(to):'…')):' · all dates');
   window._reoReport={rows,summary};
   const body=rows.length?`<div class="tscroll"><table><thead><tr><th>Code</th><th>Project</th><th>Level / Area</th><th>Delivered</th><th>Installed</th><th>%</th><th>Status</th></tr></thead><tbody>${rows.map(r=>`<tr style="background:${r.state.bg}"><td style="font-family:'JetBrains Mono',monospace">${esc(r.e.schedule||'—')}</td><td>${esc(r.e.project)}</td><td>${esc((r.e.level||'—')+' / '+(r.e.area||'—'))}</td><td style="white-space:nowrap">${fmtDate(r.e.supplier_delivery_date||r.e.our_delivery_date)||'—'}</td><td style="white-space:nowrap">${fmtDate(r.e.installed_date)||'—'}</td><td>${r.e.progress_pct!=null?r.e.progress_pct+'%':'—'}</td><td style="color:${r.state.fg};font-weight:700;white-space:nowrap">${r.state.label}</td></tr>`).join('')}</tbody></table></div>`:'<p style="color:var(--muted)">No rows match those filters.</p>';
