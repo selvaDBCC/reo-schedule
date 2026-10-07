@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b5.9.3';
+const APP_VERSION='b5.9.4';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const BUCKET='schedules';
@@ -1370,7 +1370,7 @@ function renderDash(){
   if(!f.length){w.innerHTML=`<div class="empty"><p>${all.length===0?'No entries yet.':'No matches.'}</p></div>`;return}
   const ar=c=>sortCol===c?(sortAsc?' ▲':' ▼'):'';
   const allCk=f.every(e=>selectedIds.has(e.id));
-  w.innerHTML=`<table><thead><tr><th class="no-sort" style="width:36px"><input type="checkbox" ${allCk?'checked':''} onchange="toggleAll(this.checked)"></th><th onclick="tSort('project')">Project${ar('project')}</th><th onclick="tSort('level')">Level${ar('level')}</th><th onclick="tSort('area')">Area${ar('area')}</th><th onclick="tSort('schedule')">Schedule${ar('schedule')}</th><th onclick="tSort('total_weight')">Wt${ar('total_weight')}</th><th onclick="tSort('status')">Status${ar('status')}</th><th onclick="tSort('our_delivery_date')">DBCC Requested Delivery Date${ar('our_delivery_date')}</th><th onclick="tSort('entry_date')">Scheduler Entry Date${ar('entry_date')}</th><th onclick="tSort('supplier_delivery_date')">Production Delivery Date${ar('supplier_delivery_date')}</th><th class="no-sort" title="Foreman progress % + site notes">Progress</th><th class="no-sort">Schedule File</th><th class="no-sort">Markup Plans</th><th class="no-sort" style="max-width:120px">${esc(isSupplier()?authSupplier:'Supplier')} Comments</th><th class="no-sort" style="max-width:120px">DBCC Comments</th><th class="no-sort">Actions</th></tr></thead><tbody>${f.map(e=>{
+  w.innerHTML=`<table><thead><tr><th class="no-sort" style="width:36px"><input type="checkbox" ${allCk?'checked':''} onchange="toggleAll(this.checked)"></th><th onclick="tSort('project')">Project${ar('project')}</th><th onclick="tSort('level')">Level${ar('level')}</th><th onclick="tSort('area')">Area${ar('area')}</th><th onclick="tSort('schedule')">Schedule${ar('schedule')}</th><th onclick="tSort('total_weight')">Wt${ar('total_weight')}</th><th onclick="tSort('status')">Status${ar('status')}</th><th class="date-col" onclick="tSort('our_delivery_date')">DBCC Requested Delivery Date${ar('our_delivery_date')}</th><th class="date-col" onclick="tSort('entry_date')">Scheduler Entry Date${ar('entry_date')}</th><th class="date-col" onclick="tSort('supplier_delivery_date')">Production Delivery Date${ar('supplier_delivery_date')}</th><th class="no-sort" title="Foreman progress % + site notes">Progress</th><th class="no-sort">Schedule File</th><th class="no-sort">Markup Plans</th><th class="no-sort" style="max-width:120px">${esc(isSupplier()?authSupplier:'Supplier')} Comments</th><th class="no-sort" style="max-width:120px">DBCC Comments</th><th class="no-sort">Actions</th></tr></thead><tbody>${f.map(e=>{
     const mm=hasMismatch(e),cn=e.status==='Cancelled',mp=e.markup_plans?JSON.parse(e.markup_plans):[];
     return`<tr class="${cn?'cancelled':''}${e.on_hold?' on-hold':''}${mm?' mismatch':''}" ondragover="event.preventDefault();this.classList.add('drag-over')" ondragleave="this.classList.remove('drag-over')" ondrop="handleRowDrop(event,${e.id});this.classList.remove('drag-over')">
 <td class="td-check"><input type="checkbox" ${selectedIds.has(e.id)?'checked':''} onchange="toggleSel(${e.id},this.checked)"></td>
@@ -2902,7 +2902,7 @@ function renderSfTable(){
 <th onclick="sfTSort('level')">Level${ar('level')}</th>
 <th onclick="sfTSort('area')">Area${ar('area')}</th>
 <th onclick="sfTSort('schedule')">Schedule${ar('schedule')}</th>
-<th onclick="sfTSort('our_delivery_date')">DBCC Requested Delivery Date${ar('our_delivery_date')}</th>
+<th class="date-col" onclick="sfTSort('our_delivery_date')">DBCC Requested Delivery Date${ar('our_delivery_date')}</th>
 <th onclick="sfTSort('bar_weight')" style="text-align:right">Bar Weight (T)${ar('bar_weight')}</th>
 <th onclick="sfTSort('starter_weight')" style="text-align:right">Starter Bars (T)${ar('starter_weight')}</th>
 <th onclick="sfTSort('mesh_sqm')" style="text-align:right">Mesh (m²)${ar('mesh_sqm')}</th>

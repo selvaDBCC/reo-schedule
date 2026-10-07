@@ -89,7 +89,10 @@ textarea{resize:vertical;min-height:72px}
 .tcard{background:var(--card);border:1px solid var(--border);border-radius:12px;box-shadow:var(--shadow);overflow:hidden}
 .tscroll{overflow-x:auto}
 table{width:100%;border-collapse:collapse;font-size:12px;min-width:1400px}
-th{text-align:left;padding:10px;font-weight:700;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--gray);background:#FAFAF8;border-bottom:2px solid var(--border);white-space:nowrap;cursor:pointer;user-select:none}
+th{text-align:left;padding:10px;font-weight:700;font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--gray);background:#FAFAF8;border-bottom:2px solid var(--border);white-space:normal;line-height:1.3;vertical-align:bottom;cursor:pointer;user-select:none}
+/* Date-column headers are long ("DBCC Requested Delivery Date" etc.) — let them wrap to a few
+   lines (taller header row) instead of forcing the columns wide and truncating the rest. */
+th.date-col{min-width:92px;max-width:116px}
 th.no-sort{cursor:default}
 td{padding:10px;border-bottom:1px solid #f0eeea;color:var(--mid);vertical-align:top}
 tr:last-child td{border-bottom:none}
