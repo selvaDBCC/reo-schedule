@@ -1,0 +1,7 @@
+# This repo is PUBLIC and GitHub Pages serves every file in it. Database migrations and the Supabase
+# edge functions live in the PRIVATE repo selvaDBCC/reo-schedule-db (local: ..\reo-schedule-db) —
+# never commit them here.
+migrations/
+supabase/
+*.sql
+.env*
