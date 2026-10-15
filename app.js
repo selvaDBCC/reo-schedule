@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b5.9.4';
+const APP_VERSION='b5.10';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const BUCKET='schedules';
@@ -975,27 +975,57 @@ function parseReoText(pageOneText, allText){
   // Case-insensitive throughout (mark uppercase-normalised, description matched case-insensitively).
   const STARTER_MARK_RE=/(?:^|[-_/])SB\d*(?:$|[-_/])/i;   // bounded SB in the bar mark
   const STARTER_DESC_RE=/\bstarter\b/i;                    // "STARTER" as a word in the line
-  const STARTER_DESC_SB_RE=/\bSB\b/i;                      // standalone "SB" as a word in the line
-  let bodyStarter=0,starterCount=0,bodyBarSum=0,bodyBarFound=false;
-  for(const line of a.split('\n')){
-    // <mark> <product Nxx/Yxx/Rxx> <qty> ... <tonne at end>
-    const bm=line.match(/^\s*([A-Z0-9.\-]+)\s+(N\d+|Y\d+|R\d+)[A-Z]*\s+(\d+)\s+.*?([\d]+[.,]\d+)\s*$/);
-    if(bm){
-      const mark=bm[1].toUpperCase(),tonne=reoNum2(bm[4]);
-      if(isNaN(tonne)||tonne<=0)continue;
-      const markIsStarter=STARTER_MARK_RE.test(mark);
-      const descIsStarter=STARTER_DESC_RE.test(line)||STARTER_DESC_SB_RE.test(line);
-      if(markIsStarter||descIsStarter){bodyStarter+=tonne;starterCount++;}
-      bodyBarSum+=tonne;bodyBarFound=true;
-    }
+  // b5.10: notes-column SB must be a whitespace-bounded word ("PRECAST SB"), not the tail of another
+  // mark quoted in the notes ("LAP WITH GW-SB" is a slab bar lapping a starter, not a starter).
+  const STARTER_DESC_SB_RE=/(?:^|\s)SB(?:\s|$)/i;
+  // b5.10: DEDUCTION SWITCH — off; Troy 2026-10-15: flag for internal discussion, Chris decides. Master-OPS deducts starters on some schedules (Qudos core
+  // footings, Summerset columns) and NOT on others (Qudos pad-footing column starters CC1-SB, Marymede
+  // U28U). Until the rule is confirmed, starters are DETECTED and reported in reconReason but not
+  // subtracted from bar weight (= what live native uploads already do, since the old scan never fired).
+  const DEDUCT_STARTERS=false;
+  // b5.10: the native (pdf.js) text has NO newlines — getPdfNativeText joins every item with ' ' —
+  // so the old per-line scan (`a.split('\n')` + ^…$) never matched a body line and starters were
+  // never deducted on native uploads. Scan for body rows by token pattern instead, which works for
+  // both native (single-line) and OCR (multi-line) text. Summary tables are cut out first so their
+  // "N12 4 546 1.327" rows can't be read as bar marks.
+  //   <mark> <Nxx/Yxx/Rxx> <qty> <length> [notes] <tonne, 3 decimals>
+  // Notes may not run into the next row (negative lookahead) and never cross a newline (OCR text).
+  const bodyText=a.replace(/(?:BAR|SPIRAL\s*WEIGHT|MISCELLANEOUS\s*PRODUCT)\s*SUMMARY[\s\S]*?TOTAL(?:\s+[\d.,]+)+/gi,' ');
+  const ROW_RE=/(?:^|\s)([A-Za-z0-9][A-Za-z0-9.\-_/]*)\s+([NRY]\d{1,2})[A-Z]*\s+(\d+)\s+(\d+)\s+((?:(?!\s[A-Za-z0-9][A-Za-z0-9.\-_/]*\s+[NRY]\d{1,2}\s+\d)[^\n]){0,120}?)\s*(\d+[.,]\d{3})(?=\s|$)/g;
+  let bodyStarter=0,starterCount=0,bodyBarSum=0,bodyBarFound=false;const starterMarks=[];
+  let bm;ROW_RE.lastIndex=0;
+  while((bm=ROW_RE.exec(bodyText))!==null){
+    const mark=bm[1].toUpperCase(),notes=bm[5]||'',tonne=reoNum2(bm[6]);
+    if(isNaN(tonne)||tonne<=0)continue;
+    const markIsStarter=STARTER_MARK_RE.test(mark);
+    const descIsStarter=STARTER_DESC_RE.test(notes)||STARTER_DESC_SB_RE.test(notes);
+    if(markIsStarter||descIsStarter){bodyStarter+=tonne;starterCount++;starterMarks.push(mark)}
+    bodyBarSum+=tonne;bodyBarFound=true;
   }
 
   // ── Reinforcement bar weight (before starter deduction) ──
   // Prefer the authoritative BAR SUMMARY (+ SPIRAL). Fall back to summed body bar line items
   // for small orders that have no BAR SUMMARY (e.g. 2DD7). The fallback excludes accessories.
+  // b5.10: SPIRAL WEIGHT SUMMARY (PT anti-burst spirals, "PT1 N10 … EACH END") is NOT bar for
+  // fixing — Master-OPS excludes it on every schedule that has one (8/8). Kept out of barWeight,
+  // reported in reconReason, still counted in the Total-Weight reconciliation below.
+  // STOCK-ONLY orders (no BAR SUMMARY, e.g. "…-STOCK ONLY"): the bars are 6 m stock lengths
+  // (N16S6 "Bar D500N N16 6m") and corner bars (CNB16L66) listed in the MISCELLANEOUS summary.
+  // Those ARE the reinforcement on such an order, so sum them as bar weight.
+  const stockBars=()=>{
+    const start=a.search(/MISCELLANEOUS\s*PRODUCT\s*SUMMARY/i);if(start<0)return null;
+    const rest=a.slice(start);const end=rest.search(/\bTOTAL\b/i);const sec=end>=0?rest.slice(0,end):rest;
+    const re=/\b(N\d{1,2}S\d+|CNB\d+[A-Z0-9]*)\s+[\d.,]+\s+Each\s+([\d.,]+)/gi;let s=0,f=false,mm;
+    while((mm=re.exec(sec))!==null){const v=reoNum2(mm[2]);if(!isNaN(v)){s+=v;f=true}}
+    return f?Math.round(s*1000)/1000:null;
+  };
   let barReoTotal=null;
-  if(barSummary!=null||spiralSummary!=null){
-    barReoTotal=(barSummary||0)+(spiralSummary||0);
+  if(barSummary!=null){
+    barReoTotal=barSummary;
+  }else if(spiralSummary!=null){
+    barReoTotal=0;
+  }else if(stockBars()!=null){
+    barReoTotal=stockBars();e.stockBarWeight=barReoTotal;
   }else if(bodyBarFound){
     // No summary — sum genuine reinforcing-bar line items, excluding accessories & mesh/trench.
     let s=0,found=false;
@@ -1040,10 +1070,11 @@ function parseReoText(pageOneText, allText){
     if(!isNaN(qty)&&!isNaN(aa)&&!isNaN(bb)){trenchLm+=qty*Math.max(aa,bb);trenchFound=true}}
 
   // ── Final invoiceable figures ──
-  e.starterWeight=starterCount>0?Math.round(bodyStarter*1000)/1000:null;
+  const starterFound=starterCount>0?Math.round(bodyStarter*1000)/1000:null;
+  e.starterWeight=DEDUCT_STARTERS?starterFound:null;   // UI shows starter_weight as a "−" deduction
   if(barReoTotal!=null){
     // Bar weight feeding invoicing EXCLUDES starter bars (we fix those, not the steel fixers).
-    const barForFixing=Math.round((barReoTotal-bodyStarter)*1000)/1000;
+    const barForFixing=Math.round((barReoTotal-(DEDUCT_STARTERS?bodyStarter:0))*1000)/1000;
     e.barWeight=barForFixing;
   }
   if(meshFound)e.meshSqm=Math.round(meshSqm*100)/100;
@@ -1058,9 +1089,22 @@ function parseReoText(pageOneText, allText){
     e.reconDiff=diff;
     e.reconStatus=Math.abs(diff)<=0.01?'reconciled':'review';
     if(e.reconStatus==='review')e.reconReason='Totals do not match (diff '+diff+'T)';
+    if(spiralSummary)e.reconReason=(e.reconReason?e.reconReason+'; ':'')+'Spiral '+spiralSummary.toFixed(3)+'T excluded from bar';
   }else{
     // Nothing to reconcile against (no summaries, or no total) — leave status null per spec.
     e.reconStatus=null;
+  }
+  // b5.10: Troy 2026-10-15 — starters and mixed processed+stock orders are flagged for INTERNAL
+  // DISCUSSION (Chris decides the rule); nothing is deducted or added until then. Flagging = 'review'.
+  if(!DEDUCT_STARTERS&&starterFound){
+    e.reconStatus='review';
+    e.reconReason=(e.reconReason?e.reconReason+'; ':'')+'Starters '+starterFound.toFixed(3)+'T detected ['+starterMarks.join(', ')+'] — NOT deducted, for internal discussion';
+  }
+  if(e.stockBarWeight!=null)e.reconReason=(e.reconReason?e.reconReason+'; ':'')+'Stock-only order: bar = stock lengths '+e.stockBarWeight.toFixed(3)+'T';
+  const mixedStock=barSummary!=null?stockBars():null;
+  if(mixedStock){
+    e.reconStatus='review';
+    e.reconReason=(e.reconReason?e.reconReason+'; ':'')+'Mixed order: bar summary + stock lengths '+mixedStock.toFixed(3)+'T NOT included in bar — for internal discussion';
   }
   // Starter > 50% safety net (independent of reconciliation).
   if(e.weight&&e.starterWeight!=null&&e.starterWeight>0.5*e.weight){
