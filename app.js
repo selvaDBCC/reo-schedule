@@ -1,5 +1,5 @@
 /* ═══════════════ CONFIG ═══════════════ */
-const APP_VERSION='b5.10';
+const APP_VERSION='b5.11';
 const SUPA_URL='https://oekgtocjtloptrjacmcu.supabase.co';
 const SUPA_KEY='eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9la2d0b2NqdGxvcHRyamFjbWN1Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYzMDM2NTAsImV4cCI6MjA5MTg3OTY1MH0.oioNTJ7qWraS0LR3DQcfFvQ9J6V28gbGrwsOEJ6jbk8';
 const BUCKET='schedules';
@@ -3696,6 +3696,9 @@ function renderForeman(){
     const pct=e.progress_pct!=null?e.progress_pct:0;
     const pctColor=pct>=100?'#2E7D32':(pct>0?'#1565C0':'#ccc');
     const progressHtml=`<div class="fm-progress"><div class="fm-bar"><div class="fm-bar-fill" style="width:${pct}%;background:${pctColor}"></div></div><span class="fm-pct">${pct}%</span><button class="fm-mini-btn" onclick="foremanSetProgress(${e.id})">Set %</button></div>`;
+    // Legacy day-labour flag — one-tap toggle (with a fail-safe confirm in the handler).
+    const dl=e.day_labour===true;
+    const dayLabourHtml=`<button class="fm-dl${dl?' on':''}" onclick="foremanToggleDayLabour(${e.id})">${dl?'🔨 Legacy – Day Labour ✓':'+ Mark Legacy – Day Labour'}</button>`;
     // Foreman notes (who did what) — attributed chunks.
     const fnotes=parseChunks(e.foreman_notes);
     const notesHtml=`<div class="fm-notes">${fnotes.length?fnotes.map(c=>`<div class="fm-note">📝 ${esc(c.text)} <span class="fm-note-meta">— ${esc((c.authors||[]).join(', '))}${c.created_at?' · '+fmtDate(c.created_at.slice(0,10)):''}</span></div>`).join(''):'<div class="fm-note-empty">No notes yet</div>'}<button class="fm-mini-btn" onclick="foremanAddNote(${e.id})">+ Note</button></div>`;
@@ -3710,6 +3713,7 @@ function renderForeman(){
       <div class="sv-date">📅 DBCC Requested Delivery: <b>${fmtDate(e.our_delivery_date)||'Not set'}</b> · ${statusPill}</div>
       <div class="sv-files">${filesHtml}</div>
       <div class="fm-actions">${deliveredHtml}${installHtml}</div>
+      ${dayLabourHtml}
       ${progressHtml}
       ${notesHtml}
     </div>`}).join('')+'</div>'}
@@ -3753,6 +3757,25 @@ async function foremanSaveProgress(id){
   await sb.from('entries').update({progress_pct:v}).eq('id',id);
   await foremanAudit({entry_id:id,action:'UPDATE',field_changed:'progress_pct',old_value:String(e.progress_pct==null?'':e.progress_pct),new_value:String(v)});
   closeOv('weightOv');await loadEntries();renderForeman();
+}
+function foremanToggleDayLabour(id){
+  const e=entries.find(x=>x.id===id);if(!e)return;
+  const on=e.day_labour===true;
+  const what=esc(e.schedule||((e.level||'—')+' / '+(e.area||'—')));
+  confirmDialog(
+    on?'Remove day-labour mark?':'Mark as Legacy day labour?',
+    on
+      ? `This removes the Legacy day-labour mark from <b>${what}</b>.`
+      : `Mark <b>${what}</b> as fixed by Legacy on <b>day labour</b> (not tonnage rate).<br><br>If it was split between day labour and tonnage, add a note below after marking.`,
+    on?'Remove mark':'Mark day labour','',
+    ()=>foremanSaveDayLabour(id,!on));
+}
+async function foremanSaveDayLabour(id,val){
+  const e=entries.find(x=>x.id===id);if(!e)return;
+  const{error}=await sb.from('entries').update({day_labour:val}).eq('id',id);
+  if(error){alert('Could not save the day-labour mark: '+error.message);return}
+  await foremanAudit({entry_id:id,action:'UPDATE',field_changed:'day_labour',old_value:String(!!e.day_labour),new_value:String(val)});
+  await loadEntries();renderForeman();
 }
 function foremanAddNote(id){
   const e=entries.find(x=>x.id===id);if(!e)return;
@@ -3798,12 +3821,12 @@ function generateForemanReport(){
   const dtLabel={installed_date:'Installed date',supplier_delivery_date:'Production delivery date',our_delivery_date:'DBCC requested delivery date'}[dt];
   const summary=(proj||'All projects')+' · '+dtLabel+(from||to?(' · '+(from?fmtDate(from):'…')+' to '+(to?fmtDate(to):'…')):' · all dates');
   window._reoReport={rows,summary};
-  const body=rows.length?`<div class="tscroll"><table><thead><tr><th>Code</th><th>Project</th><th>Level / Area</th><th>Delivered</th><th>Installed</th><th>%</th><th>Status</th></tr></thead><tbody>${rows.map(r=>`<tr style="background:${r.state.bg}"><td style="font-family:'JetBrains Mono',monospace">${esc(r.e.schedule||'—')}</td><td>${esc(r.e.project)}</td><td>${esc((r.e.level||'—')+' / '+(r.e.area||'—'))}</td><td style="white-space:nowrap">${fmtDate(r.e.supplier_delivery_date||r.e.our_delivery_date)||'—'}</td><td style="white-space:nowrap">${fmtDate(r.e.installed_date)||'—'}</td><td>${r.e.progress_pct!=null?r.e.progress_pct+'%':'—'}</td><td style="color:${r.state.fg};font-weight:700;white-space:nowrap">${r.state.label}</td></tr>`).join('')}</tbody></table></div>`:'<p style="color:var(--muted)">No rows match those filters.</p>';
+  const body=rows.length?`<div class="tscroll"><table><thead><tr><th>Code</th><th>Project</th><th>Level / Area</th><th>Delivered</th><th>Installed</th><th>%</th><th>Status</th><th>Day Labour</th></tr></thead><tbody>${rows.map(r=>`<tr style="background:${r.state.bg}"><td style="font-family:'JetBrains Mono',monospace">${esc(r.e.schedule||'—')}</td><td>${esc(r.e.project)}</td><td>${esc((r.e.level||'—')+' / '+(r.e.area||'—'))}</td><td style="white-space:nowrap">${fmtDate(r.e.supplier_delivery_date||r.e.our_delivery_date)||'—'}</td><td style="white-space:nowrap">${fmtDate(r.e.installed_date)||'—'}</td><td>${r.e.progress_pct!=null?r.e.progress_pct+'%':'—'}</td><td style="color:${r.state.fg};font-weight:700;white-space:nowrap">${r.state.label}</td><td style="white-space:nowrap">${r.e.day_labour?'🔨 Yes':'—'}</td></tr>`).join('')}</tbody></table></div>`:'<p style="color:var(--muted)">No rows match those filters.</p>';
   $('rpResult').innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap"><span style="font-size:12px;color:var(--muted)">${esc(summary)} · ${rows.length} rows</span><div style="display:flex;gap:8px">${rows.length?'<button class="btn btn-sm" onclick="printForemanReport()" style="width:auto">🖨 Print / PDF</button><button class="btn btn-sec btn-sm" onclick="foremanReportCSV()" style="width:auto">CSV</button>':''}</div></div>${body}`;
 }
 function printForemanReport(){
   const d=window._reoReport;if(!d)return;
-  const rows=d.rows.map(r=>`<tr style="background:${r.state.bg}"><td class="nc">${esc(r.e.schedule||'—')}</td><td>${esc(r.e.project)}</td><td>${esc((r.e.level||'—')+' / '+(r.e.area||'—'))}</td><td class="nc">${fmtDate(r.e.supplier_delivery_date||r.e.our_delivery_date)||'—'}</td><td class="nc">${fmtDate(r.e.installed_date)||'—'}</td><td class="nc">${r.e.progress_pct!=null?r.e.progress_pct+'%':'—'}</td><td style="color:${r.state.fg};font-weight:bold">${r.state.label}</td><td>${esc(chunksToPlain(parseChunks(r.e.foreman_notes)))}</td></tr>`).join('');
+  const rows=d.rows.map(r=>`<tr style="background:${r.state.bg}"><td class="nc">${esc(r.e.schedule||'—')}</td><td>${esc(r.e.project)}</td><td>${esc((r.e.level||'—')+' / '+(r.e.area||'—'))}</td><td class="nc">${fmtDate(r.e.supplier_delivery_date||r.e.our_delivery_date)||'—'}</td><td class="nc">${fmtDate(r.e.installed_date)||'—'}</td><td class="nc">${r.e.progress_pct!=null?r.e.progress_pct+'%':'—'}</td><td style="color:${r.state.fg};font-weight:bold">${r.state.label}</td><td class="nc">${r.e.day_labour?'Yes':'—'}</td><td>${esc(chunksToPlain(parseChunks(r.e.foreman_notes)))}</td></tr>`).join('');
   const html=`<!doctype html><html><head><meta charset="utf-8"><title>REO Delivery & Install Report</title><style>
 @page{size:A4 landscape;margin:8mm}
 body{font-family:Arial,Helvetica,sans-serif;padding:16px;color:#222}
@@ -3812,15 +3835,15 @@ table{border-collapse:collapse;width:100%;table-layout:fixed}
 th,td{border:1px solid #bbb;padding:3px 5px;text-align:left;font-size:10px;vertical-align:top;overflow-wrap:anywhere}
 th{background:#eee}
 .nc{white-space:nowrap}
-col.c-code{width:58px}col.c-proj{width:92px}col.c-la{width:140px}col.c-d{width:58px}col.c-i{width:58px}col.c-p{width:40px}col.c-s{width:66px}
-</style></head><body><h2>REO — Delivery & Install Report</h2><div class="sub">${esc(d.summary)} · ${d.rows.length} rows · generated ${new Date().toLocaleString('en-AU')}</div><table><colgroup><col class="c-code"><col class="c-proj"><col class="c-la"><col class="c-d"><col class="c-i"><col class="c-p"><col class="c-s"><col></colgroup><thead><tr><th>Control Code</th><th>Project</th><th>Level / Area</th><th>Delivered</th><th>Installed</th><th>Prog</th><th>Status</th><th>Notes</th></tr></thead><tbody>${rows}</tbody></table></body></html>`;
+col.c-code{width:58px}col.c-proj{width:92px}col.c-la{width:140px}col.c-d{width:58px}col.c-i{width:58px}col.c-p{width:40px}col.c-s{width:66px}col.c-dl{width:52px}
+</style></head><body><h2>REO — Delivery & Install Report</h2><div class="sub">${esc(d.summary)} · ${d.rows.length} rows · generated ${new Date().toLocaleString('en-AU')}</div><table><colgroup><col class="c-code"><col class="c-proj"><col class="c-la"><col class="c-d"><col class="c-i"><col class="c-p"><col class="c-s"><col class="c-dl"><col></colgroup><thead><tr><th>Control Code</th><th>Project</th><th>Level / Area</th><th>Delivered</th><th>Installed</th><th>Prog</th><th>Status</th><th>Day Labour</th><th>Notes</th></tr></thead><tbody>${rows}</tbody></table></body></html>`;
   const w=window.open('','_blank');if(!w){alert('Popup blocked — allow popups to print the report.');return}
   w.document.write(html);w.document.close();w.focus();setTimeout(()=>w.print(),350);
 }
 function foremanReportCSV(){
   const d=window._reoReport;if(!d)return;
-  const h=['Control Code','Project','Level','Area','Delivered','Installed','Progress %','Status','Notes'];
-  const rows=d.rows.map(r=>[r.e.schedule||'',r.e.project,r.e.level||'',r.e.area||'',r.e.supplier_delivery_date||r.e.our_delivery_date||'',r.e.installed_date||'',r.e.progress_pct!=null?r.e.progress_pct:'',r.state.label,chunksToPlain(parseChunks(r.e.foreman_notes))]);
+  const h=['Control Code','Project','Level','Area','Delivered','Installed','Progress %','Status','Day Labour','Notes'];
+  const rows=d.rows.map(r=>[r.e.schedule||'',r.e.project,r.e.level||'',r.e.area||'',r.e.supplier_delivery_date||r.e.our_delivery_date||'',r.e.installed_date||'',r.e.progress_pct!=null?r.e.progress_pct:'',r.state.label,r.e.day_labour?'Yes':'',chunksToPlain(parseChunks(r.e.foreman_notes))]);
   const csv=[h,...rows].map(x=>x.map(c=>`"${String(c||'').replace(/"/g,'""')}"`).join(',')).join('\n');
   const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([csv],{type:'text/csv'}));a.download='reo-report-'+today()+'.csv';a.click();
 }
