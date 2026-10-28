@@ -340,7 +340,7 @@
       </span>
     </div>
   </nav>
-  <div style="max-width:1100px;margin:0 auto;padding:20px 16px 60px">
+  <div id="foremanMain" style="max-width:1100px;margin:0 auto;padding:20px 16px 60px">
     <div class="page-header" style="padding:0 0 14px"><h1>Deliveries &amp; Installs</h1><p>Mark deliveries as delivered and record install dates. Updates sync to the office dashboard.</p></div>
     <div class="filters">
       <select id="fmProj" onchange="renderForeman()"><option value="">All Projects</option></select>
@@ -348,12 +348,32 @@
       <select id="fmArea" onchange="renderForeman()"><option value="">All Areas</option></select>
       <input type="text" id="fmSearch" placeholder="Search schedule..." oninput="renderForeman()">
       <button class="btn btn-ghost btn-sm" onclick="refreshAll()">Refresh</button>
-      <button class="btn btn-sec btn-sm" onclick="openForemanReport()" style="width:auto">📊 Report</button>
+      <button class="btn btn-sec btn-sm" onclick="openReportPage()" style="width:auto">📊 Report</button>
     </div>
     <div id="foremanList"></div>
   </div>
+  <!-- b5.13: the Delivery / Install report as a PAGE of its own (Chris, 28 Oct): filters at the top, the table live under
+       them, CSV and Print / PDF on the page. The old pop-up dialog is gone. Opened with #report so a reload keeps it. -->
+  <div id="reportPage" style="display:none;max-width:1400px;margin:0 auto;padding:20px 16px 60px">
+    <div class="page-header" style="padding:0 0 14px;display:flex;align-items:flex-end;justify-content:space-between;gap:12px;flex-wrap:wrap">
+      <div><h1>Delivery / Install Report</h1><p>Every schedule by project, level and area with its delivery, install, progress, status and the foreman's REO install mark. Filters apply as you change them.</p></div>
+      <button class="btn btn-ghost btn-sm" onclick="closeReportPage()" style="width:auto">← Back to Deliveries &amp; Installs</button>
+    </div>
+    <div class="filters" style="flex-wrap:wrap">
+      <select id="rpProj" onchange="renderReportPage()"><option value="">All projects</option></select>
+      <select id="rpDateType" onchange="renderReportPage()"><option value="installed_date">Installed date</option><option value="supplier_delivery_date">Production delivery date</option><option value="our_delivery_date">DBCC requested delivery date</option></select>
+      <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)">From <input type="date" id="rpFrom" onchange="renderReportPage()"></label>
+      <label style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)">To <input type="date" id="rpTo" onchange="renderReportPage()"></label>
+      <select id="rpStatus" onchange="renderReportPage()"><option value="">All statuses</option><option>Installed</option><option>Overdue install</option><option>Delivered</option><option>In progress</option><option>Scheduled</option><option>Ordered</option><option>Not Ordered</option></select>
+      <select id="rpInstall" onchange="renderReportPage()"><option value="">All REO install</option><option value="standard">Legacy tonnage (standard)</option><option value="legacy_day_labour">Legacy day labour</option><option value="dbcc_starter_only">DBCC starter only</option><option value="dbcc_full">DBCC full schedule</option></select>
+      <input type="text" id="rpSearch" placeholder="Search schedule / area..." oninput="renderReportPage()">
+      <button class="btn btn-sm" onclick="printForemanReport()" style="width:auto">🖨 Print / PDF</button>
+      <button class="btn btn-sec btn-sm" onclick="foremanReportCSV()" style="width:auto">⬇ CSV</button>
+    </div>
+    <div id="rpSummary" style="font-size:12px;color:var(--muted);margin:8px 0"></div>
+    <div id="rpResult"></div>
+  </div>
 </div>
-<div class="overlay" id="reportOv" onclick="if(event.target===this)closeOv('reportOv')"><div class="modal modal-lg" id="reportModal"></div></div>
 
 <!-- Foreman name prompt -->
 <div class="overlay" id="fmNameOverlay">

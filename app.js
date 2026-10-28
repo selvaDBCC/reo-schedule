@@ -231,6 +231,7 @@ async function init(){
       $('fmUserChip').textContent=foremanName;
       $('foremanApp').style.display='block';
       renderForeman();
+      if(location.hash==='#report')openReportPage();   // b5.13: a reload on the report page stays on it
     }catch(e){$('loadingScreen').innerHTML='<div style="text-align:center;padding:20px"><h2 style="color:var(--err)">Connection Error</h2><p style="color:var(--muted);font-size:13px">'+esc(e.message)+'</p><button class="btn btn-sm" onclick="location.reload()" style="width:auto;margin-top:12px">Retry</button></div>'}
     return}
   // Login gate (company → PIN). Foreman/Site views returned above and are untouched.
@@ -415,7 +416,7 @@ function projectsForPerson(personId){
   return assignments.filter(a=>a.person_id===personId).map(a=>a.project_name)}
 async function refreshAll(){
   await Promise.all([loadProjects(),loadEntries()]);
-  if(isForemanViewMode()){populateForemanDropdowns();renderForeman();return}
+  if(isForemanViewMode()){populateForemanDropdowns();renderForeman();if(location.hash==='#report'||($('reportPage')&&$('reportPage').style.display==='block'))openReportPage();return}
   if(isSiteViewMode()){populateSiteDropdowns();renderSite();return}
   populateDropdowns();renderDash()}
 function subscribeRealtime(){
@@ -3655,7 +3656,7 @@ function refreshForemanLevelAreaOptions(){
   if(areas.includes(prevA))aSel.value=prevA;
 }
 function subscribeForemanRealtime(){
-  sb.channel('fm_e').on('postgres_changes',{event:'*',schema:'public',table:'entries'},()=>loadEntries().then(()=>renderForeman())).subscribe();
+  sb.channel('fm_e').on('postgres_changes',{event:'*',schema:'public',table:'entries'},()=>loadEntries().then(()=>{renderForeman();if($('reportPage')&&$('reportPage').style.display==='block')renderReportPage()})).subscribe();
   sb.channel('fm_p').on('postgres_changes',{event:'*',schema:'public',table:'projects'},()=>loadProjects().then(()=>{populateForemanDropdowns();renderForeman()})).subscribe();
 }
 // REO install detail — how a schedule was fixed (for checking Legacy's invoices).
@@ -3812,29 +3813,41 @@ function reoRowState(e){
   if((e.progress_pct||0)>0)return{label:'In progress',bg:'#E3F2FD',fg:'#1565C0'};
   return{label:e.status||'—',bg:'#fff',fg:'#555'};
 }
-function openForemanReport(){
-  const projOpts=['<option value="">All projects</option>'].concat(projects.map(p=>`<option>${esc(p.name)}</option>`)).join('');
-  $('reportModal').innerHTML=`<h3>Delivery / Install Report<button class="modal-close" onclick="closeOv('reportOv')">&times;</button></h3>
-    <div class="row2"><div class="fg"><label>Project</label><select id="rpProj">${projOpts}</select></div>
-    <div class="fg"><label>Filter dates by</label><select id="rpDateType"><option value="installed_date">Installed date</option><option value="supplier_delivery_date">Production delivery date</option><option value="our_delivery_date">DBCC requested delivery date</option></select></div></div>
-    <div class="row2"><div class="fg"><label>From</label><input type="date" id="rpFrom"></div><div class="fg"><label>To</label><input type="date" id="rpTo"></div></div>
-    <div style="margin-top:6px"><button class="btn btn-sm" onclick="generateForemanReport()" style="width:auto">Generate</button></div>
-    <div id="rpResult" style="margin-top:14px"></div>`;
-  $('reportOv').classList.add('show');
+// b5.13 — the Delivery / Install report is a PAGE of the foreman view (Chris, 28 Oct): filters at the top, the table live
+// under them, CSV and Print / PDF on the page. #report in the URL keeps it open across a reload. The exports read the
+// same rows the page shows (window._reoReport), as before.
+function openReportPage(){
+  const sel=$('rpProj');
+  if(sel&&sel.options.length<=1)projects.forEach(p=>{const o=document.createElement('option');o.textContent=p.name;sel.appendChild(o)});
+  const fp=$('fmProj');if(fp&&fp.value&&sel&&!sel.value)sel.value=fp.value;   // carry the foreman page's project filter over
+  $('foremanMain').style.display='none';$('reportPage').style.display='block';
+  if(location.hash!=='#report')history.replaceState(null,'',location.pathname+location.search+'#report');
+  renderReportPage();window.scrollTo(0,0);
 }
-function generateForemanReport(){
-  const proj=$('rpProj').value,dt=$('rpDateType').value,from=$('rpFrom').value,to=$('rpTo').value;
+function closeReportPage(){
+  $('reportPage').style.display='none';$('foremanMain').style.display='';
+  if(location.hash==='#report')history.replaceState(null,'',location.pathname+location.search);
+}
+function openForemanReport(){openReportPage()}   // older buttons / bookmarks
+function renderReportPage(){
+  if(!$('rpProj'))return;
+  const proj=$('rpProj').value,dt=$('rpDateType').value,from=$('rpFrom').value,to=$('rpTo').value,st=$('rpStatus').value,inst=$('rpInstall').value,q=($('rpSearch').value||'').trim().toLowerCase();
   let list=entries.filter(e=>e.status!=='Cancelled');
   if(proj)list=list.filter(e=>e.project===proj);
   if(from||to)list=list.filter(e=>{const d=e[dt];if(!d)return false;if(from&&d<from)return false;if(to&&d>to)return false;return true});
+  if(st)list=list.filter(e=>reoRowState(e).label===st);
+  if(inst)list=list.filter(e=>(e.install_detail||'standard')===inst);
+  if(q)list=list.filter(e=>[e.schedule,e.level,e.area,e.project].some(v=>String(v||'').toLowerCase().includes(q)));
   list.sort((a,b)=>String((a.project||'')+(a.level||'')+(a.area||'')).localeCompare(String((b.project||'')+(b.level||'')+(b.area||''))));
   const rows=list.map(e=>({e,state:reoRowState(e)}));
   const dtLabel={installed_date:'Installed date',supplier_delivery_date:'Production delivery date',our_delivery_date:'DBCC requested delivery date'}[dt];
   const summary=(proj||'All projects')+' · '+dtLabel+(from||to?(' · '+(from?fmtDate(from):'…')+' to '+(to?fmtDate(to):'…')):' · all dates');
   window._reoReport={rows,summary};
-  const body=rows.length?`<div class="tscroll"><table><thead><tr><th>Code</th><th>Project</th><th>Level / Area</th><th>Delivered</th><th>Installed</th><th>%</th><th>Status</th><th>REO install</th></tr></thead><tbody>${rows.map(r=>`<tr style="background:${r.state.bg}"><td style="font-family:'JetBrains Mono',monospace">${esc(r.e.schedule||'—')}</td><td>${esc(r.e.project)}</td><td>${esc((r.e.level||'—')+' / '+(r.e.area||'—'))}</td><td style="white-space:nowrap">${fmtDate(r.e.supplier_delivery_date||r.e.our_delivery_date)||'—'}</td><td style="white-space:nowrap">${fmtDate(r.e.installed_date)||'—'}</td><td>${r.e.progress_pct!=null?r.e.progress_pct+'%':'—'}</td><td style="color:${r.state.fg};font-weight:700;white-space:nowrap">${r.state.label}</td><td>${esc(installDetailShort(r.e.install_detail))}</td></tr>`).join('')}</tbody></table></div>`:'<p style="color:var(--muted)">No rows match those filters.</p>';
-  $('rpResult').innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap"><span style="font-size:12px;color:var(--muted)">${esc(summary)} · ${rows.length} rows</span><div style="display:flex;gap:8px">${rows.length?'<button class="btn btn-sm" onclick="printForemanReport()" style="width:auto">🖨 Print / PDF</button><button class="btn btn-sec btn-sm" onclick="foremanReportCSV()" style="width:auto">CSV</button>':''}</div></div>${body}`;
+  const body=rows.length?`<div class="tscroll"><table><thead><tr><th>Code</th><th>Project</th><th>Level / Area</th><th>Delivered</th><th>Installed</th><th>%</th><th>Status</th><th>REO install</th><th>Notes</th></tr></thead><tbody>${rows.map(r=>`<tr style="background:${r.state.bg}"><td style="font-family:'JetBrains Mono',monospace">${esc(r.e.schedule||'—')}</td><td>${esc(r.e.project)}</td><td>${esc((r.e.level||'—')+' / '+(r.e.area||'—'))}</td><td style="white-space:nowrap">${fmtDate(r.e.supplier_delivery_date||r.e.our_delivery_date)||'—'}</td><td style="white-space:nowrap">${fmtDate(r.e.installed_date)||'—'}</td><td>${r.e.progress_pct!=null?r.e.progress_pct+'%':'—'}</td><td style="color:${r.state.fg};font-weight:700;white-space:nowrap">${r.state.label}</td><td>${esc(installDetailShort(r.e.install_detail))}</td><td style="font-size:11px;color:var(--muted)">${esc(chunksToPlain(parseChunks(r.e.foreman_notes)))}</td></tr>`).join('')}</tbody></table></div>`:'<p style="color:var(--muted)">No rows match those filters.</p>';
+  $('rpSummary').textContent=`${summary} · ${rows.length} rows`;
+  $('rpResult').innerHTML=body;
 }
+function generateForemanReport(){renderReportPage()}   // older name
 function printForemanReport(){
   const d=window._reoReport;if(!d)return;
   const rows=d.rows.map(r=>`<tr style="background:${r.state.bg}"><td class="nc">${esc(r.e.schedule||'—')}</td><td>${esc(r.e.project)}</td><td>${esc((r.e.level||'—')+' / '+(r.e.area||'—'))}</td><td class="nc">${fmtDate(r.e.supplier_delivery_date||r.e.our_delivery_date)||'—'}</td><td class="nc">${fmtDate(r.e.installed_date)||'—'}</td><td class="nc">${r.e.progress_pct!=null?r.e.progress_pct+'%':'—'}</td><td style="color:${r.state.fg};font-weight:bold">${r.state.label}</td><td>${esc(installDetailShort(r.e.install_detail))}</td><td>${esc(chunksToPlain(parseChunks(r.e.foreman_notes)))}</td></tr>`).join('');
