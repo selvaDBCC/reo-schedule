@@ -476,16 +476,21 @@ function schedulersForProject(name){
   const ids=projectSchedulers.filter(s=>s.project_name===name).map(s=>s.contact_id);
   return emailContacts.filter(c=>ids.includes(c.id));
 }
-// Comma-joined default recipient(s) for an email about a project: assigned schedulers first,
-// otherwise fall back to the global default contact (legacy behaviour).
-function defaultRecipientsFor(projectName){
-  if(projectName){
-    const sched=schedulersForProject(projectName);
-    if(sched.length)return sched.map(c=>c.email).join(', ');
-  }
-  const def=emailContacts.find(c=>c.is_default);
-  return def?def.email:'';
+// Who an email about a job goes to, and where that address came from (from: 'schedulers' | 'default' | 'none'):
+// the job's assigned scheduler(s) first; with none, the default contact — b5.14: only one of the job's OWN supplier.
+// It used to take the one default contact whatever its supplier, so an ARC job with no scheduler went to Aus Reo's
+// address. A job that isn't in the list has no known supplier: no address is guessed. No job at all (an email not
+// about one job) keeps the old rule: the default contact.
+function recipientsFor(projectName){
+  if(!projectName){const def=emailContacts.find(c=>c.is_default);return{to:def?def.email:'',from:def?'default':'none',supplier:null}}
+  const sched=schedulersForProject(projectName);
+  const job=projects.find(p=>p.name===projectName),supplier=job?(job.supplier||'Aus Reo'):null;
+  if(sched.length)return{to:sched.map(c=>c.email).join(', '),from:'schedulers',supplier};
+  const def=supplier?emailContacts.find(c=>c.is_default&&(c.supplier||'Aus Reo')===supplier):null;
+  return def?{to:def.email,from:'default',supplier}:{to:'',from:'none',supplier};
 }
+// Comma-joined default recipient(s) for an email about a project (the To the email dialog starts with).
+function defaultRecipientsFor(projectName){return recipientsFor(projectName).to}
 
 // b5.6 — Load project reference files. Includes superseded rows; UI filters them by default.
 async function loadProjectFiles(){
@@ -2194,7 +2199,11 @@ function emailModal(subject,body,entryId,auditContext,projectName,opts){
   // Resolve the project so the To field can default to that project's scheduler(s).
   let pname=projectName;
   if(!pname&&entryId){const e=entries.find(x=>x.id===entryId);if(e)pname=e.project;}
-  const toVal=defaultRecipientsFor(pname);
+  const rc=recipientsFor(pname),toVal=rc.to;
+  // b5.14: when the To isn't the job's own scheduler, say so under it (an empty To is refused by sendEmail).
+  const toWhy=!pname||rc.from==='schedulers'?''
+    :rc.from==='default'?`No scheduler is set for this job, so this is the default ${esc(rc.supplier)} contact.`
+    :rc.supplier?`No ${esc(rc.supplier)} address is saved for this job — type it here.`:'No address is saved for this job — type it here.';
   // CC list = every saved contact not already in the To line.
   const toSet=new Set(toVal.split(',').map(s=>s.trim().toLowerCase()).filter(Boolean));
   const others=emailContacts.filter(c=>!toSet.has((c.email||'').toLowerCase()));
@@ -2236,7 +2245,7 @@ function emailModal(subject,body,entryId,auditContext,projectName,opts){
   }
   $('emailModal').innerHTML=`<h3>Send Email<button class="modal-close" onclick="closeOv('emailOv')">&times;</button></h3>
 <div id="emForm">
-<div class="fg"><label>To</label><input type="email" id="em_to" value="${esc(toVal)}" placeholder="orders@ausreo.com.au"></div>
+<div class="fg"><label>To</label><input type="email" id="em_to" value="${esc(toVal)}" placeholder="Email address">${toWhy?`<div class="hint" id="em_to_why">${toWhy}</div>`:''}</div>
 <div class="fg"><label>CC <span style="font-weight:400;color:var(--muted);font-size:11px">(tick to include, or add custom below)</span></label>${ccCheckboxes}<input type="text" id="em_cc_extra" placeholder="Add another email (optional)" style="margin-top:6px"></div>
 <div class="fg"><label>Subject</label><input type="text" id="em_sub" value="${esc(subject)}"></div>
 ${filesHtml}
@@ -3419,10 +3428,15 @@ function ccSendHtml(){
   const plan=m?ccPlanRows(cc.cells.map(c=>c.key),cc.orders,k=>{const[l,a]=JSON.parse(k);return m.cell(l,a)},cc.dateMode,cc.allDate):{groups:[],refused:[]};
   const rows=plan.groups.flatMap(g=>g.rows),dated=rows.filter(r=>r.our_delivery_date).length;
   const L=cellCardLines(cc.log),saved=L.created.length+L.dates.length+L.cancels.length;
-  const to=defaultRecipientsFor(cc.project);
+  // Where the To comes from, said as it is: the job's own scheduler(s), else the default contact of the job's supplier,
+  // else none (the email then opens with To empty, which sendEmail refuses until an address is typed).
+  const rc=recipientsFor(cc.project),to=rc.to,sup=esc(rc.supplier||cc.supplier);
+  const toLine=rc.from==='schedulers'?`<p class="cc-to">To the job's scheduler${to.includes(',')?'s':''}: <b>${esc(to)}</b></p>`
+    :rc.from==='default'?`<p class="cc-to warn-msg">No scheduler is set for this job (Admin → Projects → Schedulers), so it goes to the default ${sup} contact: <b>${esc(to)}</b></p>`
+    :`<p class="cc-to warn-msg">No ${sup} address is saved for this job — set its schedulers (Admin → Projects → Schedulers), or type the address in the email.</p>`;
   const pf=projectFilesFor(cc.project,null,null,{scope:'project'});
   const li=a=>a.map(s=>`<li>${esc(s)}</li>`).join('');
-  let h=`<div class="cc-send"><h4>One email to ${esc(cc.supplier)}</h4><p class="cc-to">To the job's scheduler${to.includes(',')?'s':''}: <b>${to?esc(to):'— none set (Admin → Projects → Schedulers)'}</b></p>`;
+  let h=`<div class="cc-send"><h4>One email to ${esc(cc.supplier)}</h4>${toLine}`;
   if(pf.length)h+=`<div class="cc-files"><span>Project-wide reference files — tick to put the link in the email:</span>${pf.map(ccFileTickHtml).join('')}</div>`;
   h+='<ul class="cc-sum">';
   h+=rows.length?`<li><b>${rows.length}</b> new placeholder${rows.length===1?'':'s'} to create — ${dated} with a DBCC requested date go in the email${rows.length-dated?`, ${rows.length-dated} without one don't (Not Ordered)`:''}</li>`:'<li>No new placeholders to create</li>';
@@ -4114,7 +4128,7 @@ async function renderAdminContacts(){
   $('adminContacts').innerHTML=`
 <div class="card" style="margin-bottom:18px">
   <h3 style="font-size:15px;font-weight:700;margin-bottom:6px;color:var(--gray-dk)">Email Contacts</h3>
-  <p style="font-size:12px;color:var(--muted);margin-bottom:14px">Saved addresses appear in every email modal. The default is pre-filled in the To field; others appear as CC checkboxes.</p>
+  <p style="font-size:12px;color:var(--muted);margin-bottom:14px">Saved addresses appear in every email modal as CC checkboxes. A job's email goes To its scheduler(s) (Admin → Projects → Schedulers); a job with none gets the default — but only when the default is a contact of that job's supplier.</p>
   <div class="row2" style="margin-bottom:10px">
     <div class="fg" style="margin-bottom:0"><label>Label</label><input type="text" id="ecLabel" placeholder="e.g. Aus Reo Scheduling"></div>
     <div class="fg" style="margin-bottom:0"><label>Email Address</label><input type="email" id="ecEmail" placeholder="orders@ausreo.com.au"></div>
@@ -4133,6 +4147,7 @@ async function renderAdminContacts(){
       <div style="flex:1;min-width:0">
         <div style="font-weight:600;color:var(--gray-dk);display:flex;align-items:center;gap:8px;flex-wrap:wrap">
           ${esc(c.label||'(no label)')}
+          <span class="pill" style="background:${c.supplier==='ARC'?'#E3F2FD':'#FFF3E0'};color:${c.supplier==='ARC'?'#1565C0':'#E65100'};font-size:9px;padding:2px 8px" title="The supplier this contact belongs to">${esc(c.supplier||'Aus Reo')}</span>
           ${c.is_default?'<span class="pill" style="background:var(--accent-lt);color:var(--accent-dk);font-size:9px;padding:2px 8px">DEFAULT</span>':''}
         </div>
         <div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--muted);margin-top:2px;word-break:break-all">${esc(c.email)}</div>

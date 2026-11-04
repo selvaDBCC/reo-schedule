@@ -748,6 +748,71 @@ test('the email dialog without the card is unchanged: no file list taken over, n
   assert.equal(r('emailAfterSend'),null,'a later email never fires the card\'s callback');
 });
 
+// ── Review fix: a job with no scheduler gets only a default contact of its OWN supplier; the card says where the To came from ──
+const AUS_DEFAULT={id:5,label:'Aus Reo Scheduling',email:'orders@ausreo.example',supplier:'Aus Reo',is_default:true};
+test('the To for a job: its schedulers; with none, only a default contact of the job\'s own supplier; no job, the default as before', ()=>{
+  const a=loadApp(),r=src=>vm.runInContext(src,a);
+  a.__p={projects:PROJECTS,def:AUS_DEFAULT};
+  r(`projects=JSON.parse(JSON.stringify(__p.projects));projectSchedulers=[];
+     emailContacts=JSON.parse(JSON.stringify([__p.def,{id:8,label:'ARC scheduling',email:'sched@arc.example',supplier:'ARC'},{id:3,label:'Older contact',email:'old@ausreo.example',supplier:null}]));`);
+  const R=n=>plain(a.recipientsFor(n));
+  assert.deepEqual(R('New Job'),{to:'',from:'none',supplier:'ARC'},'an ARC job with no scheduler never gets the Aus Reo default');
+  assert.equal(a.defaultRecipientsFor('New Job'),'');
+  assert.deepEqual(R('Barwon Reservoir'),{to:'orders@ausreo.example',from:'default',supplier:'Aus Reo'},'an Aus Reo job with no scheduler: the Aus Reo default, as before');
+  assert.deepEqual(R('Gone Job'),{to:'',from:'none',supplier:null},'a job not in the list: its supplier is not known, so no address is guessed');
+  assert.deepEqual(R(null),{to:'orders@ausreo.example',from:'default',supplier:null},'an email not about one job: the default, as before');
+  // an ARC default serves ARC jobs only; a contact with no supplier counts as Aus Reo (as the Schedulers list counts it)
+  r('emailContacts.forEach(c=>{c.is_default=c.id===8})');
+  assert.deepEqual(R('New Job'),{to:'sched@arc.example',from:'default',supplier:'ARC'});
+  assert.deepEqual(R('Barwon Reservoir'),{to:'',from:'none',supplier:'Aus Reo'});
+  r('emailContacts.forEach(c=>{c.is_default=c.id===3})');
+  assert.equal(a.defaultRecipientsFor('Barwon Reservoir'),'old@ausreo.example');assert.equal(a.defaultRecipientsFor('New Job'),'');
+  // the job's own schedulers always come first
+  r(`projectSchedulers=[{project_name:'New Job',contact_id:8}]`);
+  assert.deepEqual(R('New Job'),{to:'sched@arc.example',from:'schedulers',supplier:'ARC'});
+});
+
+test('the card on an ARC job with no scheduler: never "the job\'s scheduler", never Aus Reo\'s address — the email opens with To empty and says why', async()=>{
+  const t=cardApp({realEmail:true}),{a,r,els,sb}=t;
+  const said=[],opened=[];a.alert=m=>said.push(String(m));a.open=u=>{opened.push(u)};
+  r(`projects.find(p=>p.id===6).supplier='ARC';projectSchedulers=[];emailContacts=[${JSON.stringify(AUS_DEFAULT)}];`);
+  a.openCellCard([{level:'GRD',area:'SLAB'}]);
+  const h=els.cellCardModal.innerHTML;
+  assert.match(h,/One email to ARC/);
+  assert.ok(!/the job's scheduler/.test(h),'not labelled as the job\'s scheduler');
+  assert.ok(!/orders@ausreo\.example/.test(h),'Aus Reo\'s address is never offered for an ARC job');
+  assert.match(h,/No ARC address is saved for this job — set its schedulers \(Admin → Projects → Schedulers\), or type the address in the email\./);
+  r(`cellCard.log.created=[{id:900,level:'GRD',area:'SLAB',split:null,date:'2026-11-20'}]`);
+  await a.ccCreateAndEmail();
+  const d=els.emailModal.innerHTML;
+  assert.match(d,/<input type="email" id="em_to" value="" placeholder="Email address"><div class="hint" id="em_to_why">No ARC address is saved for this job — type it here\.<\/div>/,'the dialog opens with To empty and says why');
+  assert.match(d,/data-email="orders@ausreo\.example" style="width:auto">/,'Aus Reo\'s contact stays only an unticked CC box, as every saved contact is');
+  // Open in Email with To still empty is refused: nothing opened, nothing recorded, the card keeps its line
+  await a.sendEmail(null,'cell_card');
+  assert.deepEqual(said,['Enter recipient']);assert.deepEqual(opened,[]);
+  assert.equal(sb.calls.filter(c=>c.table==='audit_log'&&c.payload.action==='EMAIL_SENT').length,0);
+  assert.equal(r('cellCard.log.created.length'),1);
+  // a per-row email for that job (no card) starts the same way
+  a.openMismatchEmail(21);
+  assert.match(els.emailModal.innerHTML,/id="em_to" value="" placeholder="Email address"><div class="hint" id="em_to_why">No ARC address is saved for this job — type it here\.<\/div>/);
+});
+
+test('the card on an Aus Reo job: its scheduler is said as the job\'s scheduler; with none, the default Aus Reo contact is said as the default', async()=>{
+  let t=cardApp({realEmail:true});
+  t.a.openCellCard([{level:'GRD',area:'SLAB'}]);
+  assert.match(t.els.cellCardModal.innerHTML,/<p class="cc-to">To the job's scheduler: <b>sched@ausreo\.example<\/b><\/p>/);
+  t.r(`cellCard.log.created=[{id:900,level:'GRD',area:'SLAB',split:null,date:'2026-11-20'}]`);await t.a.ccCreateAndEmail();
+  assert.match(t.els.emailModal.innerHTML,/id="em_to" value="sched@ausreo\.example" placeholder="Email address"><\/div>/,'the job\'s own scheduler: nothing more to say');
+  t=cardApp({realEmail:true});
+  t.r(`projectSchedulers=[];emailContacts=[${JSON.stringify(AUS_DEFAULT)}];`);
+  t.a.openCellCard([{level:'GRD',area:'SLAB'}]);
+  const h=t.els.cellCardModal.innerHTML;
+  assert.ok(!/the job's scheduler/.test(h),'the default contact is not called the job\'s scheduler');
+  assert.match(h,/No scheduler is set for this job \(Admin → Projects → Schedulers\), so it goes to the default Aus Reo contact: <b>orders@ausreo\.example<\/b>/);
+  t.r(`cellCard.log.created=[{id:900,level:'GRD',area:'SLAB',split:null,date:'2026-11-20'}]`);await t.a.ccCreateAndEmail();
+  assert.match(t.els.emailModal.innerHTML,/id="em_to" value="orders@ausreo\.example" placeholder="Email address"><div class="hint" id="em_to_why">No scheduler is set for this job, so this is the default Aus Reo contact\.<\/div>/);
+});
+
 // ── Stage 3 review fixes ──
 test('Edit: a supplier can\'t change an entry\'s job, level or area — REO 0012 refuses it whether pairs are live or not', ()=>{
   for(const live of [false,true])for(const role of ['supplier','dbcc']){
