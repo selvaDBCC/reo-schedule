@@ -304,6 +304,52 @@ test('Edit Save: nothing changed → nothing is sent', async()=>{
   assert.equal(sb.calls.length,0);
 });
 
+// ── History only after the database write succeeded ──
+const alerts=[];app.alert=m=>alerts.push(String(m));
+const ENTRY={id:5,project:'Barwon',level:'GRD',area:'SLAB',schedule:'U9AV',status:'Scheduled',dbcc_comment:null,aus_reo_comment:null};
+// answers: what the entries write returns — ok (the row back), refused (an error), zero (no rows: not allowed / gone)
+const WRITE={ok:{data:[{id:5}],error:null},refused:{data:null,error:{message:'Crew (Site/Foreman) can only update delivery status'}},zero:{data:[],error:null}};
+function runWith(answer){
+  const sb=fakeSb(q=>q.table==='entries'&&(q.op==='update'||q.op==='delete')?answer:{data:null,error:null});
+  app.__sb=sb;withApp(`sb=__sb;entries=[${JSON.stringify(ENTRY)}];adminUnlocked=true;`);alerts.length=0;
+  return sb}
+const ops=sb=>sb.calls.map(c=>c.table+':'+c.op);
+
+test('markDelivered writes its history line only after the database changed the row', async()=>{
+  for(const [k,expect,said] of [['ok',['entries:update','audit_log:insert'],null],
+    ['refused',['entries:update'],/^Not marked delivered — the database refused it: Crew/],
+    ['zero',['entries:update'],/^Not marked delivered — the entry wasn't changed/]]){
+    const sb=runWith(WRITE[k]);fakePage({});
+    await app.markDelivered(5);await app.__confirmed();   // the confirm dialog's OK
+    assert.deepEqual(ops(sb),expect,k);
+    assert.ok(sb.calls[0].returning,'the update asks for the row back');
+    if(said)assert.match(alerts[0]||'',said);else assert.equal(alerts.length,0);
+    if(k==='ok')assert.deepEqual({...sb.calls[1].payload},{entry_id:5,action:'UPDATE',field_changed:'status',old_value:'Scheduled',new_value:'Delivered',user_identifier:'Tester'});
+  }
+});
+
+test('doCancel writes its history line only after the database changed the row, and says why not', async()=>{
+  for(const [k,expect,said] of [['ok',['entries:update','audit_log:insert'],null],
+    ['refused',['entries:update'],/Not cancelled — the database refused it: Crew/],['zero',['entries:update'],/Not cancelled — the entry wasn&#39;t changed/]]){
+    const sb=runWith(WRITE[k]);const els=fakePage({cancelR:'  wrong pour  ',cancelErr:'',cancelBtn:'',cancelOv:''});
+    await app.doCancel(5);
+    assert.deepEqual(ops(sb),expect,k);
+    assert.equal(sb.calls[0].payload.status,'Cancelled');assert.equal(sb.calls[0].payload.cancel_reason,'wrong pour');
+    if(said)assert.match(els.cancelErr.innerHTML,said);else assert.equal(els.cancelErr.innerHTML,'');
+    assert.equal(els.cancelBtn.disabled,false,'the button is usable again');
+  }
+});
+
+test('deleteEntry writes its history line only after the database removed the row', async()=>{
+  for(const [k,expect,said] of [['ok',['entries:delete','audit_log:insert'],null],
+    ['refused',['entries:delete'],/^Not deleted — the database refused it/],['zero',['entries:delete'],/^Not deleted — the entry wasn't deleted/]]){
+    const sb=runWith(WRITE[k]);fakePage({detailOv:''});
+    await app.deleteEntry(5);await app.__confirmed();   // the confirm dialog's OK
+    assert.deepEqual(ops(sb),expect,k);assert.ok(sb.calls[0].returning);
+    if(said)assert.match(alerts[0]||'',said);else assert.equal(alerts.length,0);
+  }
+});
+
 // ── Static sweep: pins that no data string is ever written into handler code or a link again ──
 
 // Every on<event>="…" attribute value written in app.js, with the ${…} / '+…+' expressions inside it.

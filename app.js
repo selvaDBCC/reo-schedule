@@ -1579,23 +1579,39 @@ function uploadScheduleFile(id){
   inp.onchange=()=>{if(inp.files.length)openAttachModal(id,inp.files[0])};inp.click()}
 
 /* ═══ STATUS ACTIONS ═══ */
+// b5.14 — a change to an entry counts only when the database changed exactly that row. A refusal (a database rule, a
+// lost connection) comes back as an error; a row this login may not change, or one deleted meanwhile, comes back as
+// "no rows" — not an error. Returns null when it saved, otherwise words a person can act on. History lines are
+// written only after null (they used to be written even when the database had refused the change).
+async function writeEntry(id,patch){
+  try{
+    const{data,error}=await sb.from('entries').update(patch).eq('id',id).select('id');
+    if(error)return refusalWords(error);
+    if(!data||!data.length)return "the entry wasn't changed — it may have been deleted, or this login can't change it. Refresh and try again.";
+    return null}
+  catch(e){return refusalWords(e)}}
 async function markDelivered(id){const e=entries.find(x=>x.id===id);if(!e)return;
   confirmDialog('Mark Delivered?',`Mark "${esc(e.schedule||e.project)}" as delivered?`,'Mark Delivered','',async()=>{
-    await sb.from('entries').update({status:'Delivered',on_hold:false}).eq('id',id);
+    const no=await writeEntry(id,{status:'Delivered',on_hold:false});
+    if(no){alert('Not marked delivered — '+no);await loadEntries();renderDash();return}
     await auditLog({entry_id:id,action:'UPDATE',field_changed:'status',old_value:e.status,new_value:'Delivered'});
     await loadEntries();renderDash()})}
 
 function cancelEntry(id){const e=entries.find(x=>x.id===id);if(!e)return;
-  $('cancelModal').innerHTML=`<h3>Cancel Entry<button class="modal-close" onclick="closeOv('cancelOv')">&times;</button></h3><p style="font-size:13px;color:var(--mid);margin-bottom:14px">Cancel "${esc(e.schedule||e.project)}"?</p><div class="fg"><label>Reason <span class="req">*</span></label><textarea id="cancelR"></textarea></div><div id="cancelErr"></div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn btn-sec btn-sm" onclick="closeOv('cancelOv')">Keep</button><button class="btn btn-err btn-sm" onclick="doCancel(${id})">Cancel Entry</button></div>`;
+  $('cancelModal').innerHTML=`<h3>Cancel Entry<button class="modal-close" onclick="closeOv('cancelOv')">&times;</button></h3><p style="font-size:13px;color:var(--mid);margin-bottom:14px">Cancel "${esc(e.schedule||e.project)}"?</p><div class="fg"><label>Reason <span class="req">*</span></label><textarea id="cancelR"></textarea></div><div id="cancelErr"></div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn btn-sec btn-sm" onclick="closeOv('cancelOv')">Keep</button><button class="btn btn-err btn-sm" id="cancelBtn" onclick="doCancel(${id})">Cancel Entry</button></div>`;
   $('cancelOv').classList.add('show')}
 async function doCancel(id){const r=$('cancelR').value.trim();if(!r)return $('cancelErr').innerHTML='<div class="error-msg">Reason required</div>';
   const e=entries.find(x=>x.id===id);
+  if(!e){$('cancelErr').innerHTML='<div class="error-msg">This entry is no longer in the list — it may have been deleted. Close this and refresh.</div>';return}
   // Record the cancellation reason as a comment chunk in the actor's own column (DBCC vs Supplier),
   // attributed to whoever cancelled it — so the reason shows on the dashboard, not just the audit log.
   const col=isSupplier()?'aus_reo_comment':'dbcc_comment';
   const chunks=parseChunks(e[col]);
   chunks.push({text:'Cancelled: '+r,authors:[userName],created_at:new Date().toISOString()});
-  await sb.from('entries').update({status:'Cancelled',cancel_reason:r,on_hold:false,[col]:chunksToJson(chunks)}).eq('id',id);
+  const btn=$('cancelBtn');if(btn)btn.disabled=true;
+  const no=await writeEntry(id,{status:'Cancelled',cancel_reason:r,on_hold:false,[col]:chunksToJson(chunks)});
+  if(btn)btn.disabled=false;
+  if(no){$('cancelErr').innerHTML='<div class="error-msg">Not cancelled — '+esc(no)+'</div>';return}
   await auditLog({entry_id:id,action:'CANCEL',field_changed:'status',old_value:e.status,new_value:'Cancelled: '+r});closeOv('cancelOv');await loadEntries();renderDash()}
 
 function reinstateEntry(id){const e=entries.find(x=>x.id===id);if(!e)return;
@@ -1945,7 +1961,13 @@ async function deleteEntry(id){
   if(!adminUnlocked)return;
   confirmDialog('Delete Permanently?','This cannot be undone. Delete this entry?','Delete','btn-err',async()=>{
     const e=entries.find(x=>x.id===id);
-    await sb.from('entries').delete().eq('id',id);
+    // b5.14: the history line only after the database really removed the row (see writeEntry).
+    let no=null;
+    try{const{data,error}=await sb.from('entries').delete().eq('id',id).select('id');
+      if(error)no=refusalWords(error);
+      else if(!data||!data.length)no="the entry wasn't deleted — it may already be gone, or this login can't delete it. Refresh and try again."}
+    catch(err){no=refusalWords(err)}
+    if(no){alert('Not deleted — '+no);await loadEntries();renderDash();return}
     if(e)await auditLog({entry_id:id,action:'DELETE',old_value:`${e.project}/${e.schedule||'LOOSE'}`});
     closeOv('detailOv');await loadEntries();renderDash()})}
 
