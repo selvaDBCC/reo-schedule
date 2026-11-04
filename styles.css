@@ -320,7 +320,7 @@ body.role-supplier .dbcc-only{display:none!important}
 .cc-badge.off{background:#F1F0ED;color:var(--muted)}
 .cc-warn{margin:0 14px 10px}
 .cc-scroll{overflow-x:auto;padding:0 10px 10px}
-.cc-table{width:100%;border-collapse:collapse;font-size:12px;background:#fff;border:1px solid var(--border);border-radius:8px}
+.cc-table{width:100%;min-width:760px;border-collapse:collapse;font-size:12px;background:#fff;border:1px solid var(--border);border-radius:8px}   /* not the dashboard's 1400px */
 .cc-table th{cursor:default;font-size:9.5px;padding:8px}
 .cc-table td{padding:8px;border-top:1px solid #f0eeea;vertical-align:top}
 .cc-table tr.cc-done td{opacity:.6}

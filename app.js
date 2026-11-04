@@ -3394,7 +3394,8 @@ function ccSetDateMode(mode){const cc=cellCard;if(!cc||(mode!=='all'&&mode!=='ea
 function ccSetAllDate(v){const cc=cellCard;if(!cc)return;cc.allDate=v;document.querySelectorAll('#ccOrder .cc-alldate').forEach(x=>{x.textContent=v?fmtDate(v):'no date'});ccRefreshSend()}
 function ccTickFile(id,on){const cc=cellCard;if(!cc)return;if(on)cc.files.add(id);else cc.files.delete(id);ccRefreshSend()}
 function ccTickedFiles(){const cc=cellCard;if(!cc)return[];return projectFiles.filter(f=>cc.files.has(f.id)&&f.project_name===cc.project).map(f=>({id:f.id,label:f.label,url:f.file_url}))}
-function ccNoteFailure(what,words){const cc=cellCard;if(!cc)return;cc.failed.push({what,words});ccRefreshSend()}
+function ccNoteFailure(what,words){const cc=cellCard;if(!cc)return;ccAddFailure(cc,what,words);ccRefreshSend()}
+function ccAddFailure(cc,what,words){if(!cc.failed.some(f=>f.what===what&&f.words===words))cc.failed.push({what,words})}   // a retry that fails the same way is listed once
 // The rows the Order section will insert (pure): per green cell, one row per placeholder — the b5.13 grid's rule for
 // split labels (one placeholder: its label or none; several: their labels, else Part 1, Part 2 …) and the date mode.
 // A cell that is no longer an active pair is refused, never moved somewhere else.
@@ -3422,7 +3423,7 @@ function ccLogCancel(log,e,reason){
   const i=log.created.findIndex(r=>r.id===e.id);if(i>=0){log.created.splice(i,1);return}
   log.dates=log.dates.filter(r=>r.id!==e.id);
   log.cancels.push({id:e.id,level:e.level,area:e.area,split:e.split_reference||null,schedule:e.schedule||null,reason})}
-function ccAfterCancel(e,reason){const cc=cellCard;if(!cc||e.project!==cc.project)return;ccLogCancel(cc.log,e,reason)}
+function ccAfterCancel(e,reason){const cc=cellCard;if(!cc||e.project!==cc.project)return;ccLogCancel(cc.log,e,reason);delete cc.notes[e.id];delete cc.dateDraft[e.id]}   // a date note before it no longer holds
 // The email's lines (pure) — the same lines the card shows under "Saved in this card".
 function cellCardLines(log){
   const sch=r=>r.schedule?' · '+r.schedule:'';
@@ -3458,7 +3459,7 @@ async function ccSaveDate(id){
   const no=await writeEntry(id,patch,{our_delivery_date:e.our_delivery_date??null,status:e.status??null});
   if(no){
     cc.notes[id]=`<span class="cc-err">Not saved — ${esc(no)}</span>`;
-    cc.failed.push({what:`DBCC requested date for ${ccLoc({level:e.level,area:e.area,split:e.split_reference})}${e.schedule?' · '+e.schedule:''}`,words:no});
+    ccAddFailure(cc,`DBCC requested date for ${ccLoc({level:e.level,area:e.area,split:e.split_reference})}${e.schedule?' · '+e.schedule:''}`,no);
     await loadEntries();renderDash();ccRefresh();return}
   await auditLog({entry_id:id,action:'UPDATE',field_changed:'our_delivery_date',old_value:old,new_value:v});
   if(patch.status)await auditLog({entry_id:id,action:'UPDATE',field_changed:'status',old_value:e.status,new_value:patch.status});
@@ -3487,7 +3488,7 @@ async function ccCreateAndEmail(){
   for(const f of plan.refused)delete cc.orders[f.key];
   if(made.length)await auditLog({action:'BULK_CREATE',new_value:`${made.length} placeholders for ${cc.project}`});
   for(const r of made)cc.log.created.push({id:r.id,level:r.level,area:r.area,split:r.split_reference||null,date:r.our_delivery_date||null});
-  for(const f of failed)cc.failed.push({what:`${f.n} new placeholder${f.n===1?'':'s'} at ${f.level} / ${f.area}`,words:f.words});
+  for(const f of failed)ccAddFailure(cc,`${f.n} new placeholder${f.n===1?'':'s'} at ${f.level} / ${f.area}`,f.words);
   const ticked=ccTickedFiles(),unsafe=ticked.filter(f=>!safeUrl(f.url)).length;
   const mail=cellCardEmail({project:cc.project,supplier:cc.supplier,log:cc.log,files:ticked,sender:userName});
   const undated=made.filter(r=>!r.our_delivery_date).length,said=[];

@@ -577,6 +577,10 @@ test('Create + email: one insert per cell; a refused cell is left out and listed
   assert.match(h,/Not saved — left out of the email:<\/b><ul><li>1 new placeholder at GRD-L1 \/ COLUMNS — the database refused it: GRD-L1 \/ COLUMNS isn&#39;t a level\/area on this job — refresh, or send it as Ad hoc\.<\/li>/);
   assert.match(h,/Created 2 placeholders\. One cell was not saved — left out of the email \(listed above\)\./);
   assert.deepEqual(Object.keys(plain(r('cellCard.orders'))).map(k=>JSON.parse(k).join(' / ')),['GRD-L1 / COLUMNS'],'the refused cell keeps its placeholder to try again');
+  // trying again fails the same way: listed once, the cell's placeholder still waiting
+  r('__mail.length=0');await a.ccCreateAndEmail();
+  assert.equal(r('cellCard.failed.length'),1,'the same refusal is listed once');
+  assert.equal(r('__mail.length'),1,'the saved items still make their one email');
   // the email dialog says it was opened → what it carried is done
   r('__mail[0].opts.onSent()');
   assert.deepEqual(plain(r('cellCard.log')),{created:[],dates:[],cancels:[]});
@@ -612,11 +616,14 @@ test('only undated placeholders: created, said, and no email', async()=>{
 test('a cancel from the card lands in its email; a refused cancel is listed as not saved', async()=>{
   const{a,r,els}=cardApp({answer:q=>q.table==='entries'?{data:[{id:22}],error:null}:{data:null,error:null}});
   a.openCellCard([{level:'GRD',area:'SLAB'}]);
+  r("cellCard.notes[22]='<span class=\"cc-ok\">Saved — it goes in the email.</span>';cellCard.dateDraft[22]='2026-12-01'");   // a date saved earlier
   a.cancelEntry(22,true);
   assert.match(els.cancelModal.innerHTML,/onclick="doCancel\(22,true\)"/);
   a.document.getElementById('cancelR').value='not needed';
   await a.doCancel(22,true);
   assert.deepEqual(plain(r('cellCard.log.cancels')).map(c=>[c.id,c.reason]),[[22,'not needed']]);
+  assert.equal(r('cellCard.notes[22]'),undefined,'the earlier "goes in the email" note no longer holds once it is cancelled');
+  assert.equal(r('cellCard.dateDraft[22]'),undefined);
   const t=cardApp({answer:q=>q.table==='entries'?{data:null,error:{message:'new row violates row-level security policy'}}:{data:null,error:null}});
   t.a.openCellCard([{level:'GRD',area:'SLAB'}]);t.a.cancelEntry(22,true);t.a.document.getElementById('cancelR').value='x';
   await t.a.doCancel(22,true);
