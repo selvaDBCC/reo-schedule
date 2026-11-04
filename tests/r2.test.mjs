@@ -388,7 +388,7 @@ const CARD_ENTRIES=[
   E(23,'L1','WALLS',{schedule:'UT2X',status:'Ordered',our_delivery_date:'2026-11-10'}),
 ];
 // A fresh app copy with a page whose elements are made as they are asked for; emailModal and loadEntries recorded.
-function cardApp({role='dbcc',answer}={}){
+function cardApp({role='dbcc',answer,realEmail=false}={}){
   const a=loadApp(),r=src=>vm.runInContext(src,a);
   a.__p={pairs:PAIRS,projects:PROJECTS,entries:CARD_ENTRIES,role};
   r(`pairsLive=true;authRole=__p.role;userName='Chris';adminUnlocked=true;
@@ -396,7 +396,7 @@ function cardApp({role='dbcc',answer}={}){
      projectFiles=[{id:31,project_name:'Barwon Reservoir',scope:'level_area',level:'GRD',area:'SLAB',label:'GRD slab marking plan',file_url:${JSON.stringify(FILE_URL)},superseded:false,category:'marking_plan'},
                    {id:32,project_name:'Barwon Reservoir',scope:'project',level:null,area:null,label:'Sequence "A"',file_url:'javascript:alert(1)',superseded:false,category:'other'}];
      emailContacts=[{id:1,label:'Aus Reo scheduler',email:'sched@ausreo.example',supplier:'Aus Reo'}];projectSchedulers=[{project_name:'Barwon Reservoir',contact_id:1}];
-     __mail=[];emailModal=(subject,body,id,ctx,pn,opts)=>__mail.push({subject,body,id,ctx,pn,opts});
+     __mail=[];${realEmail?'':'emailModal=(subject,body,id,ctx,pn,opts)=>__mail.push({subject,body,id,ctx,pn,opts});'}
      __loads=0;loadEntries=async()=>{__loads++};renderDash=()=>{};confirmDialog=(t,m,ok,c,fn)=>{__confirm={t,m,fn}};`);
   const els={};
   a.document.getElementById=id=>els[id]||(els[id]={id,value:'',innerHTML:'',textContent:'',disabled:false,style:{},scrollTop:0,
@@ -1046,4 +1046,80 @@ test('placeholders whose answer is lost while offline: the cell waits, read-only
   assert.deepEqual(plain(r('cellCard.lost')),{});assert.deepEqual(plain(r('cellCard.orders')),{});
   assert.match(els.cellCardModal.innerHTML,/Created 2 placeholders\. GRD \/ COLUMNS: the earlier press had already made its placeholder \(its answer was lost on the way back\), so it was not made again\./);
   assert.equal(sb.calls.filter(c=>c.table==='audit_log'&&c.payload.action==='BULK_CREATE').length,1);
+});
+
+// ── Fix round: an email too long for a mailto: link (Chrome / Edge on Windows drop one over ~2,000 characters, silently) ──
+const EMAIL_SENT=sb=>sb.calls.filter(c=>c.table==='audit_log'&&c.payload.action==='EMAIL_SENT');
+// The card's one email for 40 new orders ("Select all green" on a big job), opened in the real email dialog.
+async function longCardEmail(t){
+  t.a.openCellCard([{level:'GRD',area:'SLAB'}]);
+  t.r(`cellCard.log.created=Array.from({length:40},(_,i)=>({id:1000+i,level:i%2?'GRD':'L1 (S051)',area:i%2?'SLAB':'SUSPENDED FLOOR',split:'Part '+(i+1),date:'2026-11-'+(10+i%18)}))`);
+  await t.a.ccCreateAndEmail();   // nothing to create: it opens the email dialog with everything saved in the card
+  const mail=plain(t.r('cellCardEmail({project:cellCard.project,supplier:cellCard.supplier,log:cellCard.log,files:[],sender:userName})'));
+  const g=id=>t.a.document.getElementById(id);   // what the dialog's boxes hold (the page's own inputs)
+  g('em_to').value='sched@ausreo.example';g('em_sub').value=mail.subject;g('em_body').value=mail.body;
+  return mail}
+
+test('an email too long to open from the browser: not opened, not recorded, the card keeps it — copied across, "I\'ve sent it" records it', async()=>{
+  const t=cardApp({realEmail:true}),{a,r,els,sb}=t;
+  const opened=[],clip=[];a.open=u=>{opened.push(u)};a.navigator={clipboard:{writeText:async s=>{clip.push(s)}}};
+  const mail=await longCardEmail(t);
+  assert.equal(mail.subject,'REO orders — Barwon Reservoir (40 new)');
+  const full=`mailto:${encodeURIComponent('sched@ausreo.example')}?subject=${encodeURIComponent(mail.subject)}&body=${encodeURIComponent(mail.body)}`;
+  assert.ok(full.length+2>2048,`${full.length} characters: more than Chrome hands to the email app on Windows`);
+  assert.ok(r('MAILTO_MAX')+2<2048,'the limit leaves room under it');
+  await a.sendEmail(null,'cell_card');
+  assert.deepEqual(opened,[],'never handed to the browser');
+  assert.equal(EMAIL_SENT(sb).length,0,'not recorded as sent');
+  assert.equal(r('cellCard.log.created.length'),40,'the card keeps every line');
+  assert.equal(typeof r('emailAfterSend'),'function','the card is not told yet');
+  assert.equal(els.emForm.style.display,'none','the dialog shows the copy view instead');
+  const h=els.emLong.innerHTML;
+  assert.match(h,new RegExp(`This email is too long for the browser to hand to your email app \\(${full.length.toLocaleString('en-AU').replace(',','\\,')} characters — about 2,000 is the most it passes on\\), so it has <b>not</b> been opened and is not recorded as sent\\.`));
+  assert.match(h,/<input type="text" id="emL_to" value="sched@ausreo\.example" readonly>/);
+  assert.match(h,/<input type="text" id="emL_sub" value="REO orders — Barwon Reservoir \(40 new\)" readonly>/);
+  assert.ok(h.includes(`<textarea id="emL_body" rows="12" readonly style="font-size:13px">${a.esc(mail.body)}</textarea>`),'the whole message, to copy');
+  assert.match(h,/onclick="emailOpenShort\(\)">Open a new email<\/button>/);
+  // Copy the message: the clipboard holds all of it
+  await a.emailCopy('emL_body');
+  assert.deepEqual(clip,[mail.body]);assert.match(els.emL_msg.innerHTML,/The message is copied — paste it into your email\./);
+  await a.emailCopy('emL_sub');assert.equal(clip[1],mail.subject);
+  // Open a new email: To and Subject only — short enough to open
+  a.emailOpenShort();
+  assert.deepEqual(opened,['mailto:sched%40ausreo.example?subject='+encodeURIComponent(mail.subject)]);
+  assert.equal(EMAIL_SENT(sb).length,0,'opening the empty one records nothing');
+  // I've sent it: recorded once, the dialog closes, and only now does the card clear its list
+  await a.emailLongSent();
+  assert.deepEqual(EMAIL_SENT(sb).map(c=>[c.payload.field_changed,c.payload.new_value]),
+    [['cell_card','To: sched@ausreo.example — REO orders — Barwon Reservoir (40 new) · copied across by hand (too long to open from the browser)']]);
+  assert.ok(!els.emailOv.classList.contains('show'));
+  assert.deepEqual(plain(r('cellCard.log')),{created:[],dates:[],cancels:[]});
+  assert.match(els.cellCardModal.innerHTML,/The email \(40 items\) is recorded as sent — you copied it across by hand\./);
+  assert.equal(r('emailAfterSend'),null);assert.equal(r('emailHeld'),null);
+  await a.emailLongSent();assert.equal(EMAIL_SENT(sb).length,1,'pressed twice: recorded once');
+});
+
+test('the long email: Back returns to the dialog as typed and keeps the card\'s list; shortened, it opens at once as before', async()=>{
+  const t=cardApp({realEmail:true}),{a,r,els,sb}=t;
+  const opened=[];a.open=u=>{opened.push(u)};
+  await longCardEmail(t);
+  await a.sendEmail(null,'cell_card');
+  a.emailLongBack();
+  assert.equal(els.emForm.style.display,'');assert.equal(els.emLong.innerHTML,'');assert.equal(r('emailHeld'),null);
+  await a.emailLongSent();assert.equal(EMAIL_SENT(sb).length,0,'nothing held: nothing recorded');
+  assert.equal(r('cellCard.log.created.length'),40,'still all there to send');
+  // a clipboard that refuses: words to copy it by hand
+  await a.sendEmail(null,'cell_card');
+  a.navigator={clipboard:{writeText:async()=>{throw new Error('denied')}}};a.document.execCommand=()=>false;
+  await a.emailCopy('emL_body');
+  assert.match(els.emL_msg.innerHTML,/The browser wouldn't copy it\. Select it above and press Ctrl\+C \(⌘C on a Mac\), then paste it into your email\./);
+  a.emailLongBack();
+  // shortened to fit: opened straight away, recorded once, the card told — exactly as before b5.14's check
+  a.document.getElementById('em_body').value='Hi, 40 new orders on Barwon Reservoir — the list is in the REO app.';
+  await a.sendEmail(null,'cell_card');
+  assert.equal(opened.length,1);
+  assert.match(opened[0],/^mailto:sched%40ausreo\.example\?subject=REO%20orders%20%E2%80%94%20Barwon%20Reservoir%20\(40%20new\)&body=Hi%2C%2040%20new%20orders/);
+  assert.deepEqual(EMAIL_SENT(sb).map(c=>c.payload.new_value),['To: sched@ausreo.example — REO orders — Barwon Reservoir (40 new)']);
+  assert.match(els.cellCardModal.innerHTML,/The email \(40 items\) is open in your email app — check it there and press Send\./);
+  assert.deepEqual(plain(r('cellCard.log')),{created:[],dates:[],cancels:[]});
 });

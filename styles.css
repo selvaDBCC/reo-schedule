@@ -428,6 +428,12 @@ body.role-supplier .dbcc-only{display:none!important}
 .sv-list-new{margin-bottom:14px;padding-bottom:14px;border-bottom:1px dashed #c5d8f8}
 .sv-card.is-new{border-color:#9db8f2;box-shadow:0 0 0 2px var(--info-lt),var(--shadow)}
 .pill-new{background:var(--info-lt);color:var(--info);flex-shrink:0}
+/* b5.14: an email too long for a mailto: link — shown in the email dialog to copy across by hand */
+.em-long-why{margin-top:0}
+.em-steps{font-size:13px;color:var(--gray-dk);margin:12px 0 14px 20px;line-height:1.6}
+.em-copy{display:flex;gap:6px;align-items:center}
+.em-copy input{flex:1;min-width:0}
+.em-actions{display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;margin-top:14px}
 @media(max-width:680px){
   .sv-list{grid-template-columns:1fr}
   .page{padding:12px 14px}.card{padding:20px}.row2{grid-template-columns:1fr}

@@ -2181,8 +2181,16 @@ async function deleteEntry(id){
 // b5.14 — opts (the cell card only; every other caller passes none and nothing changes): files = the reference files to
 // offer (the card puts the ticked ones in the body itself, so it passes []), onSent = told once "Open in Email" opened it.
 let emailAfterSend=null;
+// b5.14: Chrome and Edge on Windows drop a mailto: link much over 2,000 characters without a word — the email app never
+// opens, and nothing says so. Above MAILTO_MAX the dialog doesn't open it and doesn't record it as sent: it shows the
+// email to copy across (emailHeld) and records it — and tells the cell card — only when the person says it was sent.
+const MAILTO_MAX=1900;
+let emailHeld=null;
+function mailtoUrl(to,sub,body,cc){let u=`mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(sub)}`;if(body!=null)u+=`&body=${encodeURIComponent(body)}`;if(cc)u+=`&cc=${encodeURIComponent(cc)}`;return u}
+function emailAuditNote(to,cc,sub,nFiles){return 'To: '+to+(cc?' · CC: '+cc:'')+' — '+sub+(nFiles?` · ${nFiles} ref doc${nFiles===1?'':'s'} attached`:'')}
 function emailModal(subject,body,entryId,auditContext,projectName,opts){
   emailAfterSend=opts&&typeof opts.onSent==='function'?opts.onSent:null;
+  emailHeld=null;
   // Resolve the project so the To field can default to that project's scheduler(s).
   let pname=projectName;
   if(!pname&&entryId){const e=entries.find(x=>x.id===entryId);if(e)pname=e.project;}
@@ -2227,13 +2235,15 @@ function emailModal(subject,body,entryId,auditContext,projectName,opts){
       </div></div>`;
   }
   $('emailModal').innerHTML=`<h3>Send Email<button class="modal-close" onclick="closeOv('emailOv')">&times;</button></h3>
+<div id="emForm">
 <div class="fg"><label>To</label><input type="email" id="em_to" value="${esc(toVal)}" placeholder="orders@ausreo.com.au"></div>
 <div class="fg"><label>CC <span style="font-weight:400;color:var(--muted);font-size:11px">(tick to include, or add custom below)</span></label>${ccCheckboxes}<input type="text" id="em_cc_extra" placeholder="Add another email (optional)" style="margin-top:6px"></div>
 <div class="fg"><label>Subject</label><input type="text" id="em_sub" value="${esc(subject)}"></div>
 ${filesHtml}
 <div class="fg"><label>Message</label><textarea id="em_body" rows="12" style="font-size:13px">${esc(body)}</textarea></div>
 <p style="font-size:11px;color:var(--muted);margin-top:4px">Clicking Send will open your default email app (Outlook, Gmail, etc.) with the message pre-filled. Review and hit Send in your email app.</p>
-<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn btn-sec btn-sm" onclick="closeOv('emailOv')">Cancel</button><button class="btn btn-purple btn-sm" onclick="sendEmail(${jsArg(entryId==null?null:entryId)},${jsArg(auditContext)})" style="width:auto">✉ Open in Email</button></div>`;$('emailOv').classList.add('show')}
+<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn btn-sec btn-sm" onclick="closeOv('emailOv')">Cancel</button><button class="btn btn-purple btn-sm" onclick="sendEmail(${jsArg(entryId==null?null:entryId)},${jsArg(auditContext)})" style="width:auto">✉ Open in Email</button></div>
+</div><div id="emLong"></div>`;$('emailOv').classList.add('show')}
 
 function openMismatchEmail(id){const e=entries.find(x=>x.id===id);if(!e)return;
   const subject=`Date Mismatch — ${e.project} / ${e.level||''} / ${e.area||''}`;
@@ -2296,19 +2306,51 @@ async function sendEmail(id,context){
   if(files.length){
     body+='\n\n─── Reference documents ───\n'+files.map(f=>`• ${f.label}: ${f.url}`).join('\n');
   }
+  const url=mailtoUrl(to,sub,body,cc);
+  // b5.14: too long for the browser to hand over — show it to copy across; nothing is opened or recorded yet.
+  if(url.length>MAILTO_MAX){emailHold({id,context,to,cc,sub,body,nFiles:files.length,len:url.length});return}
   // IMPORTANT: log the audit entry BEFORE opening the mailto URL.
   // Some browsers (mobile especially) suspend or unfocus the page when mailto: triggers
   // the OS email handler, which can drop the audit log insert if it runs after.
   // Doing the insert first guarantees the notification timeline gets the entry.
-  const auditNote='To: '+to+(cc?' · CC: '+cc:'')+' — '+sub+(files.length?` · ${files.length} ref doc${files.length===1?'':'s'} attached`:'');
-  try{await auditLog({entry_id:id,action:'EMAIL_SENT',field_changed:context,new_value:auditNote})}
+  try{await auditLog({entry_id:id,action:'EMAIL_SENT',field_changed:context,new_value:emailAuditNote(to,cc,sub,files.length)})}
   catch(e){console.warn('[REO] email audit log failed:',e.message)}
-  let url=`mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(sub)}&body=${encodeURIComponent(body)}`;
-  if(cc)url+=`&cc=${encodeURIComponent(cc)}`;
   window.open(url,'_blank');
   closeOv('emailOv');
   const after=emailAfterSend;emailAfterSend=null;   // b5.14: the cell card hears that its one email was opened
-  if(after)try{after()}catch(e){console.warn('[REO] after-email step failed:',e&&e.message)}}
+  if(after)try{after('opened')}catch(e){console.warn('[REO] after-email step failed:',e&&e.message)}}
+// The email to copy across by hand (too long for a mailto: link): To, CC, Subject and the message, each with Copy;
+// "Open a new email" opens one with To / CC / Subject only when that much still fits. Back returns to the dialog as it
+// was typed; "I've sent it" records it (EMAIL_SENT) and tells the cell card — the only way this email counts as sent.
+function emailHold(h){
+  const form=$('emForm'),box=$('emLong');if(!box)return;
+  emailHeld=h;if(form)form.style.display='none';
+  const canOpen=mailtoUrl(h.to,h.sub,null,h.cc).length<=MAILTO_MAX;
+  box.innerHTML=`<div class="warn-msg em-long-why">This email is too long for the browser to hand to your email app (${h.len.toLocaleString('en-AU')} characters — about 2,000 is the most it passes on), so it has <b>not</b> been opened and is not recorded as sent. Copy it across instead:</div>
+<ol class="em-steps"><li>Press <b>Copy the message</b>.</li><li>${canOpen?'Press <b>Open a new email</b> — To, CC and Subject are filled in — and paste the message in.':'Start a new email, copy the To and Subject across from here, and paste the message in.'}</li><li>Send it, then press <b>I've sent it</b> here.</li></ol>
+<div class="fg"><label>To</label><div class="em-copy"><input type="text" id="emL_to" value="${esc(h.to)}" readonly><button class="btn btn-sec btn-sm" onclick="emailCopy('emL_to')">Copy</button></div></div>
+${h.cc?`<div class="fg"><label>CC</label><div class="em-copy"><input type="text" id="emL_cc" value="${esc(h.cc)}" readonly><button class="btn btn-sec btn-sm" onclick="emailCopy('emL_cc')">Copy</button></div></div>`:''}
+<div class="fg"><label>Subject</label><div class="em-copy"><input type="text" id="emL_sub" value="${esc(h.sub)}" readonly><button class="btn btn-sec btn-sm" onclick="emailCopy('emL_sub')">Copy</button></div></div>
+<div class="fg"><label>Message</label><textarea id="emL_body" rows="12" readonly style="font-size:13px">${esc(h.body)}</textarea></div>
+<div id="emL_msg"></div>
+<div class="em-actions"><button class="btn btn-sec btn-sm" onclick="emailLongBack()">Back</button><button class="btn btn-sec btn-sm" onclick="emailCopy('emL_body')">Copy the message</button>${canOpen?'<button class="btn btn-sec btn-sm" onclick="emailOpenShort()">Open a new email</button>':''}<button class="btn btn-purple btn-sm" onclick="emailLongSent()">I've sent it</button></div>`}
+const EMAIL_COPY_WHAT={emL_to:['to','The To address'],emL_cc:['cc','The CC addresses'],emL_sub:['sub','The subject'],emL_body:['body','The message']};
+async function emailCopy(id){
+  const h=emailHeld,w=EMAIL_COPY_WHAT[id],say=$('emL_msg');if(!h||!w)return;
+  let ok=false;
+  try{await navigator.clipboard.writeText(h[w[0]]||'');ok=true}catch(_){ok=false}
+  if(!ok)try{const el=$(id);el.focus();el.select();ok=!!document.execCommand('copy')}catch(_){ok=false}   // older browsers
+  if(say)say.innerHTML=ok?`<div class="success-msg">${w[1]} is copied — paste it into your email.</div>`
+    :`<div class="warn-msg">The browser wouldn't copy it. Select it above and press Ctrl+C (⌘C on a Mac), then paste it into your email.</div>`}
+function emailOpenShort(){const h=emailHeld;if(h)window.open(mailtoUrl(h.to,h.sub,null,h.cc),'_blank')}
+function emailLongBack(){emailHeld=null;const form=$('emForm'),box=$('emLong');if(box)box.innerHTML='';if(form)form.style.display=''}
+async function emailLongSent(){
+  const h=emailHeld;if(!h)return;emailHeld=null;
+  try{await auditLog({entry_id:h.id,action:'EMAIL_SENT',field_changed:h.context,new_value:emailAuditNote(h.to,h.cc,h.sub,h.nFiles)+' · copied across by hand (too long to open from the browser)'})}
+  catch(e){console.warn('[REO] email audit log failed:',e.message)}
+  closeOv('emailOv');
+  const after=emailAfterSend;emailAfterSend=null;
+  if(after)try{after('copied')}catch(e){console.warn('[REO] after-email step failed:',e&&e.message)}}
 
 /* ═══ EXPORT ═══ */
 function exportCSV(){const d=getFiltered();if(!d.length)return alert('No data');
@@ -3630,12 +3672,15 @@ async function ccCreateRun(cc,proj){
   cc.msg=said.length?`<div class="${failed.length?'warn-msg':'info-msg'}">${esc(said.join(' '))}</div>`:'';
   await ccReload();
   return mail}
-// "Open in Email" pressed: what it carried is done. A placeholder made here with no date stays listed — when it gets a
-// date in this card it goes in the next email as a new order.
-function ccAfterEmail(){const cc=cellCard;if(!cc)return;
+// "Open in Email" pressed (how = 'opened'), or — for an email too long to open from the browser — "I've sent it" after
+// copying it across (how = 'copied'): what it carried is done. Until then the card keeps every line, so a dropped or
+// unsent email can always be sent again. A placeholder made here with no date stays listed — when it gets a date in
+// this card it goes in the next email as a new order.
+function ccAfterEmail(how){const cc=cellCard;if(!cc)return;
   const L=cellCardLines(cc.log),n=L.created.length+L.dates.length+L.cancels.length;
   cc.log={created:cc.log.created.filter(r=>!r.date),dates:[],cancels:[]};cc.files=new Set();
-  cc.msg=`<div class="success-msg">The email (${n} item${n===1?'':'s'}) is open in your email app — check it there and press Send.</div>`;ccRefresh()}
+  cc.msg=how==='copied'?`<div class="success-msg">The email (${n} item${n===1?'':'s'}) is recorded as sent — you copied it across by hand.</div>`
+    :`<div class="success-msg">The email (${n} item${n===1?'':'s'}) is open in your email app — check it there and press Send.</div>`;ccRefresh()}
 function ccClose(){
   const cc=cellCard;if(!cc){closeOv('cellCardOv');return}
   if(ccSaving(cc)){cc.msg=CC_STILL_SAVING;ccRefreshSend();return}   // closing mid-save would lose what it is about to tell
