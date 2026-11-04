@@ -2014,10 +2014,12 @@ function editPatch(cur,form0,form1,supplier){
   if((changed.includes('our_delivery_date')||changed.includes('supplier_delivery_date'))&&next.our_delivery_date&&next.supplier_delivery_date&&next.our_delivery_date!==next.supplier_delivery_date)patch.mismatch_resolved=false;
   return{changed,patch}}
 function sameDbValue(a,b){return(a==null&&b==null)||(a!=null&&b!=null&&String(a)===String(b))}
-// Words a person can act on for a refused or failed database call.
+// Words a person can act on for a refused or failed database call. NET_WORDS = the connection failed: the request may
+// still have reached the database (an answer lost on the way back), so the cell card looks before it says "not saved".
+const NET_WORDS="couldn't reach the database — check the connection and try again.";
 function refusalWords(e){
   const m=String((e&&e.message)||e||'').trim();
-  if(!m||/failed to fetch|networkerror|network request failed|load failed/i.test(m))return "couldn't reach the database — check the connection and try again.";
+  if(!m||/failed to fetch|networkerror|network request failed|load failed/i.test(m))return NET_WORDS;
   return 'the database refused it: '+m}
 function showEditConflict(id,fields){
   const what=fields.length?' — changed meanwhile: '+fields.map(f=>EDIT_FIELD_NAMES[f]||f).join(', '):'';
@@ -3299,7 +3301,8 @@ function openCellCard(cells){
   const orders={};for(const x of list)if(x.state==='active'&&!x.count)orders[x.key]=[{label:'',date:''}];   // an empty green cell: one placeholder ready
   cellCard={project:proj.name,supplier:proj.supplier||'Aus Reo',cells:list.map(x=>({level:x.level,area:x.area,key:x.key})),orders,dateMode:'all',allDate:'',
     log:{created:[],dates:[],cancels:[]},failed:[],files:new Set(),dateDraft:{},dateBase:{},notes:{},open:new Set(list.length<=4?list.map(x=>x.key):[]),msg:'',stale:false,
-    busy:false,saving:new Set()};   // busy: "Create + email" is running; saving: the entries whose date is being saved
+    busy:false,saving:new Set(),   // busy: "Create + email" is running; saving: the entries whose date is being saved
+    lost:{}};   // saves whose answer never came back ('date:'+id / 'cell:'+key): the next press looks before it writes
   renderCellCard();$('cellCardOv').classList.add('show')}
 function ccModel(){const cc=cellCard,proj=cc&&cc.project?projects.find(p=>p.name===cc.project):null;return proj?dpModel(proj):null}
 function ccLoc(r){return `${r.level||'—'} / ${r.area||'—'}${r.split?' ('+r.split+')':''}`}
@@ -3339,8 +3342,9 @@ function ccEntryRowHtml(e,state){
   let mp=[];try{mp=e.markup_plans?JSON.parse(e.markup_plans)||[]:[]}catch(_){mp=[]}
   const own=e.our_delivery_date||'',draft=Object.prototype.hasOwnProperty.call(cc.dateDraft,e.id)?cc.dateDraft[e.id]:own;
   const canDate=!done&&e.status!=='Delivered',saving=cc.saving.has(e.id);   // saving: read-only, "Saving…", whatever redraws the card
+  const lost=!!cc.lost['date:'+e.id];   // an answer that never came back: Save stays pressable to settle it, even with the date shown
   const sched=`<span class="cc-sched">${e.schedule?esc(e.schedule):'—'}</span>${e.split_reference?` <span class="cc-split">(${esc(e.split_reference)})</span>`:''}`;
-  const date=canDate?`<div class="cc-daterow"><input type="date" class="cc-date" id="ccDate_${e.id}" value="${esc(draft)}" oninput="ccDateDraft(${e.id},this.value)"${saving?' readonly':''}><button class="action-btn cc-save" id="ccDateBtn_${e.id}" onclick="ccSaveDate(${e.id})"${saving||draft===own?' disabled':''}>${saving?'Saving…':'Save date'}</button></div>`:`<span>${fmtDate(own)||'—'}</span>`;
+  const date=canDate?`<div class="cc-daterow"><input type="date" class="cc-date" id="ccDate_${e.id}" value="${esc(draft)}" oninput="ccDateDraft(${e.id},this.value)"${saving?' readonly':''}><button class="action-btn cc-save" id="ccDateBtn_${e.id}" onclick="ccSaveDate(${e.id})"${saving||(draft===own&&!lost)?' disabled':''}>${saving?'Saving…':'Save date'}</button></div>`:`<span>${fmtDate(own)||'—'}</span>`;
   const note=cc.notes[e.id]?`<div class="cc-msg">${cc.notes[e.id]}</div>`:'';
   const prod=`${fmtDate(e.supplier_delivery_date)||'—'}${mm?' <span class="mismatch-icon" title="The two dates differ — handled on the Dashboard">⚠️</span>':''}`;
   const sfile=e.file_url?`<a class="att-link" ${fileLinkAttrs(e.file_url)}>📄 ${esc((e.file_name||'Schedule').slice(0,18))}</a>`:(done?'':`<button class="action-btn" onclick="uploadScheduleFile(${e.id})" title="Attach the schedule">+ Schedule</button>`);
@@ -3360,6 +3364,7 @@ function ccOrderHtml(){
   for(const x of act){
     const list=cc.orders[x.key]||[],lock=ccOrdersLocked(cc,x.key),ro=lock?' readonly':'',off=lock?' disabled':'';
     h+=`<div class="sel-item"><div class="sel-item-header"><div class="sel-item-title">${esc(x.level)} / ${esc(x.area)}${x.count?` <span style="font-size:11px;color:var(--accent-dk);font-weight:600">(adding to ${x.count} existing)</span>`:''}</div><div class="sel-item-controls"><button onclick="ccAddOrder(${jsArg(x.key)})" title="Add a placeholder"${off}>+</button></div></div>`;
+    if(cc.lost['cell:'+x.key])h+=`<div class="cc-msg cc-err">${esc(CC_LOST_CELL_NOTE)}</div>`;
     list.forEach((sp,i)=>{
       const ph=x.count>0?'Part '+(x.count+i+1)+' (recommended)':(list.length>1?'Part '+(i+1):'No split');
       const d=cc.dateMode==='each'?`<input type="date" value="${esc(sp.date)}" oninput="ccSetOrder(${jsArg(x.key)},${i},'date',this.value)"${ro}>`:`<span class="cc-alldate">${cc.allDate?fmtDate(cc.allDate):'no date'}</span>`;
@@ -3391,8 +3396,10 @@ function ccSendHtml(){
   return h}
 function ccRefreshOrder(){const o=$('ccOrder');if(o)o.innerHTML=ccOrderHtml();ccRefreshSend()}
 function ccRefreshSend(){const s=$('ccSend');if(s)s.innerHTML=ccSendHtml()}
-// The Order section can't change while "Create + email" runs (its boxes are drawn read-only, and these refuse too).
-function ccOrdersLocked(cc,key){return !!(cc&&cc.busy)}
+// The Order section can't change while "Create + email" runs (its boxes are drawn read-only, and these refuse too) —
+// nor can a cell whose last try lost its answer: its next try must be the same placeholders, so a look that finds the
+// first try's rows settles them exactly (nothing typed since is taken off as "made").
+function ccOrdersLocked(cc,key){return !!(cc&&(cc.busy||cc.lost['cell:'+key]))}
 function ccAddOrder(key){const cc=cellCard;if(!cc||ccOrdersLocked(cc,key))return;const list=cc.orders[key]||(cc.orders[key]=[]),n=list.length;
   if(n===1&&!list[0].label)list[0].label='Part 1';   // as the b5.13 grid: a second one turns the pair into Part 1, Part 2
   list.push({label:n?'Part '+(n+1):'',date:cc.dateMode==='each'?cc.allDate:''});ccRefreshOrder()}
@@ -3413,6 +3420,21 @@ function ccClearFailure(cc,key){cc.failed=cc.failed.filter(f=>f.key!==key)}
 // Something in the card is being saved: "Create + email" running, or an entry's date.
 function ccSaving(cc){return !!(cc&&(cc.busy||(cc.saving&&cc.saving.size)))}
 const CC_STILL_SAVING='<div class="warn-msg">Still saving — close the card once it has finished.</div>';
+// A save whose answer never came back (the connection dropped after the request left): the database may have saved
+// it. The card says so, keeps the try on record (cc.lost), and the next press reads the database first — a date that is
+// already there is counted as saved (history, email); placeholders already made are counted as made, never made twice.
+const CC_LOST_DATE="the connection dropped before the database answered, so the card can't tell if it was saved. Press Save date again once you're back online — it looks first, and never saves it twice.";
+const CC_LOST_CELL="the connection dropped before the database answered, so the card can't tell if they were made. Press the button again once you're back online — it looks first, and never makes them twice.";
+const CC_LOST_CELL_NOTE="The connection dropped before the database answered — these may already be made. Press the button below again: it looks first, so they are never made twice. They can't be changed until then.";
+// One entry's date and status straight from the database: the row; null when it is gone; undefined when it can't be read.
+async function ccReadDate(id){
+  try{const{data,error}=await sb.from('entries').select('id,our_delivery_date,status').eq('id',id).maybeSingle();return error?undefined:(data||null)}
+  catch(_){return undefined}}
+// A cell's rows from one try, found by its batch: the rows ([] when none); undefined when they can't be read.
+async function ccLookCell(cc,c,bid){
+  try{const{data,error}=await sb.from('entries').select('id,level,area,split_reference,our_delivery_date,status').eq('order_batch_id',bid).eq('project',cc.project).eq('level',c.level).eq('area',c.area);
+    return error?undefined:(data||[])}
+  catch(_){return undefined}}
 // After a save: the page's entries again. A lost connection here leaves the list as it was (the save itself has
 // already said what happened) instead of stopping the card part-way.
 async function ccReload(){try{await loadEntries()}catch(e){console.warn('[REO] entries reload failed:',e&&e.message)}renderDash()}
@@ -3447,7 +3469,7 @@ function ccLogCancel(log,e,reason){
   log.dates=log.dates.filter(r=>r.id!==e.id);
   log.cancels.push({id:e.id,level:e.level,area:e.area,split:e.split_reference||null,schedule:e.schedule||null,reason})}
 function ccAfterCancel(e,reason){const cc=cellCard;if(!cc||e.project!==cc.project)return;ccLogCancel(cc.log,e,reason);
-  delete cc.notes[e.id];delete cc.dateDraft[e.id];if(cc.dateBase)delete cc.dateBase[e.id];   // a date note or draft before it no longer holds
+  delete cc.notes[e.id];delete cc.dateDraft[e.id];if(cc.dateBase)delete cc.dateBase[e.id];delete cc.lost['date:'+e.id];   // a date note, draft or unanswered date save before it no longer holds
   ccClearFailure(cc,'cancel:'+e.id);ccClearFailure(cc,'date:'+e.id)}   // cancelled: an earlier refusal of either no longer matters
 // The email's lines (pure) — the same lines the card shows under "Saved in this card".
 function cellCardLines(log){
@@ -3473,41 +3495,80 @@ function cellCardEmail({project,supplier,log,files,sender}){
 // The first keystroke in a date box also notes the date the person started from (dateBase): Save checks it still holds.
 function ccDateDraft(id,v){const cc=cellCard;if(!cc||cc.saving.has(id))return;const e=entries.find(x=>x.id===id),b=$('ccDateBtn_'+id);
   const base=cc.dateBase||(cc.dateBase={});if(!Object.prototype.hasOwnProperty.call(base,id))base[id]=e?(e.our_delivery_date||''):'';
-  cc.dateDraft[id]=v;if(b)b.disabled=!e||v===(e.our_delivery_date||'')}
+  cc.dateDraft[id]=v;if(b)b.disabled=!e||(v===(e.our_delivery_date||'')&&!cc.lost['date:'+id])}
 // A DBCC requested date changed in the card: today's rules (Not Ordered → Ordered; a differing production date flags the
 // mismatch again), saved only while the date and status are still what the card showed; history after the write. A date
 // someone else saved while this one was being typed (the row keeps showing the typed date, so the change can't be seen)
 // is never written over: Save says what it is now and saves nothing; the next press saves. One save of an entry's date
 // at a time: while it runs the box is read-only and its button reads "Saving…", whatever redraws the card.
+// An answer lost on the way back (the connection dropped) is never taken as "not saved" on its own: the card reads the
+// row first, and a press after one that went unanswered settles it before writing anything (CC_LOST_DATE).
 async function ccSaveDate(id){
   const cc=cellCard;if(!cc||!isDbcc()||cc.saving.has(id))return;
-  const e=entries.find(x=>x.id===id);
+  const e=entries.find(x=>x.id===id),key='date:'+id;
   if(!e||e.project!==cc.project){cc.notes[id]='<span class="cc-err">This entry is no longer on this job — refresh.</span>';ccRefresh();return}
   const inp=$('ccDate_'+id),v=inp?inp.value:(cc.dateDraft[id]??''),old=e.our_delivery_date||'';
   const base=cc.dateBase||(cc.dateBase={}),from=Object.prototype.hasOwnProperty.call(base,id)?base[id]:old;
   const what=`DBCC requested date for ${ccLoc({level:e.level,area:e.area,split:e.split_reference})}${e.schedule?' · '+e.schedule:''}`;
-  if(v===old){delete cc.dateDraft[id];delete base[id];ccClearFailure(cc,'date:'+id);ccRefresh();return}
-  if(from!==old){
-    base[id]=old;   // the next press starts from the date that is there now
-    const words=`the DBCC requested date changed meanwhile — it is now ${fmtDate(old)||'not set'}. Check it and press Save date again.`;
-    cc.notes[id]=`<span class="cc-err">Not saved — ${esc(words)}</span>`;ccAddFailure(cc,what,words,'date:'+id);ccRefresh();return}
-  const{patch}=editPatch(e,{our_delivery_date:old},{our_delivery_date:v},false);
+  if(!cc.lost[key]){
+    if(v===old){   // nothing to save: what is typed is what is there
+      delete cc.dateDraft[id];delete base[id];if(/cc-err/.test(cc.notes[id]||''))delete cc.notes[id];ccClearFailure(cc,key);ccRefresh();return}
+    if(from!==old){
+      base[id]=old;   // the next press starts from the date that is there now
+      const words=`the DBCC requested date changed meanwhile — it is now ${fmtDate(old)||'not set'}. Check it and press Save date again.`;
+      cc.notes[id]=`<span class="cc-err">Not saved — ${esc(words)}</span>`;ccAddFailure(cc,what,words,key);ccRefresh();return}}
   cc.saving.add(id);if(inp)inp.readOnly=true;
   const btn=$('ccDateBtn_'+id);if(btn){btn.disabled=true;btn.textContent='Saving…'}
   ccRefreshSend();   // the email waits for it
   try{
-    const no=await writeEntry(id,patch,{our_delivery_date:e.our_delivery_date??null,status:e.status??null});
-    if(no){
-      cc.notes[id]=`<span class="cc-err">Not saved — ${esc(no)}</span>`;
-      ccAddFailure(cc,what,no,'date:'+id)}
-    else{
-      await auditLog({entry_id:id,action:'UPDATE',field_changed:'our_delivery_date',old_value:old,new_value:v});
-      if(patch.status)await auditLog({entry_id:id,action:'UPDATE',field_changed:'status',old_value:e.status,new_value:patch.status});
-      ccLogDate(cc.log,e,old,v);ccClearFailure(cc,'date:'+id);
-      delete cc.dateDraft[id];delete base[id];cc.notes[id]='<span class="cc-ok">Saved — it goes in the email.</span>'}
+    if(cc.lost[key])await ccSettleLostDate(cc,e,id,v,what);
+    else await ccWriteDate(cc,e,id,v,old,what);
     await ccReload()}
   finally{cc.saving.delete(id);if(cc.msg===CC_STILL_SAVING&&!ccSaving(cc))cc.msg=''}
   ccRefresh()}
+// The write itself, guarded by the date and status the card showed (`e`, or the row as just read).
+async function ccWriteDate(cc,e,id,v,old,what){
+  const key='date:'+id;
+  const{patch}=editPatch(e,{our_delivery_date:old},{our_delivery_date:v},false);
+  const tried={old,v,status:e.status??null,newStatus:patch.status||null};
+  const no=await writeEntry(id,patch,{our_delivery_date:e.our_delivery_date??null,status:e.status??null});
+  if(!no)return ccDateLanded(cc,e,id,tried,v,false);
+  if(no!==NET_WORDS){cc.notes[id]=`<span class="cc-err">Not saved — ${esc(no)}</span>`;ccAddFailure(cc,what,no,key);return}
+  // No answer: the database may have saved it before the connection dropped. Read the row before saying anything.
+  const now=await ccReadDate(id);
+  if(now&&(now.our_delivery_date||'')===v)return ccDateLanded(cc,e,id,tried,v,true);
+  if(now===null){ccDateGone(cc,id,what);return}
+  if(now&&!((now.our_delivery_date||'')===old&&(now.status??null)===tried.status)){ccDateMoved(cc,id,what,now,tried);return}
+  cc.lost[key]=tried;   // not there yet, or can't be read: the next press looks again before it writes (it may still land)
+  const words=now?NET_WORDS:CC_LOST_DATE;
+  cc.notes[id]=`<span class="cc-err">Not saved — ${esc(words)}</span>`;ccAddFailure(cc,what,words,key)}
+// A press after an unanswered one: what is in the database decides.
+async function ccSettleLostDate(cc,e,id,v,what){
+  const key='date:'+id,tried=cc.lost[key],now=await ccReadDate(id);
+  if(now===undefined){cc.notes[id]=`<span class="cc-err">Not saved — ${esc(CC_LOST_DATE)}</span>`;ccAddFailure(cc,what,CC_LOST_DATE,key);return}
+  delete cc.lost[key];
+  if(now===null){ccDateGone(cc,id,what);return}
+  const cur=now.our_delivery_date||'';
+  if(cur===tried.v)return ccDateLanded(cc,e,id,tried,v,true);   // the earlier press had saved it
+  if(cur!==tried.old||(now.status??null)!==tried.status){ccDateMoved(cc,id,what,now,tried);return}   // someone else changed it meanwhile
+  // It never landed: save it now, against what the row holds.
+  if(v===cur){delete cc.dateDraft[id];delete cc.dateBase[id];delete cc.notes[id];ccClearFailure(cc,key);return}   // typed back to it: nothing to save
+  return ccWriteDate(cc,{...e,our_delivery_date:now.our_delivery_date??null,status:now.status??null},id,v,cur,what)}
+// Saved (perhaps by a press whose answer was lost): its history lines now, and it goes in the email.
+async function ccDateLanded(cc,e,id,tried,v,lostAnswer){
+  await auditLog({entry_id:id,action:'UPDATE',field_changed:'our_delivery_date',old_value:tried.old,new_value:tried.v});
+  if(tried.newStatus)await auditLog({entry_id:id,action:'UPDATE',field_changed:'status',old_value:tried.status,new_value:tried.newStatus});
+  ccLogDate(cc.log,e,tried.old,tried.v);ccClearFailure(cc,'date:'+id);delete cc.lost['date:'+id];
+  if(v===tried.v){delete cc.dateDraft[id];delete cc.dateBase[id]}else cc.dateBase[id]=tried.v;   // typed on since: the next press saves from what is there
+  cc.notes[id]=lostAnswer?'<span class="cc-ok">Saved — the connection dropped before the database answered, but it had saved it. It goes in the email.</span>'
+    :'<span class="cc-ok">Saved — it goes in the email.</span>'}
+function ccDateGone(cc,id,what){const w='the entry is no longer there — it may have been deleted. Refresh.';
+  cc.notes[id]=`<span class="cc-err">Not saved — ${esc(w)}</span>`;ccAddFailure(cc,what,w,'date:'+id)}
+function ccDateMoved(cc,id,what,now,tried){
+  const cur=now.our_delivery_date||'';cc.dateBase[id]=cur;   // the next press starts from what is there now
+  const w=cur!==tried.old?`the DBCC requested date changed meanwhile — it is now ${fmtDate(cur)||'not set'}. Check it and press Save date again.`
+    :`the entry changed meanwhile (its status is now ${now.status||'not set'}) — check it and press Save date again.`;
+  cc.notes[id]=`<span class="cc-err">Not saved — ${esc(w)}</span>`;ccAddFailure(cc,what,w,'date:'+id)}
 // One run at a time (cc.busy): a second press, or a redraw that would bring the button back, does nothing until it is
 // done; nothing in the Order section can change meanwhile, and only the placeholders this run planned leave the card.
 async function ccCreateAndEmail(){
@@ -3523,29 +3584,46 @@ async function ccCreateAndEmail(){
   finally{cc.busy=false}
   if(cellCard===cc)ccRefresh();
   if(mail)emailModal(mail.subject,mail.body,null,'cell_card',cc.project,{files:[],onSent:ccAfterEmail})}
+// A cell's insert is all or none. When its answer is lost on the way back (the connection dropped) the rows may still
+// have been made, so the card looks for them by the try's batch before it says "not saved", keeps that batch for the
+// cell (cc.lost) while it can't tell, and on the next press looks again before inserting anything — a cell's rows are
+// never made twice, and a try that did land is counted as made and goes in the email.
 async function ccCreateRun(cc,proj){
-  const m=dpModel(proj);
-  const plan=ccPlanRows(cc.cells.map(c=>c.key),cc.orders,k=>{const[l,a]=JSON.parse(k);return m.cell(l,a)},cc.dateMode,cc.allDate);
+  const m=dpModel(proj),made=[],failed=[],earlier=[],unknown=new Set();
+  for(const c of cc.cells){   // 1) cells whose last try went unanswered: look for that try's rows first
+    const k='cell:'+c.key,lost=cc.lost[k];if(!lost)continue;
+    const seen=await ccLookCell(cc,c,lost.bid);
+    if(seen===undefined){unknown.add(c.key);failed.push({key:c.key,level:c.level,area:c.area,n:(cc.orders[c.key]||[]).length,words:CC_LOST_CELL});continue}
+    if(!seen.length)continue;   // not made: tried again below, under the same batch (a late landing is still found by it)
+    delete cc.lost[k];ccTakeOrders(cc,c.key,cc.orders[c.key]);ccClearFailure(cc,k);   // made by the earlier press: not again
+    ccLogMade(cc,seen);made.push(...seen);earlier.push({level:c.level,area:c.area,n:seen.length})}
+  const plan=ccPlanRows(cc.cells.map(c=>c.key).filter(k=>!unknown.has(k)),cc.orders,k=>{const[l,a]=JSON.parse(k);return m.cell(l,a)},cc.dateMode,cc.allDate);
   const mine={};for(const g of [...plan.groups,...plan.refused])mine[g.key]=(cc.orders[g.key]||[]).slice();   // this run's placeholders
-  const bid='b_'+Date.now(),made=[],failed=plan.refused.slice();
-  for(const g of plan.groups){   // one insert per cell: a refused cell never takes the others with it
-    const rows=g.rows.map(r=>({...r,project:cc.project,order_batch_id:bid}));
-    let no=null,data=null;
+  const bid='b_'+Date.now();failed.push(...plan.refused);
+  for(const g of plan.groups){   // 2) one insert per cell: a refused cell never takes the others with it
+    const k='cell:'+g.key,gb=cc.lost[k]?cc.lost[k].bid:bid;   // a cell tried before keeps its batch
+    const rows=g.rows.map(r=>({...r,project:cc.project,order_batch_id:gb}));
+    let no=null,data=null,unsure=false;
     try{const res=await sb.from('entries').insert(rows).select('id,level,area,split_reference,our_delivery_date,status');
       if(res.error)no=refusalWords(res.error);
-      else if(!res.data||res.data.length!==rows.length)no="the database didn't confirm them — refresh and check before trying again.";
+      else if(!res.data||res.data.length!==rows.length){no="the database didn't confirm them — refresh and check before trying again.";unsure=true}
       else data=res.data}
     catch(err){no=refusalWords(err)}
+    if(no&&(unsure||no===NET_WORDS)){   // no answer: they may have been made — look before saying "not saved"
+      const seen=await ccLookCell(cc,g,gb);
+      if(seen&&seen.length){no=null;data=seen}
+      else{cc.lost[k]={bid:gb};if(seen===undefined)no=CC_LOST_CELL}}
     if(no){failed.push({key:g.key,level:g.level,area:g.area,n:rows.length,words:no});continue}
-    ccTakeOrders(cc,g.key,mine[g.key]);ccClearFailure(cc,'cell:'+g.key);   // made now: an earlier refusal there is gone
+    delete cc.lost[k];ccTakeOrders(cc,g.key,mine[g.key]);ccClearFailure(cc,k);   // made now: an earlier refusal there is gone
     ccLogMade(cc,data);made.push(...data)}   // in the card's log as soon as the cell's insert answers
-  for(const f of plan.refused)ccTakeOrders(cc,f.key,mine[f.key]);
+  for(const f of plan.refused){ccTakeOrders(cc,f.key,mine[f.key]);delete cc.lost['cell:'+f.key]}
   if(made.length)await auditLog({action:'BULK_CREATE',new_value:`${made.length} placeholders for ${cc.project}`});
   for(const f of failed)ccAddFailure(cc,`${f.n} new placeholder${f.n===1?'':'s'} at ${f.level} / ${f.area}`,f.words,'cell:'+f.key);
   const ticked=ccTickedFiles(),unsafe=ticked.filter(f=>!safeUrl(f.url)).length;
   const mail=cellCardEmail({project:cc.project,supplier:cc.supplier,log:cc.log,files:ticked,sender:userName});
   const undated=made.filter(r=>!r.our_delivery_date).length,said=[];
   if(made.length)said.push(`Created ${made.length} placeholder${made.length===1?'':'s'}${undated?` (${undated} with no DBCC requested date — Not Ordered, not in the email)`:''}.`);
+  for(const x of earlier)said.push(`${x.level} / ${x.area}: the earlier press had already made ${x.n===1?'its placeholder':'its '+x.n+' placeholders'} (its answer was lost on the way back), so ${x.n===1?'it was':'they were'} not made again.`);
   if(failed.length)said.push(`${failed.length===1?'One cell was':failed.length+' cells were'} not saved — left out of the email (listed above).`);
   if(unsafe)said.push(`${unsafe} reference file link${unsafe===1?" isn't":"s aren't"} on the REO file store — left out of the email.`);
   if(!mail)said.push('Nothing to email — nothing new with a date, no date changes, no cancellations.');
@@ -3562,9 +3640,11 @@ function ccClose(){
   const cc=cellCard;if(!cc){closeOv('cellCardOv');return}
   if(ccSaving(cc)){cc.msg=CC_STILL_SAVING;ccRefreshSend();return}   // closing mid-save would lose what it is about to tell
   const L=cellCardLines(cc.log),n=L.created.length+L.dates.length+L.cancels.length;
-  const typed=Object.values(cc.orders).flat().filter(s=>(s.label||'').trim()||s.date).length+(cc.allDate&&Object.keys(cc.orders).length?1:0);
-  if(!n&&!typed)return ccCloseNow();
+  const unsure=Object.keys(cc.lost).length,open=Object.keys(cc.orders).filter(k=>!cc.lost['cell:'+k]);   // a cell gone unanswered isn't "not created"
+  const typed=open.flatMap(k=>cc.orders[k]).filter(s=>(s.label||'').trim()||s.date).length+(cc.allDate&&open.length?1:0);
+  if(!n&&!typed&&!unsure)return ccCloseNow();
   const why=[n?`${n} change${n===1?'':'s'} saved in this card ${n===1?"hasn't":"haven't"} been emailed — ${n===1?'it stays':'they stay'} saved, only the email is left out`:'',
+    unsure?`the card can't tell whether ${unsure===1?'one save':unsure+' saves'} went through (the connection dropped before the database answered) — check on the Dashboard before ordering ${unsure===1?'it':'them'} again`:'',
     typed?'the new placeholders you filled in are not created yet and will be dropped':''].filter(Boolean).join('; ');
   confirmDialog('Close the card?',esc(why.charAt(0).toUpperCase()+why.slice(1))+'.','Close the card','',ccCloseNow)}
 function ccCloseNow(){cellCard=null;closeOv('cellCardOv');renderPairGrid()}

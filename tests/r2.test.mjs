@@ -780,9 +780,11 @@ test('the b5.13 grid (pairs off) never creates placeholders on no job — the pr
 });
 
 test('the card: a retry that lands takes its "Not saved" line off — it is in the email now', async()=>{
-  // a date: refused (no connection), then saved
+  // a date: refused (no connection — and the row, read back, still holds the old date), then saved
   let fail=true;
-  const{a,r,els}=cardApp({answer:q=>q.table==='entries'&&q.op==='update'?(fail?{data:null,error:{message:'TypeError: Failed to fetch'}}:{data:[{id:22}],error:null}):{data:null,error:null}});
+  const{a,r,els}=cardApp({answer:q=>{if(q.table!=='entries')return{data:null,error:null};
+    if(q.op==='update')return fail?{data:null,error:{message:'TypeError: Failed to fetch'}}:{data:[{id:22}],error:null};
+    return{data:q.single?{id:22,our_delivery_date:null,status:'Not Ordered'}:[],error:null}}});
   a.openCellCard([{level:'GRD',area:'SLAB'}]);
   a.document.getElementById('ccDate_22').value='2026-11-19';
   await a.ccSaveDate(22);
@@ -805,11 +807,14 @@ test('the card: a retry that lands takes its "Not saved" line off — it is in t
   assert.equal(t.r('cellCard.failed.length'),0,'made on the second press: off the list');
   assert.equal(t.r('__mail.length'),1,'and in the one email');assert.match(t.r('__mail[0].body'),/• GRD \/ COLUMNS — 25\/11\/2026/);
   // a refused date on an entry that is then cancelled from the card: the date line goes with the cancel
-  const c=cardApp({answer:q=>q.table==='entries'&&q.op==='update'?(q.payload.status==='Cancelled'?{data:[{id:22}],error:null}:{data:null,error:{message:'TypeError: Failed to fetch'}}):{data:null,error:null}});
+  const c=cardApp({answer:q=>{if(q.table!=='entries')return{data:null,error:null};
+    if(q.op==='update')return q.payload.status==='Cancelled'?{data:[{id:22}],error:null}:{data:null,error:{message:'TypeError: Failed to fetch'}};
+    return{data:q.single?{id:22,our_delivery_date:null,status:'Not Ordered'}:[],error:null}}});
   c.a.openCellCard([{level:'GRD',area:'SLAB'}]);c.a.document.getElementById('ccDate_22').value='2026-11-19';
-  await c.a.ccSaveDate(22);assert.equal(c.r('cellCard.failed.length'),1);
+  await c.a.ccSaveDate(22);assert.equal(c.r('cellCard.failed.length'),1);assert.ok(c.r("!!cellCard.lost['date:22']"));
   c.a.cancelEntry(22,true);c.a.document.getElementById('cancelR').value='not needed';await c.a.doCancel(22,true);
   assert.equal(c.r('cellCard.failed.length'),0);assert.deepEqual(plain(c.r('cellCard.log.cancels')).map(x=>x.id),[22]);
+  assert.equal(c.r("cellCard.lost['date:22']"),undefined,'the unanswered date save goes with the cancel too');
 });
 
 test('the card: a date someone else saved while this one was typed is never written over unseen', async()=>{
@@ -925,4 +930,120 @@ test('a save whose reload fails part-way still finishes: the button comes back a
   assert.match(t.els.cellCardModal.innerHTML,/<div class="error-msg">Stopped part-way \(boom\)\. What was made is under "Saved in this card" — check the cells before pressing again\.<\/div>/);
   assert.deepEqual(plain(t.r('cellCard.log.created')).map(x=>x.id),[700],'the cell made before it stopped is in the card\'s log');
   assert.deepEqual([...t.els.cellCardModal.innerHTML.match(SEND_BTN)].slice(1),[undefined,'Email the changes']);
+});
+
+// ── Fix round: an answer lost on the way back (the database saved it, the connection dropped before it answered) ──
+// A fake database whose writes land; net.lose = how many of the next write answers are lost; net.down = nothing gets
+// through (a write still lands while an answer is being lost — that is the case under test).
+function lostDb(rows){
+  const db=JSON.parse(JSON.stringify(rows)),net={lose:0,down:false},LOST={data:null,error:{message:'TypeError: Failed to fetch'}};
+  const hit=q=>db.filter(row=>q.filters.every(([,c,v])=>(row[c]??null)===(v??null)));
+  const answer=q=>{
+    if(q.table!=='entries')return{data:null,error:null};
+    if(q.op==='update'||q.op==='insert'){
+      if(net.down&&!net.lose)return LOST;
+      let data;
+      if(q.op==='update'){const h=hit(q);h.forEach(row=>Object.assign(row,q.payload));data=h.map(row=>({id:row.id}))}
+      else{data=q.payload.map((p,i)=>({id:800+db.length+i,...p}));db.push(...data)}
+      if(net.lose){net.lose--;return LOST}
+      return{data,error:null}}
+    if(net.down)return LOST;
+    const h=hit(q);return{data:q.single?(h[0]||null):h,error:null}};
+  return{db,net,answer}}
+const SAVE_22=/<button class="action-btn cc-save" id="ccDateBtn_22" onclick="ccSaveDate\(22\)"( disabled)?>Save date<\/button>/;
+
+test('a date whose answer is lost but which the database saved: counted as saved — history once, in the email', async()=>{
+  const f=lostDb(CARD_ENTRIES);
+  const{a,r,els,sb}=cardApp({answer:f.answer});
+  a.openCellCard([{level:'GRD',area:'SLAB'}]);a.ccDateDraft(22,'2026-11-19');a.document.getElementById('ccDate_22').value='2026-11-19';
+  f.net.lose=1;await a.ccSaveDate(22);
+  assert.equal(f.db.find(x=>x.id===22).our_delivery_date,'2026-11-19','the database has it');
+  assert.deepEqual(sb.calls.map(c=>c.table+':'+c.op+(c.single?'(row)':'')),['entries:update','entries:select(row)','audit_log:insert','audit_log:insert'],'looked before saying anything; history once');
+  assert.deepEqual(sb.calls.filter(c=>c.table==='audit_log').map(c=>[c.payload.field_changed,c.payload.old_value,c.payload.new_value]),[['our_delivery_date','','2026-11-19'],['status','Not Ordered','Ordered']]);
+  assert.deepEqual(plain(r('cellCard.log.dates')).map(d=>[d.id,d.old,d.new]),[[22,'','2026-11-19']],'it goes in the email');
+  assert.equal(r('cellCard.failed.length'),0);
+  assert.match(els.cellCardModal.innerHTML,/Saved — the connection dropped before the database answered, but it had saved it\. It goes in the email\./);
+  assert.equal(r("cellCard.lost['date:22']"),undefined);
+});
+
+test('a date whose answer is lost while still offline: "can\'t tell" — the next press looks first, never writes twice', async()=>{
+  const f=lostDb(CARD_ENTRIES);
+  const{a,r,els,sb}=cardApp({answer:f.answer});
+  a.openCellCard([{level:'GRD',area:'SLAB'}]);a.ccDateDraft(22,'2026-11-19');a.document.getElementById('ccDate_22').value='2026-11-19';
+  f.net.lose=1;f.net.down=true;await a.ccSaveDate(22);
+  assert.equal(f.db.find(x=>x.id===22).our_delivery_date,'2026-11-19','it landed');
+  assert.match(r('cellCard.notes[22]'),/Not saved — the connection dropped before the database answered, so the card can&#39;t tell if it was saved\. Press Save date again once you&#39;re back online — it looks first, and never saves it twice\./);
+  assert.match(els.cellCardModal.innerHTML,/<li>DBCC requested date for GRD \/ SLAB \(Part 2\) — the connection dropped before the database answered, so the card can&#39;t tell/);
+  assert.equal(sb.calls.filter(c=>c.table==='audit_log').length,0,'no history yet');assert.equal(r('cellCard.log.dates.length'),0);
+  // a refresh brings the new date into the page: the box now shows what the database holds — Save stays pressable
+  r("entries.find(e=>e.id===22).our_delivery_date='2026-11-19';entries.find(e=>e.id===22).status='Ordered'");a.afterEntriesLoaded();
+  assert.deepEqual([...els.cellCardModal.innerHTML.match(SAVE_22)].slice(1),[undefined],'the lost save can be settled');
+  f.net.down=false;await a.ccSaveDate(22);
+  assert.equal(sb.calls.filter(c=>c.op==='update').length,1,'never written a second time');
+  assert.deepEqual(sb.calls.filter(c=>c.table==='audit_log').map(c=>[c.payload.field_changed,c.payload.old_value,c.payload.new_value]),[['our_delivery_date','','2026-11-19'],['status','Not Ordered','Ordered']],'its history, once');
+  assert.deepEqual(plain(r('cellCard.log.dates')).map(d=>[d.id,d.new]),[[22,'2026-11-19']]);
+  assert.equal(r('cellCard.failed.length'),0);
+  assert.match(r('cellCard.notes[22]'),/Saved — the connection dropped before the database answered, but it had saved it\./);
+  assert.match(r("cellCardEmail({project:'Barwon Reservoir',supplier:'Aus Reo',log:cellCard.log,files:[],sender:'Chris'}).body"),/GRD \/ SLAB \(Part 2\) — not set → 19\/11\/2026/);
+});
+
+test('a date whose answer is lost and which did NOT land: said so; the next press looks, then writes once', async()=>{
+  const f=lostDb(CARD_ENTRIES);
+  const{a,r,sb}=cardApp({answer:f.answer});
+  a.openCellCard([{level:'GRD',area:'SLAB'}]);a.ccDateDraft(22,'2026-11-19');a.document.getElementById('ccDate_22').value='2026-11-19';
+  f.net.down=true;await a.ccSaveDate(22);   // never reached the database; the read fails too
+  assert.equal(f.db.find(x=>x.id===22).our_delivery_date,null);
+  f.net.down=false;await a.ccSaveDate(22);  // back online: the row still holds the old date → written now
+  assert.deepEqual(sb.calls.filter(c=>c.table==='entries').map(c=>c.op+(c.single?'(row)':'')),['update','select(row)','select(row)','update']);
+  assert.equal(f.db.find(x=>x.id===22).our_delivery_date,'2026-11-19');
+  assert.equal(sb.calls.filter(c=>c.table==='audit_log'&&c.payload.field_changed==='our_delivery_date').length,1);
+  assert.match(r('cellCard.notes[22]'),/^<span class="cc-ok">Saved — it goes in the email\.<\/span>$/);
+  // someone else changed it while the answer was lost: never written over, said in words
+  const g=lostDb(CARD_ENTRIES),t=cardApp({answer:g.answer});
+  t.a.openCellCard([{level:'GRD',area:'SLAB'}]);t.a.ccDateDraft(22,'2026-11-19');t.a.document.getElementById('ccDate_22').value='2026-11-19';
+  g.net.down=true;await t.a.ccSaveDate(22);
+  g.net.down=false;g.db.find(x=>x.id===22).our_delivery_date='2026-11-23';g.db.find(x=>x.id===22).status='Ordered';
+  await t.a.ccSaveDate(22);
+  assert.equal(t.sb.calls.filter(c=>c.op==='update').length,1,'not written over');
+  assert.match(t.r('cellCard.notes[22]'),/Not saved — the DBCC requested date changed meanwhile — it is now 23\/11\/2026\. Check it and press Save date again\./);
+});
+
+test('placeholders whose answer is lost but which were made: counted as made, emailed, never made again', async()=>{
+  const f=lostDb(CARD_ENTRIES);
+  const{a,r,sb}=cardApp({answer:f.answer});
+  a.openCellCard([{level:'GRD',area:'COLUMNS'}]);r("cellCard.allDate='2026-11-20'");
+  f.net.lose=1;await a.ccCreateAndEmail();
+  assert.equal(sb.calls.filter(c=>c.op==='insert'&&c.table==='entries').length,1);
+  assert.equal(f.db.filter(x=>x.area==='COLUMNS').length,1);
+  const look=sb.calls.find(c=>c.table==='entries'&&c.op==='select');
+  assert.deepEqual(look.filters.map(x=>[...x]),[['eq','order_batch_id',f.db.find(x=>x.area==='COLUMNS').order_batch_id],['eq','project','Barwon Reservoir'],['eq','level','GRD'],['eq','area','COLUMNS']],'looked for this try\'s rows');
+  assert.deepEqual(plain(r('cellCard.log.created')).map(x=>[x.level,x.area,x.date]),[['GRD','COLUMNS','2026-11-20']]);
+  assert.equal(r('cellCard.failed.length'),0);assert.equal(r('__mail.length'),1);
+  assert.deepEqual(plain(r('cellCard.orders')),{});
+});
+
+test('placeholders whose answer is lost while offline: the cell waits, read-only; the next press finds them — one set, one batch', async()=>{
+  const f=lostDb(CARD_ENTRIES);
+  const{a,r,els,sb}=cardApp({answer:f.answer});
+  a.openCellCard([{level:'GRD',area:'COLUMNS'},{level:'B1',area:'PILES'}]);r("cellCard.allDate='2026-11-20'");
+  f.net.lose=1;f.net.down=true;await a.ccCreateAndEmail();   // GRD / COLUMNS lands, its answer lost; B1 / PILES never gets through
+  assert.equal(f.db.filter(x=>x.area==='COLUMNS'||x.area==='PILES').length,1);
+  assert.equal(r('cellCard.failed.length'),2);assert.equal(r('__mail.length'),0);
+  assert.match(els.cellCardModal.innerHTML,/<li>1 new placeholder at GRD \/ COLUMNS — the connection dropped before the database answered, so the card can&#39;t tell if they were made\./);
+  // the cell can't be changed until it is settled: the boxes are read-only and the setters refuse
+  assert.match(els.cellCardModal.innerHTML,/The connection dropped before the database answered — these may already be made\./);
+  r("ccSetOrder(cellKey('GRD','COLUMNS'),0,'label','Top');ccAddOrder(cellKey('GRD','COLUMNS'))");
+  assert.deepEqual(plain(r("cellCard.orders[cellKey('GRD','COLUMNS')]")),[{label:'',date:''}]);
+  a.ccClose();assert.equal(r('__confirm.m'),'The card can&#39;t tell whether 2 saves went through (the connection dropped before the database answered) — check on the Dashboard before ordering them again.','closing asks first — and doesn\'t call them "not created yet"');
+  r('__confirm=undefined');
+  f.net.down=false;await a.ccCreateAndEmail();
+  const ins=sb.calls.filter(c=>c.op==='insert'&&c.table==='entries');
+  assert.deepEqual(ins.map(c=>c.payload[0].area),['COLUMNS','PILES','PILES'],'GRD / COLUMNS is never inserted again');
+  assert.equal(ins[2].payload[0].order_batch_id,ins[1].payload[0].order_batch_id,'B1 / PILES keeps its batch across the retry');
+  assert.equal(f.db.filter(x=>x.area==='COLUMNS').length,1,'one set at GRD / COLUMNS');assert.equal(f.db.filter(x=>x.area==='PILES').length,1);
+  assert.deepEqual(plain(r('cellCard.log.created')).map(x=>x.level+' / '+x.area).sort(),['B1 / PILES','GRD / COLUMNS']);
+  assert.equal(r('cellCard.failed.length'),0);assert.equal(r('__mail.length'),1);
+  assert.deepEqual(plain(r('cellCard.lost')),{});assert.deepEqual(plain(r('cellCard.orders')),{});
+  assert.match(els.cellCardModal.innerHTML,/Created 2 placeholders\. GRD \/ COLUMNS: the earlier press had already made its placeholder \(its answer was lost on the way back\), so it was not made again\./);
+  assert.equal(sb.calls.filter(c=>c.table==='audit_log'&&c.payload.action==='BULK_CREATE').length,1);
 });
