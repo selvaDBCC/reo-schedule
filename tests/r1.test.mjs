@@ -1,5 +1,5 @@
 // REO b5.14 (release R1) — tests for the front-end guard rails. Plain node:test, no packages, nothing touches a server.
-// Run from the repo root:  node --test tests/
+// Run from the repo root:  node --test   (finds tests/*.test.mjs; Node 24 reads "node --test tests/" as a file and fails)
 //
 // app.js is a browser script, not a module, so it is loaded here the way the page loads it — minus the final init() —
 // inside a node:vm context with the few globals its top level touches stubbed. Every function in it is then callable
