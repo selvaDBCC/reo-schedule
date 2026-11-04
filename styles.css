@@ -367,6 +367,10 @@ body.role-supplier .dbcc-only{display:none!important}
 .split-row input{padding:7px 10px;font-size:12px}
 .split-row .remove-split{background:none;border:none;color:var(--err);cursor:pointer;font-size:16px;padding:4px;opacity:.5}
 .split-row .remove-split:hover{opacity:1}
+/* b5.14: the cell card's Order section while it is saving (or waiting on an unanswered try): plainly not pressable */
+.sel-item-controls button:disabled,.sel-item-controls button:disabled:hover{opacity:.4;cursor:default;background:var(--card);border-color:var(--border);color:var(--mid)}
+.split-row .remove-split:disabled,.split-row .remove-split:disabled:hover{opacity:.2;cursor:default}
+.split-row input[readonly]{background:#F1F0ED;color:var(--muted);cursor:default}
 
 /* b5.14 — New Entry with pairs live: the line under Level / Area */
 #laHint .hint,#laHint .la-hint{margin:-4px 0 6px}
