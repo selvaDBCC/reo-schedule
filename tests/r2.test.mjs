@@ -778,3 +778,58 @@ test('the b5.13 grid (pairs off) never creates placeholders on no job — the pr
   assert.deepEqual(sb.calls.map(c=>c.table+':'+c.op),['entries:insert','audit_log:insert'],'a job that is there creates as before');
   assert.equal(sb.calls[0].payload[0].project,'Barwon Reservoir');
 });
+
+test('the card: a retry that lands takes its "Not saved" line off — it is in the email now', async()=>{
+  // a date: refused (no connection), then saved
+  let fail=true;
+  const{a,r,els}=cardApp({answer:q=>q.table==='entries'&&q.op==='update'?(fail?{data:null,error:{message:'TypeError: Failed to fetch'}}:{data:[{id:22}],error:null}):{data:null,error:null}});
+  a.openCellCard([{level:'GRD',area:'SLAB'}]);
+  a.document.getElementById('ccDate_22').value='2026-11-19';
+  await a.ccSaveDate(22);
+  assert.equal(r('cellCard.failed.length'),1);assert.match(els.cellCardModal.innerHTML,/Not saved — left out of the email:/);
+  await a.ccSaveDate(22);
+  assert.equal(r('cellCard.failed.length'),1,'the same refusal again: still one line');
+  fail=false;await a.ccSaveDate(22);
+  assert.equal(r('cellCard.failed.length'),0,'saved on the retry: off the list');
+  assert.ok(!/Not saved — left out of the email/.test(els.cellCardModal.innerHTML));
+  assert.deepEqual(plain(r('cellCard.log.dates')).map(d=>[d.id,d.new]),[[22,'2026-11-19']]);
+  // a cell's new placeholders: refused, then made on the next press
+  let refuse=true;
+  const t=cardApp({answer:q=>{
+    if(q.table!=='entries'||q.op!=='insert')return{data:null,error:null};
+    return refuse?{data:null,error:{message:'TypeError: Failed to fetch'}}:{data:q.payload.map((p,i)=>({id:300+i,...p})),error:null}}});
+  t.a.openCellCard([{level:'GRD',area:'COLUMNS'}]);t.r("cellCard.allDate='2026-11-25'");
+  await t.a.ccCreateAndEmail();
+  assert.equal(t.r('cellCard.failed.length'),1);assert.equal(t.r('__mail.length'),0,'nothing saved, nothing to email');
+  refuse=false;await t.a.ccCreateAndEmail();
+  assert.equal(t.r('cellCard.failed.length'),0,'made on the second press: off the list');
+  assert.equal(t.r('__mail.length'),1,'and in the one email');assert.match(t.r('__mail[0].body'),/• GRD \/ COLUMNS — 25\/11\/2026/);
+  // a refused date on an entry that is then cancelled from the card: the date line goes with the cancel
+  const c=cardApp({answer:q=>q.table==='entries'&&q.op==='update'?(q.payload.status==='Cancelled'?{data:[{id:22}],error:null}:{data:null,error:{message:'TypeError: Failed to fetch'}}):{data:null,error:null}});
+  c.a.openCellCard([{level:'GRD',area:'SLAB'}]);c.a.document.getElementById('ccDate_22').value='2026-11-19';
+  await c.a.ccSaveDate(22);assert.equal(c.r('cellCard.failed.length'),1);
+  c.a.cancelEntry(22,true);c.a.document.getElementById('cancelR').value='not needed';await c.a.doCancel(22,true);
+  assert.equal(c.r('cellCard.failed.length'),0);assert.deepEqual(plain(c.r('cellCard.log.cancels')).map(x=>x.id),[22]);
+});
+
+test('the card: a date someone else saved while this one was typed is never written over unseen', async()=>{
+  const{a,r,els,sb}=cardApp({answer:q=>q.table==='entries'&&q.op==='update'?{data:[{id:21}],error:null}:{data:null,error:null}});
+  a.openCellCard([{level:'GRD',area:'SLAB'}]);
+  a.ccDateDraft(21,'2026-11-08');                                     // typing starts from 05/11 …
+  r("entries.find(e=>e.id===21).our_delivery_date='2026-11-07'");      // … someone else saves 07/11 meanwhile (realtime)
+  a.document.getElementById('ccDate_21').value='2026-11-08';
+  await a.ccSaveDate(21);
+  assert.equal(sb.calls.length,0,'nothing written, no history');
+  assert.match(r('cellCard.notes[21]'),/Not saved — the DBCC requested date changed meanwhile — it is now 07\/11\/2026\. Check it and press Save date again\./);
+  assert.match(els.cellCardModal.innerHTML,/<li>DBCC requested date for GRD \/ SLAB \(Part 1\) · U9AV — the DBCC requested date changed meanwhile — it is now 07\/11\/2026/);
+  assert.equal(r('cellCard.log.dates.length'),0,'not in the email');
+  // pressed again, now that it has been said: saved from the date that is there now
+  await a.ccSaveDate(21);
+  assert.deepEqual(sb.calls.map(c=>c.table+':'+c.op),['entries:update','audit_log:insert']);
+  assert.deepEqual(sb.calls[0].filters.map(f=>[...f]),[['eq','id',21],['eq','our_delivery_date','2026-11-07'],['eq','status','Scheduled']]);
+  assert.deepEqual(plain(r('cellCard.log.dates')).map(d=>[d.old,d.new]),[['2026-11-07','2026-11-08']]);
+  assert.equal(r('cellCard.failed.length'),0);
+  // typed back to the date that is there: nothing to save, nothing said
+  a.ccDateDraft(21,'2026-11-08');r("entries.find(e=>e.id===21).our_delivery_date='2026-11-08'");
+  await a.ccSaveDate(21);assert.equal(sb.calls.length,2,'no second write');
+});

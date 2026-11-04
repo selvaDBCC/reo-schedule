@@ -1765,7 +1765,7 @@ async function doCancel(id,fromCard){const r=$('cancelR').value.trim();if(!r)ret
   const btn=$('cancelBtn');if(btn)btn.disabled=true;
   const no=await writeEntry(id,{status:'Cancelled',cancel_reason:r,on_hold:false,[col]:chunksToJson(chunks)});
   if(btn)btn.disabled=false;
-  if(no){$('cancelErr').innerHTML='<div class="error-msg">Not cancelled — '+esc(no)+'</div>';if(fromCard)ccNoteFailure(`Cancelling ${ccLoc({level:e.level,area:e.area,split:e.split_reference})}${e.schedule?' · '+e.schedule:''}`,no);return}
+  if(no){$('cancelErr').innerHTML='<div class="error-msg">Not cancelled — '+esc(no)+'</div>';if(fromCard)ccNoteFailure(`Cancelling ${ccLoc({level:e.level,area:e.area,split:e.split_reference})}${e.schedule?' · '+e.schedule:''}`,no,'cancel:'+id);return}
   await auditLog({entry_id:id,action:'CANCEL',field_changed:'status',old_value:e.status,new_value:'Cancelled: '+r});
   if(fromCard)ccAfterCancel(e,r);
   closeOv('cancelOv');await loadEntries();renderDash()}
@@ -3298,7 +3298,7 @@ function openCellCard(cells){
   list.sort((x,y)=>(li.get(x.level)-li.get(y.level))||(ai.get(x.area)-ai.get(y.area)));
   const orders={};for(const x of list)if(x.state==='active'&&!x.count)orders[x.key]=[{label:'',date:''}];   // an empty green cell: one placeholder ready
   cellCard={project:proj.name,supplier:proj.supplier||'Aus Reo',cells:list.map(x=>({level:x.level,area:x.area,key:x.key})),orders,dateMode:'all',allDate:'',
-    log:{created:[],dates:[],cancels:[]},failed:[],files:new Set(),dateDraft:{},notes:{},open:new Set(list.length<=4?list.map(x=>x.key):[]),msg:'',stale:false};
+    log:{created:[],dates:[],cancels:[]},failed:[],files:new Set(),dateDraft:{},dateBase:{},notes:{},open:new Set(list.length<=4?list.map(x=>x.key):[]),msg:'',stale:false};
   renderCellCard();$('cellCardOv').classList.add('show')}
 function ccModel(){const cc=cellCard,proj=cc&&cc.project?projects.find(p=>p.name===cc.project):null;return proj?dpModel(proj):null}
 function ccLoc(r){return `${r.level||'—'} / ${r.area||'—'}${r.split?' ('+r.split+')':''}`}
@@ -3397,8 +3397,12 @@ function ccSetDateMode(mode){const cc=cellCard;if(!cc||(mode!=='all'&&mode!=='ea
 function ccSetAllDate(v){const cc=cellCard;if(!cc)return;cc.allDate=v;document.querySelectorAll('#ccOrder .cc-alldate').forEach(x=>{x.textContent=v?fmtDate(v):'no date'});ccRefreshSend()}
 function ccTickFile(id,on){const cc=cellCard;if(!cc)return;if(on)cc.files.add(id);else cc.files.delete(id);ccRefreshSend()}
 function ccTickedFiles(){const cc=cellCard;if(!cc)return[];return projectFiles.filter(f=>cc.files.has(f.id)&&f.project_name===cc.project).map(f=>({id:f.id,label:f.label,url:f.file_url}))}
-function ccNoteFailure(what,words){const cc=cellCard;if(!cc)return;ccAddFailure(cc,what,words);ccRefreshSend()}
-function ccAddFailure(cc,what,words){if(!cc.failed.some(f=>f.what===what&&f.words===words))cc.failed.push({what,words})}   // a retry that fails the same way is listed once
+// A save in the card that didn't land is listed under "Not saved — left out of the email", one line per thing — `key`
+// names it ('cell:' + a cell's key for its new placeholders, 'date:' / 'cancel:' + an entry id). A retry that fails again
+// replaces its line (listed once, with the latest words); one that lands takes the line off — it is in the email now.
+function ccNoteFailure(what,words,key){const cc=cellCard;if(!cc)return;ccAddFailure(cc,what,words,key);ccRefreshSend()}
+function ccAddFailure(cc,what,words,key){const k=key==null?what:key;cc.failed=cc.failed.filter(f=>f.key!==k);cc.failed.push({what,words,key:k})}
+function ccClearFailure(cc,key){cc.failed=cc.failed.filter(f=>f.key!==key)}
 // The rows the Order section will insert (pure): per green cell, one row per placeholder — the b5.13 grid's rule for
 // split labels (one placeholder: its label or none; several: their labels, else Part 1, Part 2 …) and the date mode.
 // A cell that is no longer an active pair is refused, never moved somewhere else.
@@ -3426,7 +3430,9 @@ function ccLogCancel(log,e,reason){
   const i=log.created.findIndex(r=>r.id===e.id);if(i>=0){log.created.splice(i,1);return}
   log.dates=log.dates.filter(r=>r.id!==e.id);
   log.cancels.push({id:e.id,level:e.level,area:e.area,split:e.split_reference||null,schedule:e.schedule||null,reason})}
-function ccAfterCancel(e,reason){const cc=cellCard;if(!cc||e.project!==cc.project)return;ccLogCancel(cc.log,e,reason);delete cc.notes[e.id];delete cc.dateDraft[e.id]}   // a date note before it no longer holds
+function ccAfterCancel(e,reason){const cc=cellCard;if(!cc||e.project!==cc.project)return;ccLogCancel(cc.log,e,reason);
+  delete cc.notes[e.id];delete cc.dateDraft[e.id];if(cc.dateBase)delete cc.dateBase[e.id];   // a date note or draft before it no longer holds
+  ccClearFailure(cc,'cancel:'+e.id);ccClearFailure(cc,'date:'+e.id)}   // cancelled: an earlier refusal of either no longer matters
 // The email's lines (pure) — the same lines the card shows under "Saved in this card".
 function cellCardLines(log){
   const sch=r=>r.schedule?' · '+r.schedule:'';
@@ -3448,26 +3454,37 @@ function cellCardEmail({project,supplier,log,files,sender}){
   if(links.length)body+='\n\n─── Reference documents ───\n'+links.map(f=>`• ${f.label}: ${f.url}`).join('\n');
   body+=`\n\nPlease confirm receipt${L.created.length||L.dates.length?' and your production delivery dates':''}.${EMAIL_FOOTER_TEXT}\n\nRegards,\n${sender}\nDebono Bros Concreting`;
   return{subject:`REO orders — ${project} (${count})`,body}}
-function ccDateDraft(id,v){const cc=cellCard;if(!cc)return;cc.dateDraft[id]=v;const e=entries.find(x=>x.id===id),b=$('ccDateBtn_'+id);if(b)b.disabled=!e||v===(e.our_delivery_date||'')}
+// The first keystroke in a date box also notes the date the person started from (dateBase): Save checks it still holds.
+function ccDateDraft(id,v){const cc=cellCard;if(!cc)return;const e=entries.find(x=>x.id===id),b=$('ccDateBtn_'+id);
+  const base=cc.dateBase||(cc.dateBase={});if(!Object.prototype.hasOwnProperty.call(base,id))base[id]=e?(e.our_delivery_date||''):'';
+  cc.dateDraft[id]=v;if(b)b.disabled=!e||v===(e.our_delivery_date||'')}
 // A DBCC requested date changed in the card: today's rules (Not Ordered → Ordered; a differing production date flags the
-// mismatch again), saved only while the date and status are still what the card showed; history after the write.
+// mismatch again), saved only while the date and status are still what the card showed; history after the write. A date
+// someone else saved while this one was being typed (the row keeps showing the typed date, so the change can't be seen)
+// is never written over: Save says what it is now and saves nothing; the next press saves.
 async function ccSaveDate(id){
   const cc=cellCard;if(!cc||!isDbcc())return;
   const e=entries.find(x=>x.id===id);
   if(!e||e.project!==cc.project){cc.notes[id]='<span class="cc-err">This entry is no longer on this job — refresh.</span>';ccRefresh();return}
   const inp=$('ccDate_'+id),v=inp?inp.value:(cc.dateDraft[id]??''),old=e.our_delivery_date||'';
-  if(v===old){delete cc.dateDraft[id];ccRefresh();return}
+  const base=cc.dateBase||(cc.dateBase={}),from=Object.prototype.hasOwnProperty.call(base,id)?base[id]:old;
+  const what=`DBCC requested date for ${ccLoc({level:e.level,area:e.area,split:e.split_reference})}${e.schedule?' · '+e.schedule:''}`;
+  if(v===old){delete cc.dateDraft[id];delete base[id];ccClearFailure(cc,'date:'+id);ccRefresh();return}
+  if(from!==old){
+    base[id]=old;   // the next press starts from the date that is there now
+    const words=`the DBCC requested date changed meanwhile — it is now ${fmtDate(old)||'not set'}. Check it and press Save date again.`;
+    cc.notes[id]=`<span class="cc-err">Not saved — ${esc(words)}</span>`;ccAddFailure(cc,what,words,'date:'+id);ccRefresh();return}
   const{patch}=editPatch(e,{our_delivery_date:old},{our_delivery_date:v},false);
   const btn=$('ccDateBtn_'+id);if(btn){btn.disabled=true;btn.textContent='Saving…'}
   const no=await writeEntry(id,patch,{our_delivery_date:e.our_delivery_date??null,status:e.status??null});
   if(no){
     cc.notes[id]=`<span class="cc-err">Not saved — ${esc(no)}</span>`;
-    ccAddFailure(cc,`DBCC requested date for ${ccLoc({level:e.level,area:e.area,split:e.split_reference})}${e.schedule?' · '+e.schedule:''}`,no);
+    ccAddFailure(cc,what,no,'date:'+id);
     await loadEntries();renderDash();ccRefresh();return}
   await auditLog({entry_id:id,action:'UPDATE',field_changed:'our_delivery_date',old_value:old,new_value:v});
   if(patch.status)await auditLog({entry_id:id,action:'UPDATE',field_changed:'status',old_value:e.status,new_value:patch.status});
-  ccLogDate(cc.log,e,old,v);
-  delete cc.dateDraft[id];cc.notes[id]='<span class="cc-ok">Saved — it goes in the email.</span>';
+  ccLogDate(cc.log,e,old,v);ccClearFailure(cc,'date:'+id);
+  delete cc.dateDraft[id];delete base[id];cc.notes[id]='<span class="cc-ok">Saved — it goes in the email.</span>';
   await loadEntries();renderDash();ccRefresh()}
 async function ccCreateAndEmail(){
   const cc=cellCard;if(!cc||!isDbcc())return;
@@ -3487,11 +3504,11 @@ async function ccCreateAndEmail(){
       else data=res.data}
     catch(err){no=refusalWords(err)}
     if(no){failed.push({key:g.key,level:g.level,area:g.area,n:rows.length,words:no});continue}
-    made.push(...data);delete cc.orders[g.key]}
+    made.push(...data);delete cc.orders[g.key];ccClearFailure(cc,'cell:'+g.key)}   // made now: an earlier refusal there is gone
   for(const f of plan.refused)delete cc.orders[f.key];
   if(made.length)await auditLog({action:'BULK_CREATE',new_value:`${made.length} placeholders for ${cc.project}`});
   for(const r of made)cc.log.created.push({id:r.id,level:r.level,area:r.area,split:r.split_reference||null,date:r.our_delivery_date||null});
-  for(const f of failed)ccAddFailure(cc,`${f.n} new placeholder${f.n===1?'':'s'} at ${f.level} / ${f.area}`,f.words);
+  for(const f of failed)ccAddFailure(cc,`${f.n} new placeholder${f.n===1?'':'s'} at ${f.level} / ${f.area}`,f.words,'cell:'+f.key);
   const ticked=ccTickedFiles(),unsafe=ticked.filter(f=>!safeUrl(f.url)).length;
   const mail=cellCardEmail({project:cc.project,supplier:cc.supplier,log:cc.log,files:ticked,sender:userName});
   const undated=made.filter(r=>!r.our_delivery_date).length,said=[];
