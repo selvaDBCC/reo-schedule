@@ -159,6 +159,151 @@ test('keepCardOrder never changes the list it is given', ()=>{
   assert.equal(JSON.stringify(list),copy);
 });
 
+// ── Edit dialog: never "None" for the entry's own level / area; Save sends only what the person changed ──
+const keys=o=>Object.keys(o).sort();
+const CUR={id:7,project:'Barwon',level:'GRD',area:'SLAB',schedule:null,entry_date:'2026-11-01',our_delivery_date:null,
+  supplier_delivery_date:'2026-11-09',drawing_reference:null,total_weight:2.5,split_reference:null,status:'Not Ordered',entry_type:'scheduled'};
+const FORM0={project:'Barwon',level:'GRD',area:'SLAB',schedule:'',entry_date:'2026-11-01',our_delivery_date:'',
+  supplier_delivery_date:'2026-11-09',drawing_reference:'',total_weight:'2.5',split_reference:''};
+
+test('Edit: Save sends only the fields the person changed (and the status rules those changes trigger)', ()=>{
+  let r=app.editPatch(CUR,FORM0,{...FORM0},false);
+  assert.equal(r.changed.length,0);assert.deepEqual(keys(r.patch),[]);
+
+  r=app.editPatch(CUR,FORM0,{...FORM0,split_reference:'Part 2'},false);
+  assert.deepEqual([...r.changed],['split_reference']);assert.deepEqual({...r.patch},{split_reference:'Part 2'});
+
+  // DBCC requested date set on a Not Ordered entry → Ordered; the two dates now differ → the mismatch flag comes back
+  r=app.editPatch(CUR,FORM0,{...FORM0,our_delivery_date:'2026-11-05'},false);
+  assert.deepEqual({...r.patch},{our_delivery_date:'2026-11-05',status:'Ordered',mismatch_resolved:false});
+
+  // schedule typed on an Ordered entry → Scheduled
+  r=app.editPatch({...CUR,status:'Ordered'},FORM0,{...FORM0,schedule:'VHKQ'},false);
+  assert.deepEqual({...r.patch},{schedule:'VHKQ',status:'Scheduled'});
+
+  // no status rule fires when the field it reads wasn't touched (the old dialog re-applied it on every save)
+  r=app.editPatch({...CUR,our_delivery_date:'2026-11-05'},{...FORM0,our_delivery_date:'2026-11-05'},{...FORM0,our_delivery_date:'2026-11-05',drawing_reference:'S001'},false);
+  assert.deepEqual({...r.patch},{drawing_reference:'S001'});
+
+  // weight: cleared → null, typed → a number; a cleared level → null (only because the person cleared it)
+  assert.deepEqual({...app.editPatch(CUR,FORM0,{...FORM0,total_weight:''},false).patch},{total_weight:null});
+  assert.deepEqual({...app.editPatch(CUR,FORM0,{...FORM0,total_weight:'3.125'},false).patch},{total_weight:3.125});
+  assert.deepEqual({...app.editPatch(CUR,FORM0,{...FORM0,level:''},false).patch},{level:null});
+
+  // a supplier never sends DBCC's requested date
+  r=app.editPatch(CUR,FORM0,{...FORM0,our_delivery_date:'2026-12-01',supplier_delivery_date:'2026-11-10'},true);
+  assert.deepEqual([...r.changed],['supplier_delivery_date']);assert.ok(!('our_delivery_date' in r.patch));
+});
+
+test("Edit: the entry's own level / area are always offered and picked — never None", ()=>{
+  const off=app.editOptions(['L1','L2'],'OLD LEVEL','None',"not on this job's list");
+  assert.match(off,/<option value="OLD LEVEL" selected>OLD LEVEL — not on this job&#39;s list<\/option>/);
+  assert.ok(!/<option value="" selected>/.test(off),'None is not picked');
+  assert.equal((off.match(/ selected/g)||[]).length,1);
+
+  const on=app.editOptions(['L1','L2'],'L2','None','x');
+  assert.equal(on,'<option value="">None</option><option value="L1">L1</option><option value="L2" selected>L2</option>');
+  assert.match(app.editOptions(['L1'],null,'None','x'),/^<option value="" selected>None<\/option>/);
+  assert.match(app.editOptions(['A'],'GRD" onmouseover="x','None','x'),/value="GRD&quot; onmouseover=&quot;x" selected/);
+
+  // level / area for the job picked in the dialog (opening, then after a project change)
+  vm.runInContext(`projects=[{name:'Barwon',levels:['GRD','L1'],areas:['SLAB','COLUMNS']},{name:'Qudos',levels:['L1'],areas:['WALLS']}];
+    editSnap={id:7,row:{project:'Barwon',level:'OLD LEVEL',area:'SLAB'},form:null};`,app);
+  let h=app.editLevelAreaHtml('Barwon',true);
+  assert.match(h.level,/value="OLD LEVEL" selected/);assert.match(h.area,/value="SLAB" selected/);
+  h=app.editLevelAreaHtml('Qudos',false);   // moved to a job without either → None, and nothing off-list offered
+  assert.match(h.level,/value="" selected/);assert.ok(!/OLD LEVEL/.test(h.level));assert.match(h.area,/value="" selected/);
+  vm.runInContext(`editSnap={id:8,row:{project:'Barwon',level:'L1',area:'SLAB'},form:null};`,app);
+  assert.match(app.editLevelAreaHtml('Qudos',false).level,/value="L1" selected/,'a job that has the same level keeps it');
+});
+
+test('Edit: the guard compares database values exactly (null is not "")', ()=>{
+  assert.ok(app.sameDbValue(null,undefined));assert.ok(app.sameDbValue(2.5,2.5));assert.ok(app.sameDbValue('2026-11-01','2026-11-01'));
+  assert.ok(!app.sameDbValue(null,''));assert.ok(!app.sameDbValue('GRD','GRD '));assert.ok(!app.sameDbValue(2.5,2.4));
+  // what "changed underneath" covers: every field the dialog shows, plus the status and type its rules read
+  const guard=[...vm.runInContext('EDIT_GUARD',app)].sort();
+  assert.deepEqual(guard,['area','drawing_reference','entry_date','entry_type','level','our_delivery_date','project','schedule',
+    'split_reference','status','supplier_delivery_date','total_weight']);
+});
+
+// A stand-in for the Supabase client: records every call (table, op, payload, filters) and answers from `answer(q)`.
+function fakeSb(answer){
+  const calls=[];
+  const from=table=>{
+    const q={table,op:'select',payload:null,filters:[],returning:false,single:false};
+    const b={
+      select(){if(q.op!=='select')q.returning=true;return b},
+      update(p){q.op='update';q.payload=p;return b},insert(p){q.op='insert';q.payload=p;return b},delete(){q.op='delete';return b},
+      eq(c,v){q.filters.push(['eq',c,v]);return b},is(c,v){q.filters.push(['is',c,v]);return b},in(c,v){q.filters.push(['in',c,v]);return b},
+      neq(){return b},order(){return b},limit(){return b},maybeSingle(){q.single=true;return b},single(){q.single=true;return b},
+      then(res,rej){calls.push(q);return Promise.resolve(answer(q)||{data:null,error:null}).then(res,rej)}};
+    return b};
+  return{from,calls,channel:()=>({on(){return this},subscribe(){return this}})};
+}
+// Fake page elements for one dialog: getElementById answers from this map.
+function fakePage(values){
+  const els={};
+  for(const[id,v]of Object.entries(values))els[id]={id,value:v,innerHTML:'',textContent:'',disabled:false,style:{},classList:{add(){},remove(){},toggle(){}}};
+  app.document.getElementById=id=>els[id]||null;
+  return els;
+}
+function withApp(src){vm.runInContext(src,app)}
+withApp(`loadEntries=async()=>{};renderDash=()=>{};renderForeman=()=>{};confirmDialog=(t,m,ok,c,fn)=>{globalThis.__confirmed=fn};userName='Tester';foremanName='Fiona';`);
+const editPage=form=>fakePage({ed_proj:form.project,ed_level:form.level,ed_area:form.area,ed_sched:form.schedule,ed_date:form.entry_date,
+  ed_ourD:form.our_delivery_date,ed_supD:form.supplier_delivery_date,ed_draw:form.drawing_reference,ed_wt:form.total_weight,
+  ed_split:form.split_reference,edErr:'',edSaveBtn:'',editOv:''});
+function openSnap(row,form){app.__snap={id:row.id,row,form};withApp('editSnap=JSON.parse(JSON.stringify(__snap))')}
+
+test('Edit Save: only the changed field is sent, guarded by every value the dialog showed; history after the write', async()=>{
+  openSnap(CUR,FORM0);const els=editPage({...FORM0,split_reference:'Part 2'});
+  const sb=fakeSb(q=>q.table==='entries'&&q.op==='select'?{data:{...CUR},error:null}:q.op==='update'?{data:[{id:7}],error:null}:{data:null,error:null});
+  app.__sb=sb;withApp('sb=__sb');
+  await app.saveEdit(7);
+  const [read,upd,hist]=sb.calls;
+  assert.equal(sb.calls.length,3);
+  assert.equal(read.op,'select');assert.deepEqual([...read.filters[0]],['eq','id',7]);
+  assert.equal(upd.op,'update');assert.deepEqual({...upd.payload},{split_reference:'Part 2'},'only the field the person changed');
+  assert.ok(upd.returning,'the update asks for the changed row back (0 rows = not saved)');
+  const guard=Object.fromEntries(upd.filters.filter(f=>f[1]!=='id').map(f=>[f[1],f[0]==='is'?null:f[2]]));
+  for(const k of vm.runInContext('EDIT_GUARD',app))assert.ok(k in guard,`update is conditional on ${k}`);
+  assert.equal(guard.level,'GRD');assert.equal(guard.schedule,null);assert.equal(guard.total_weight,2.5);
+  assert.equal(hist.table,'audit_log');
+  assert.deepEqual([...hist.payload].map(r=>({...r})),[{entry_id:7,action:'UPDATE',field_changed:'split_reference',old_value:'',new_value:'Part 2',user_identifier:'Tester'}]);
+  assert.equal(els.edErr.innerHTML,'');
+});
+
+test('Edit Save: an entry changed underneath is not saved — "changed while you were editing — reload"', async()=>{
+  openSnap(CUR,FORM0);const els=editPage({...FORM0,split_reference:'Part 2'});
+  const sb=fakeSb(q=>q.op==='select'?{data:{...CUR,level:'L1',status:'Ordered'},error:null}:{data:[{id:7}],error:null});
+  app.__sb=sb;withApp('sb=__sb');
+  await app.saveEdit(7);
+  assert.deepEqual(sb.calls.map(c=>c.op),['select'],'no update, no history');
+  assert.match(els.edErr.innerHTML,/This entry changed while you were editing — reload\. Nothing was saved — changed meanwhile: Level, Status\./);
+  assert.match(els.edErr.innerHTML,/onclick="reloadEditEntry\(7\)"/);
+});
+
+test('Edit Save: a row that changed between the check and the write (0 rows) or a refusal writes no history', async()=>{
+  for(const [answer,words] of [
+    [{data:[],error:null},/This entry changed while you were editing — reload/],
+    [{data:null,error:{message:'Suppliers cannot change the ordered (DBCC) delivery date'}},/Not saved — the database refused it: Suppliers cannot change the ordered \(DBCC\) delivery date/],
+    [{data:null,error:{message:'TypeError: Failed to fetch'}},/Not saved — couldn&#39;t reach the database/],
+  ]){
+    openSnap(CUR,FORM0);const els=editPage({...FORM0,supplier_delivery_date:'2026-11-12'});
+    const sb=fakeSb(q=>q.op==='select'?{data:{...CUR},error:null}:q.op==='update'?answer:{data:null,error:null});
+    app.__sb=sb;withApp('sb=__sb');
+    await app.saveEdit(7);
+    assert.deepEqual(sb.calls.map(c=>c.op),['select','update']);
+    assert.match(els.edErr.innerHTML,words);
+  }
+});
+
+test('Edit Save: nothing changed → nothing is sent', async()=>{
+  openSnap(CUR,FORM0);editPage({...FORM0});
+  const sb=fakeSb(()=>({data:null,error:null}));app.__sb=sb;withApp('sb=__sb');
+  await app.saveEdit(7);
+  assert.equal(sb.calls.length,0);
+});
+
 // ── Static sweep: pins that no data string is ever written into handler code or a link again ──
 
 // Every on<event>="…" attribute value written in app.js, with the ${…} / '+…+' expressions inside it.

@@ -1752,9 +1752,68 @@ ${['Scheduled','Ordered'].includes(e.status)?`<button class="btn btn-sm" style="
 ${adminUnlocked?`<button class="btn btn-err btn-sm" onclick="deleteEntry(${e.id})">Delete</button>`:''}
 </div>`;$('detailOv').classList.add('show')}
 
-/* ═══ EDIT ═══ */
+/* ═══ EDIT ═══
+   b5.14 — the Edit dialog never writes what the person didn't change.
+   • An entry's own project / level / area is always one of the choices — marked when the job's list doesn't have it —
+     so it can never show (and then save) as "None" (the hazard found on 4 Nov).
+   • A snapshot of the entry is taken when the dialog opens; Save sends ONLY the fields the person changed.
+   • Save re-reads the entry first: if anything the dialog shows (or its status rules read) changed underneath, it says
+     "this entry changed while you were editing — reload" and saves nothing. The update itself is conditional on those
+     values still holding, so nothing can slip in between the check and the write. */
+const EDIT_FIELDS=['project','level','area','schedule','entry_date','our_delivery_date','supplier_delivery_date','drawing_reference','total_weight','split_reference'];
+const EDIT_GUARD=[...EDIT_FIELDS,'status','entry_type'];
+const EDIT_FIELD_NAMES={project:'Project',level:'Level',area:'Area',schedule:'Schedule',entry_date:'Scheduler entry date',our_delivery_date:'DBCC requested delivery date',supplier_delivery_date:'Production delivery date',drawing_reference:'Drawing reference',total_weight:'Weight',split_reference:'Split reference',status:'Status',entry_type:'Type'};
+let editSnap=null;   // {id, row: the entry when the dialog opened, form: the dialog's values when it opened}
+
+// <option>s: an optional blank choice, then the picked value itself when the list doesn't have it (marked, never
+// dropped), then the list. `pick` is the selected one.
+function editOptions(list,pick,blankLabel,offListNote){
+  pick=pick==null?'':String(pick);
+  let h=blankLabel!=null?`<option value=""${pick===''?' selected':''}>${esc(blankLabel)}</option>`:'';
+  if(pick!==''&&!list.includes(pick))h+=`<option value="${esc(pick)}" selected>${esc(pick)} — ${esc(offListNote)}</option>`;
+  return h+list.map(v=>`<option value="${esc(v)}"${v===pick?' selected':''}>${esc(v)}</option>`).join('')}
+// Level / Area choices for the job picked in the dialog. On the entry's own job its own level / area are always there;
+// on another job, what's picked stays only if that job has it (else the entry's own, if that job has it, else None).
+function editLevelAreaHtml(pn,opening){
+  const s=editSnap,p=projects.find(x=>x.name===pn),ownJob=pn===s.row.project;
+  const choose=(selId,list,orig)=>{const cur=opening?'':($(selId)?$(selId).value:'');
+    if(cur&&list.includes(cur))return cur;
+    if(ownJob)return orig==null?'':orig;
+    return orig&&list.includes(orig)?orig:''};
+  const lv=p?p.levels:[],ar=p?p.areas:[];
+  return{level:editOptions(lv,choose('ed_level',lv,s.row.level),'None',"not on this job's list"),
+         area:editOptions(ar,choose('ed_area',ar,s.row.area),'None',"not on this job's list")}}
+function onEditProjChange(){const la=editLevelAreaHtml($('ed_proj').value,false);$('ed_level').innerHTML=la.level;$('ed_area').innerHTML=la.area}
+function readEditForm(){return{project:$('ed_proj').value,level:$('ed_level').value,area:$('ed_area').value,schedule:$('ed_sched').value.trim(),entry_date:$('ed_date').value,our_delivery_date:$('ed_ourD').value,supplier_delivery_date:$('ed_supD').value,drawing_reference:$('ed_draw').value.trim(),total_weight:$('ed_wt').value.trim(),split_reference:$('ed_split').value.trim()}}
+// What Save sends: only the fields the person changed (the dialog now vs when it opened), plus the status / mismatch
+// rules those changes trigger, judged on `cur` — the entry as the database holds it. Pure (tests/r1.test.mjs).
+function editPatch(cur,form0,form1,supplier){
+  const changed=EDIT_FIELDS.filter(k=>form1[k]!==form0[k]&&!(supplier&&k==='our_delivery_date'));   // suppliers never change DBCC's date
+  const patch={};
+  for(const k of changed){const v=form1[k];patch[k]=v===''?null:k==='total_weight'?(isNaN(parseFloat(v))?null:parseFloat(v)):v}
+  const next={...cur,...patch};
+  if(changed.includes('our_delivery_date')||changed.includes('schedule')){
+    let st=cur.status;
+    if(cur.status==='Not Ordered'&&next.our_delivery_date)st='Ordered';
+    if((cur.status==='Not Ordered'||cur.status==='Ordered')&&next.schedule)st='Scheduled';
+    if(st!==cur.status)patch.status=st}
+  if((changed.includes('our_delivery_date')||changed.includes('supplier_delivery_date'))&&next.our_delivery_date&&next.supplier_delivery_date&&next.our_delivery_date!==next.supplier_delivery_date)patch.mismatch_resolved=false;
+  return{changed,patch}}
+function sameDbValue(a,b){return(a==null&&b==null)||(a!=null&&b!=null&&String(a)===String(b))}
+// Words a person can act on for a refused or failed database call.
+function refusalWords(e){
+  const m=String((e&&e.message)||e||'').trim();
+  if(!m||/failed to fetch|networkerror|network request failed|load failed/i.test(m))return "couldn't reach the database — check the connection and try again.";
+  return 'the database refused it: '+m}
+function showEditConflict(id,fields){
+  const what=fields.length?' — changed meanwhile: '+fields.map(f=>EDIT_FIELD_NAMES[f]||f).join(', '):'';
+  $('edErr').innerHTML=`<div class="error-msg">This entry changed while you were editing — reload. Nothing was saved${esc(what)}.<div style="margin-top:8px"><button class="btn btn-sec btn-sm" onclick="reloadEditEntry(${id})" style="width:auto">Reload the entry</button></div></div>`}
+async function reloadEditEntry(id){
+  await loadEntries();renderDash();
+  if(entries.some(x=>x.id===id))openEditEntry(id);else{closeOv('editOv');alert('This entry is no longer there — it may have been deleted.')}}
+
 function openEditEntry(id){const e=entries.find(x=>x.id===id);if(!e)return;
-  const proj=projects.find(p=>p.name===e.project);
+  editSnap={id,row:JSON.parse(JSON.stringify(e)),form:null};
   // Build the "Danger Zone" section that lets the user surgically delete:
   //   - the attached schedule only (schedule file + extracted data — keeps markup plans)
   //   - individual markup plans (one at a time, no impact on schedule)
@@ -1787,19 +1846,21 @@ function openEditEntry(id){const e=entries.find(x=>x.id===id);if(!e)return;
     }
     dangerSection+='</div>';
   }
+  const la=editLevelAreaHtml(e.project,true);
   $('editModal').innerHTML=`<h3>Edit Entry<button class="modal-close" onclick="closeOv('editOv')">&times;</button></h3>
-<div class="fg"><label>Project</label><select id="ed_proj">${projects.map(p=>`<option${p.name===e.project?' selected':''}>${esc(p.name)}</option>`).join('')}</select></div>
-<div class="row2"><div class="fg"><label>Level</label><select id="ed_level"><option value="">None</option>${(proj?proj.levels:[]).map(l=>`<option${l===e.level?' selected':''}>${esc(l)}</option>`).join('')}</select></div><div class="fg"><label>Area</label><select id="ed_area"><option value="">None</option>${(proj?proj.areas:[]).map(a=>`<option${a===e.area?' selected':''}>${esc(a)}</option>`).join('')}</select></div></div>
+<div class="fg"><label>Project</label><select id="ed_proj">${editOptions(projects.map(p=>p.name),e.project,e.project?null:'— no project —','not in the project list')}</select></div>
+<div class="row2"><div class="fg"><label>Level</label><select id="ed_level">${la.level}</select></div><div class="fg"><label>Area</label><select id="ed_area">${la.area}</select></div></div>
 <div class="row2"><div class="fg"><label>Schedule</label><input type="text" id="ed_sched" value="${esc(e.schedule||'')}" style="font-family:'JetBrains Mono',monospace"></div><div class="fg"><label>Scheduler Entry Date</label><input type="date" id="ed_date" value="${esc(e.entry_date||'')}"></div></div>
 <div class="row2"><div class="fg"><label>DBCC Requested Delivery Date${isSupplier()?' <span style="font-weight:400;color:var(--muted);font-size:11px">(DBCC only)</span>':''}</label><input type="date" id="ed_ourD" value="${esc(e.our_delivery_date||'')}"${isSupplier()?' disabled title="Only DBCC can change the DBCC requested delivery date"':''}></div><div class="fg"><label>Production Delivery Date</label><input type="date" id="ed_supD" value="${esc(e.supplier_delivery_date||'')}"></div></div>
-<div class="row2"><div class="fg"><label>Drawing Reference</label><input type="text" id="ed_draw" value="${esc(e.drawing_reference||'')}"></div><div class="fg"><label>Weight (T)</label><input type="number" step="0.001" id="ed_wt" value="${esc(e.total_weight||'')}" style="font-family:'JetBrains Mono',monospace"></div></div>
+<div class="row2"><div class="fg"><label>Drawing Reference</label><input type="text" id="ed_draw" value="${esc(e.drawing_reference||'')}"></div><div class="fg"><label>Weight (T)</label><input type="number" step="0.001" id="ed_wt" value="${esc(e.total_weight??'')}" style="font-family:'JetBrains Mono',monospace"></div></div>
 <div class="fg"><label>Split Reference</label><input type="text" id="ed_split" value="${esc(e.split_reference||'')}"></div>
 <div class="info-msg" style="margin-top:8px;font-size:12px;background:#F0F5FF;border-color:#C7D2FE;color:var(--info)">💡 Comments are now edited directly on the dashboard — click the Supplier Comments or DBCC Comments cell on the row.</div>
 ${dangerSection}
 <div id="edErr"></div>
-<div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-sec btn-sm" onclick="closeOv('editOv')">Cancel</button><button class="btn btn-sm" onclick="saveEdit(${id})" style="width:auto">Save</button></div>`;
+<div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-sec btn-sm" onclick="closeOv('editOv')">Cancel</button><button class="btn btn-sm" id="edSaveBtn" onclick="saveEdit(${id})" style="width:auto">Save</button></div>`;
   $('editOv').classList.add('show');
-  $('ed_proj').onchange=()=>{const pn=$('ed_proj').value,p=projects.find(x=>x.name===pn);$('ed_level').innerHTML='<option value="">None</option>'+(p?p.levels.map(l=>`<option>${esc(l)}</option>`).join(''):'');$('ed_area').innerHTML='<option value="">None</option>'+(p?p.areas.map(a=>`<option>${esc(a)}</option>`).join(''):'')}}
+  $('ed_proj').onchange=onEditProjChange;
+  editSnap.form=readEditForm()}   // what the dialog showed — Save compares against this
 
 function removeScheduleFromEntry(id){
   const e=entries.find(x=>x.id===id);if(!e)return;
@@ -1847,22 +1908,38 @@ async function removeMarkupFromEdit(id,idx){
       openEditEntry(id);
     })}
 
-async function saveEdit(id){const e=entries.find(x=>x.id===id);if(!e)return;const err=$('edErr');err.innerHTML='';
-  const nv={project:$('ed_proj').value,level:$('ed_level').value||null,area:$('ed_area').value||null,schedule:$('ed_sched').value.trim()||null,entry_date:$('ed_date').value||null,our_delivery_date:$('ed_ourD').value||null,supplier_delivery_date:$('ed_supD').value||null,drawing_reference:$('ed_draw').value.trim()||null,total_weight:$('ed_wt').value?parseFloat($('ed_wt').value):null,split_reference:$('ed_split').value.trim()||null};
-  if(!nv.project)return err.innerHTML='<div class="error-msg">Project required</div>';
-  // Suppliers can never change the ordered (our) delivery date — that's DBCC's. Server-enforced in Stage 5.
-  if(isSupplier())nv.our_delivery_date=e.our_delivery_date;
-  if(e.status==='Not Ordered'&&nv.our_delivery_date)nv.status='Ordered';
-  if((e.status==='Not Ordered'||e.status==='Ordered')&&nv.schedule)nv.status='Scheduled';
-  if(nv.our_delivery_date&&nv.supplier_delivery_date&&nv.our_delivery_date!==nv.supplier_delivery_date&&(e.our_delivery_date!==nv.our_delivery_date||e.supplier_delivery_date!==nv.supplier_delivery_date)){nv.mismatch_resolved=false}
-  const ch=[];['project','level','area','schedule','entry_date','our_delivery_date','supplier_delivery_date','drawing_reference','total_weight','split_reference'].forEach(k=>{if(String(e[k]||'')!==String(nv[k]||''))ch.push({field:k,old:e[k]||'',new:nv[k]||''})});
-  if(!ch.length){closeOv('editOv');return}
-  const{error}=await sb.from('entries').update(nv).eq('id',id);if(error)return err.innerHTML='<div class="error-msg">'+esc(error.message)+'</div>';
-  await sb.from('audit_log').insert(ch.map(c=>({entry_id:id,action:'UPDATE',field_changed:c.field,old_value:String(c.old),new_value:String(c.new),user_identifier:userName})));
-  closeOv('editOv');await loadEntries();renderDash();
-  // Prompt for delivery date change notification
-  const ourChanged=ch.find(c=>c.field==='our_delivery_date');
-  if(ourChanged){setTimeout(()=>confirmDialog('Delivery Date Changed','DBCC requested delivery date changed from <b>'+(fmtDate(ourChanged.old)||'not set')+'</b> to <b>'+(fmtDate(ourChanged.new)||'not set')+'</b>.<br><br>Send notification email?','Send Email','',()=>openDateChangeEmail(id,ourChanged.old,ourChanged.new)),200)}}
+async function saveEdit(id){const err=$('edErr');err.innerHTML='';
+  const snap=editSnap;
+  if(!snap||snap.id!==id||!snap.form){err.innerHTML='<div class="error-msg">This window is out of date — close it and open the entry again. Nothing was saved.</div>';return}
+  const form1=readEditForm();
+  if(!editPatch(snap.row,snap.form,form1,isSupplier()).changed.length){closeOv('editOv');return}   // nothing changed — nothing to send
+  if(!form1.project){err.innerHTML='<div class="error-msg">Pick a project.</div>';return}
+  const btn=$('edSaveBtn');if(btn){btn.disabled=true;btn.textContent='Saving…'}
+  try{
+    // 1. Re-read the entry. If anything the dialog shows or its rules read changed since it opened, save nothing.
+    const{data:cur,error:rErr}=await sb.from('entries').select('*').eq('id',id).maybeSingle();
+    if(rErr){err.innerHTML=`<div class="error-msg">Couldn't check the entry before saving — ${esc(refusalWords(rErr))} Nothing was saved.</div>`;return}
+    if(!cur){err.innerHTML='<div class="error-msg">This entry is no longer there — it may have been deleted. Nothing was saved.</div>';return}
+    const moved=EDIT_GUARD.filter(k=>!sameDbValue(cur[k],snap.row[k]));
+    if(moved.length){showEditConflict(id,moved);return}
+    // 2. Only the person's changes (+ the status rules they trigger), judged on the entry as it is now.
+    const{changed,patch}=editPatch(cur,snap.form,form1,isSupplier());
+    // 3. One conditional update: it lands only while the guarded fields still hold what the dialog showed.
+    let q=sb.from('entries').update(patch).eq('id',id);
+    for(const k of EDIT_GUARD){const v=snap.row[k];q=v==null?q.is(k,null):q.eq(k,v)}
+    const{data:done,error}=await q.select('id');
+    if(error){err.innerHTML=`<div class="error-msg">Not saved — ${esc(refusalWords(error))}</div>`;return}
+    if(!done||!done.length){showEditConflict(id,[]);return}
+    // 4. History — one line per field that changed (and the status a rule moved), written only now the save landed.
+    const hist=[...changed,...(patch.status?['status']:[])].map(k=>({entry_id:id,action:'UPDATE',field_changed:k,old_value:String(cur[k]??''),new_value:String(patch[k]??''),user_identifier:userName}));
+    const{error:hErr}=await sb.from('audit_log').insert(hist);
+    if(hErr)console.warn('[REO] saveEdit: saved, but the history line failed:',hErr.message);
+    closeOv('editOv');editSnap=null;await loadEntries();renderDash();
+    // Prompt for delivery date change notification
+    if(changed.includes('our_delivery_date')){
+      const oldD=cur.our_delivery_date||'',newD=patch.our_delivery_date||'';
+      setTimeout(()=>confirmDialog('Delivery Date Changed','DBCC requested delivery date changed from <b>'+(esc(fmtDate(oldD))||'not set')+'</b> to <b>'+(esc(fmtDate(newD))||'not set')+'</b>.<br><br>Send notification email?','Send Email','',()=>openDateChangeEmail(id,oldD,newD)),200)}
+  }finally{if(btn){btn.disabled=false;btn.textContent='Save'}}}
 
 async function deleteEntry(id){
   if(!adminUnlocked)return;
