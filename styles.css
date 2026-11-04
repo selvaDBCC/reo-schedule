@@ -236,6 +236,12 @@ body.role-supplier .dbcc-only{display:none!important}
 .proj-item .counts b{color:var(--accent-dk)}
 .proj-item .sum{font-size:11px;color:#888;margin-top:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .proj-actions{display:flex;gap:6px;flex-shrink:0}
+/* b5.14 — projects with pairs live: the Master-OPS link and the job's pairs */
+.pill-linked{background:var(--success-lt);color:var(--success);font-size:10px;padding:2px 8px;margin-left:6px}
+.pill-unlinked{background:var(--warn-lt);color:var(--warn);font-size:10px;padding:2px 8px;margin-left:6px}
+.proj-pairs{margin:8px 0 0 18px;font-size:12px;color:var(--mid);font-weight:400;line-height:1.6}
+.proj-pairs-ret{margin-top:6px;font-size:12px;color:var(--warn);font-weight:500}
+#newProjName:disabled,#newProjSupplier:disabled{opacity:.75;cursor:not-allowed}
 .audit-item{padding:13px 14px;border-bottom:1px solid #f0eeea;font-size:12px}
 .audit-item:last-child{border-bottom:none}
 .audit-item:hover{background:#FAFAF8}

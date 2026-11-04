@@ -637,6 +637,100 @@ test('closing the card with saved changes not emailed asks first; an untouched c
   r('__confirm.fn()');assert.equal(r('cellCard'),null);
 });
 
+// ── The project editor, project delete and the Files pickers ──
+function adminApp({live=true,answer}={}){
+  const a=loadApp(),r=src=>vm.runInContext(src,a);
+  a.__p={pairs:PAIRS,projects:PROJECTS,entries:CARD_ENTRIES,live};
+  r(`pairsLive=__p.live;authRole='dbcc';userName='Chris';adminUnlocked=true;
+     projectPairs=JSON.parse(JSON.stringify(__p.pairs));projects=JSON.parse(JSON.stringify(__p.projects));entries=JSON.parse(JSON.stringify(__p.entries));
+     entries.push({id:40,project:'1033 Nepean Hwy',level:'Driveway',area:'Excavation',status:'Ordered',entry_type:'scheduled'});
+     emailContacts=[];projectSchedulers=[];projectFiles=[];__alerts=[];alert=m=>__alerts.push(String(m));
+     loadProjects=async()=>{};populateDropdowns=()=>{};confirmDialog=(t,m,ok,c,fn)=>{__confirmed=fn};`);
+  const els={};
+  a.document.getElementById=id=>els[id]||(els[id]={id,value:'',innerHTML:'',textContent:'',title:'',disabled:false,style:{},classList:{add(){},remove(){},toggle(){}}});
+  a.document.querySelector=()=>({value:'level_area'});
+  const sb=fakeSb(answer||(()=>({data:null,error:null})));a.__sb=sb;r('sb=__sb');
+  return{a,r,els,sb};
+}
+test('project editor (pairs live): a linked job is read-only — its lists come from Master-OPS; a new job has no Levels / Areas boxes', ()=>{
+  const{a,els}=adminApp();
+  a.renderAdminProj();
+  assert.ok(!/newLevels|newAreas|textarea/.test(els.adminProj.innerHTML),'no Levels / Areas boxes');
+  assert.match(els.projPairsBox?els.projPairsBox.innerHTML:els.adminProj.innerHTML,/Levels and areas come from Master-OPS once the job is linked to it/);
+  a.editProj(6);
+  assert.equal(els.newProjName.disabled,true);assert.equal(els.newProjSupplier.disabled,true);
+  assert.equal(els.saveProjBtn.style.display,'none');assert.equal(els.cancelPE.textContent,'Close');
+  assert.match(els.projPairsBox.innerHTML,/Linked to Master-OPS \(BAR\)\.<\/b> Its name, supplier and levels and areas come from Master-OPS — change them in Project Setup there\./);
+  assert.match(els.projPairsBox.innerHTML,/<li><b>GRD<\/b> — SLAB · COLUMNS<\/li>/);
+  assert.match(els.projPairsBox.innerHTML,/No longer on this job in Master-OPS: L1 \/ WALLS/);
+  // an unlinked job with entries filed under its name: the name stays, the supplier can change
+  a.editProj(7);
+  assert.equal(els.newProjName.disabled,true);assert.equal(els.newProjSupplier.disabled,false);assert.equal(els.saveProjBtn.style.display,'');
+  assert.match(els.projPairsBox.innerHTML,/Not linked to Master-OPS\.<\/b> Its level \/ area pair is REO-only \(set by a migration\):/);
+  assert.match(els.projPairsBox.innerHTML,/The name stays as it is: entries and pairs are filed under it\./);
+  a.editProj(8);
+  assert.equal(els.newProjName.disabled,false);assert.match(els.projPairsBox.innerHTML,/Not linked to Master-OPS yet — nothing can be ordered\./);
+  a.cancelPE();assert.equal(els.newProjName.disabled,false);assert.equal(els.aFormTitle.textContent,'Add New Project');
+});
+
+test('project editor (pairs live): a new job is a name and a supplier; a linked job is never sent; the list shows each job\'s link', async()=>{
+  let t=adminApp();const el=id=>t.a.document.getElementById(id);
+  t.a.renderAdminProj();el('newProjName').value='Stead Park';el('newProjSupplier').value='ARC';
+  await t.a.saveProject();
+  assert.deepEqual(t.sb.calls.map(c=>[c.table,c.op]),[['projects','insert'],['audit_log','insert']]);
+  assert.deepEqual({...t.sb.calls[0].payload},{name:'Stead Park',supplier:'ARC',levels:'',areas:''});
+  t=adminApp();t.a.renderAdminProj();t.a.editProj(6);el('saveProjBtn').style.display='';await t.a.saveProject();
+  assert.equal(t.sb.calls.length,0);assert.match(el('projErr').innerHTML,/This job is linked to Master-OPS — its name, supplier and levels \/ areas come from Master-OPS and can&#39;t be changed here\./);
+  t=adminApp();t.a.renderAdminProj();t.a.editProj(7);el('newProjSupplier').value='ARC';await t.a.saveProject();
+  assert.deepEqual({...t.sb.calls[0].payload},{supplier:'ARC'},'only what changed; the filed name is never sent');
+  assert.equal(t.sb.calls[0].op,'update');
+  const list=el('projList').innerHTML;
+  assert.match(list,/Barwon Reservoir<span class="pill"[^>]*>Aus Reo<\/span><span class="pill pill-linked"[^>]*>Master-OPS · BAR<\/span>/);
+  assert.match(list,/New Job<span class="pill"[^>]*>ARC<\/span><span class="pill pill-unlinked">Not linked to Master-OPS<\/span>/);
+  assert.match(list,/<b>5<\/b> level \/ area pairs · 1 no longer on the job/);
+  assert.ok(!/deleteProj\(6\)|deleteProj\(7\)/.test(list),'a job with pairs or a link has no Delete');assert.match(list,/deleteProj\(8\)/);
+  assert.match(list,/onclick="editProj\(6\)">View</);
+});
+
+test('deleting a job writes its history only after the database removed it, and says why not', async()=>{
+  for(const [answer,said,hist] of [
+    [{data:[{id:8}],error:null},null,true],
+    [{data:null,error:{code:'23503',message:'update or delete on table "projects" violates foreign key constraint'}},/^Not deleted — this job has level \/ area pairs \(or other records\) that point at it, so it can't be deleted — it stays\.$/,false],
+    [{data:[],error:null},/^Not deleted — the job wasn't deleted/,false]]){
+    for(const live of [true,false]){
+      const{a,r,sb}=adminApp({live,answer:q=>q.table==='projects'?answer:{data:null,error:null}});
+      a.renderAdminProj();a.deleteProj(8);await r('__confirmed()');
+      assert.deepEqual(sb.calls.map(c=>c.table+':'+c.op),hist?['projects:delete','audit_log:insert']:['projects:delete']);
+      assert.ok(sb.calls[0].returning,'the delete asks for the row back');
+      const al=plain(r('__alerts'));if(said)assert.match(al[0]||'',said);else assert.equal(al.length,0);
+    }
+  }
+});
+
+test('project editor (pairs off): exactly b5.13 — the Levels / Areas boxes', ()=>{
+  const{a,els}=adminApp({live:false});
+  a.renderAdminProj();
+  assert.match(els.adminProj.innerHTML,/<textarea id="newLevels"/);assert.match(els.adminProj.innerHTML,/<textarea id="newAreas"/);
+});
+
+test('Files (pairs live): a level + area file is tagged with one of the job\'s pairs', async()=>{
+  const{a,els,sb}=adminApp();
+  els.pfProj=a.document.getElementById('pfProj');els.pfProj.value='Barwon Reservoir';
+  a.pfOnProjChange();
+  assert.deepEqual(opts(els.pfLevel.innerHTML),['Choose level…','GRD','L1','GRD-L1','B1']);
+  assert.deepEqual(opts(els.pfArea.innerHTML),['Pick a level first']);assert.equal(els.pfArea.disabled,true);
+  els.pfLevel.value='L1';a.pfOnLevelChange();
+  assert.deepEqual(opts(els.pfArea.innerHTML),['Choose area…','SLAB'],'only that level\'s active pairs');assert.equal(els.pfArea.disabled,false);
+  // an upload tagged with a level / area that isn't a pair is refused before anything is sent
+  els.pfArea.value='WALLS';
+  for(const[id,v]of Object.entries({pfCat:'marking_plan',pfLabel:'x',pfSuperseding:false}))a.document.getElementById(id).value=v;
+  a.document.getElementById('pfSuperseding').checked=false;
+  vm.runInContext("window._pfPendingFile={name:'a.pdf'}",a);
+  await a.pfUpload();
+  assert.match(a.document.getElementById('pfUploadErr').innerHTML,/L1 \/ WALLS isn't a level \/ area on this job in Master-OPS — pick it from the list/);
+  assert.equal(sb.calls.length,0);
+});
+
 test('the email dialog without the card is unchanged: no file list taken over, no callback carried', ()=>{
   const a=loadApp(),r=src=>vm.runInContext(src,a);
   r(`emailContacts=[];projectSchedulers=[];projectFiles=[];entries=[];__got=0;`);

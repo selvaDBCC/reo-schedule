@@ -447,7 +447,7 @@ function onProjectsChanged(){
   if(adminUnlocked)renderProjList();
   if(modeChanged){redrawForPairsMode();return}
   if(!pairsLive)return;
-  refreshEntryForm();refreshProgramViews()}
+  refreshEntryForm();refreshProgramViews();pfRefreshPickers()}
 // The delivery grid and an open cell card follow the entries / pairs on screen (pairs live), keeping the grid's job,
 // the ticked cells and everything the card holds.
 function refreshProgramViews(){if(!pairsLive)return;if($('dpGridWrap')&&dpProject())renderPairGrid();if(cellCard)ccRenderSoft()}
@@ -2559,6 +2559,7 @@ function doUnlock(company){
 
 /* ═══ ADMIN: PROJECTS ═══ */
 function renderAdminProj(){
+  if(pairsLive)return renderAdminProjPairs();   // b5.14 (below)
   $('adminProj').innerHTML=`<div class="card" style="margin-bottom:18px"><h3 style="font-size:15px;font-weight:700;margin-bottom:14px;color:var(--gray-dk)" id="aFormTitle">Add New Project</h3><div class="row2"><div class="fg"><label>Project Name</label><input type="text" id="newProjName" placeholder="e.g. New School Stage 2"></div><div class="fg"><label>Supplier</label><select id="newProjSupplier"><option value="Aus Reo">Aus Reo</option><option value="ARC">ARC</option></select></div></div><div class="row2"><div class="fg"><label>Levels <span style="font-weight:400;color:var(--muted);font-size:11px">(one per line)</span></label><textarea id="newLevels" rows="6" style="font-family:'JetBrains Mono',monospace;font-size:12px"></textarea></div><div class="fg"><label>Areas <span style="font-weight:400;color:var(--muted);font-size:11px">(one per line)</span></label><textarea id="newAreas" rows="6" style="font-family:'JetBrains Mono',monospace;font-size:12px"></textarea></div></div><div style="display:flex;gap:10px;margin-top:14px"><button class="btn btn-sm" onclick="saveProject()" id="saveProjBtn" style="width:auto">Add Project</button><button class="btn btn-sec btn-sm" onclick="cancelPE()" id="cancelPE" style="display:none;width:auto">Cancel</button></div><div id="projErr"></div></div><div class="card"><h3 style="font-size:15px;font-weight:700;margin-bottom:12px;color:var(--gray-dk)">Projects (<span id="projCount">${projects.length}</span>)</h3><div class="proj-list" id="projList"></div></div>`;renderProjList()}
 
 function renderProjList(){$('projCount').textContent=projects.length;
@@ -2567,6 +2568,7 @@ function renderProjList(){$('projCount').textContent=projects.length;
     const schedTxt=sched.length?('Scheduler(s): '+sched.map(c=>esc(c.label)).join(', ')):'<span style="color:var(--muted)">No scheduler assigned</span>';
     const isArc=(p.supplier==='ARC');
     const supBadge=`<span class="pill" style="background:${isArc?'#E3F2FD':'#FFF3E0'};color:${isArc?'#1565C0':'#E65100'};font-size:10px;padding:2px 8px;margin-left:6px">${esc(p.supplier||'Aus Reo')}</span>`;
+    if(pairsLive)return projItemPairsHtml(p,supBadge,schedTxt);   // b5.14: its link to Master-OPS and its pairs
     return `<div class="proj-item"><div class="proj-item-info"><h4>${esc(p.name)}${supBadge}</h4><div class="counts"><b>${p.levels.length}</b> levels · <b>${p.areas.length}</b> areas</div><div class="sum">${schedTxt}</div></div><div class="proj-actions"><button class="btn btn-sec btn-sm" onclick="openSchedulerModal(${p.id})">Schedulers</button><button class="btn btn-sec btn-sm" onclick="editProj(${p.id})">Edit</button><button class="btn btn-err btn-sm" onclick="deleteProj(${p.id})">Delete</button></div></div>`;
   }).join(''):'<div class="empty">No projects</div>'}
 
@@ -2594,10 +2596,10 @@ async function saveSchedulers(projectId){
   await loadProjectSchedulers();closeOv('schedOv');renderProjList();
 }
 
-function editProj(id){const p=projects.find(pr=>pr.id===id);if(!p)return;editingId=id;$('aFormTitle').textContent='Edit Project';$('newProjName').value=p.name;if($('newProjSupplier'))$('newProjSupplier').value=p.supplier||'Aus Reo';$('newLevels').value=p.levels.join('\n');$('newAreas').value=p.areas.join('\n');$('saveProjBtn').textContent='Save';$('cancelPE').style.display='inline-block'}
-function cancelPE(){editingId=null;$('aFormTitle').textContent='Add New Project';$('newProjName').value='';if($('newProjSupplier'))$('newProjSupplier').value='Aus Reo';$('newLevels').value='';$('newAreas').value='';$('saveProjBtn').textContent='Add Project';$('cancelPE').style.display='none';$('projErr').innerHTML=''}
+function editProj(id){if(pairsLive)return editProjPairs(id);const p=projects.find(pr=>pr.id===id);if(!p)return;editingId=id;$('aFormTitle').textContent='Edit Project';$('newProjName').value=p.name;if($('newProjSupplier'))$('newProjSupplier').value=p.supplier||'Aus Reo';$('newLevels').value=p.levels.join('\n');$('newAreas').value=p.areas.join('\n');$('saveProjBtn').textContent='Save';$('cancelPE').style.display='inline-block'}
+function cancelPE(){if(pairsLive)return cancelPEPairs();editingId=null;$('aFormTitle').textContent='Add New Project';$('newProjName').value='';if($('newProjSupplier'))$('newProjSupplier').value='Aus Reo';$('newLevels').value='';$('newAreas').value='';$('saveProjBtn').textContent='Add Project';$('cancelPE').style.display='none';$('projErr').innerHTML=''}
 
-async function saveProject(){const err=$('projErr');err.innerHTML='';
+async function saveProject(){if(pairsLive)return saveProjectPairs();const err=$('projErr');err.innerHTML='';
   const name=$('newProjName').value.trim(),levels=$('newLevels').value.split('\n').map(s=>s.trim()).filter(Boolean),areas=$('newAreas').value.split('\n').map(s=>s.trim()).filter(Boolean);
   if(!name)return err.innerHTML='<div class="error-msg">Name required</div>';
   const supplier=($('newProjSupplier')&&$('newProjSupplier').value)||'Aus Reo';
@@ -2611,8 +2613,94 @@ async function saveProject(){const err=$('projErr');err.innerHTML='';
 
 function deleteProj(id){const p=projects.find(pr=>pr.id===id);if(!p)return;
   confirmDialog('Delete Project?','Delete "'+esc(p.name)+'"? Existing entries will not be affected.','Delete','btn-err',async()=>{
-    await sb.from('projects').delete().eq('id',id);await auditLog({action:'PROJECT_DELETE',old_value:p.name});
+    // b5.14: the history line only after the database really removed the job (it wrote "deleted" even when refused —
+    // and from REO 0012 a job with level / area pairs can't be deleted at all).
+    let no=null;
+    try{const{data,error}=await sb.from('projects').delete().eq('id',id).select('id');
+      if(error)no=projectRefusal(error);
+      else if(!data||!data.length)no="the job wasn't deleted — it may already be gone, or this login can't delete it. Refresh and try again."}
+    catch(e){no=refusalWords(e)}
+    if(no){alert('Not deleted — '+no);await loadProjects();populateDropdowns();renderProjList();return}
+    await auditLog({action:'PROJECT_DELETE',old_value:p.name});
     await loadProjects();populateDropdowns();renderProjList()})}
+// A refused project change in words: a job's pairs keep it (0012: pairs are never deleted), names are unique.
+function projectRefusal(e){
+  const code=e&&e.code;
+  if(code==='23503')return "this job has level / area pairs (or other records) that point at it, so it can't be deleted — it stays.";
+  if(code==='23505')return 'another job already has that name.';
+  return refusalWords(e)}
+
+/* b5.14 — the project editor with pairs live. A job linked to Master-OPS shows its name and lists read-only: its levels
+   and areas come from Master-OPS ("change them in Project Setup there") — the REO database refuses the change anyway
+   (0012's projects lock). A new job is just a name and a supplier: no Levels / Areas boxes — its pairs arrive once it
+   is linked (the new-job checklist's "REO add + link" step). An unlinked job keeps its supplier editable, and its name
+   while nothing is filed under it (entries and pairs find their job by it). */
+function renderAdminProjPairs(){
+  $('adminProj').innerHTML=`<div class="card" style="margin-bottom:18px"><h3 style="font-size:15px;font-weight:700;margin-bottom:14px;color:var(--gray-dk)" id="aFormTitle">Add New Project</h3><div class="row2"><div class="fg"><label>Project Name</label><input type="text" id="newProjName" placeholder="e.g. New School Stage 2"></div><div class="fg"><label>Supplier</label><select id="newProjSupplier"><option value="Aus Reo">Aus Reo</option><option value="ARC">ARC</option></select></div></div><div id="projPairsBox">${projPairsBoxHtml(null)}</div><div style="display:flex;gap:10px;margin-top:14px"><button class="btn btn-sm" onclick="saveProject()" id="saveProjBtn" style="width:auto">Add Project</button><button class="btn btn-sec btn-sm" onclick="cancelPE()" id="cancelPE" style="display:none;width:auto">Cancel</button></div><div id="projErr"></div></div><div class="card"><h3 style="font-size:15px;font-weight:700;margin-bottom:12px;color:var(--gray-dk)">Projects (<span id="projCount">${projects.length}</span>)</h3><div class="proj-list" id="projList"></div></div>`;renderProjList()}
+// What a job's levels / areas are and where they come from (null = a new job).
+function projPairsBoxHtml(p){
+  if(!p)return '<div class="info-msg" style="margin-top:2px">Levels and areas come from Master-OPS once the job is linked to it (the new-job checklist\'s “REO add + link” step). Until then nothing can be ordered on it.</div>';
+  const pairs=pairsOf(p.id),act=activeOf(pairs),ret=pairs.filter(x=>x.status==='retired');
+  const lv=orderNames(act,'level');
+  const list=lv.length?`<ul class="proj-pairs">${lv.map(l=>`<li><b>${esc(l)}</b> — ${areasForLevel(act,l).map(esc).join(' · ')}</li>`).join('')}</ul>`:'';
+  const retired=ret.length?`<div class="proj-pairs-ret">No longer on this job in Master-OPS: ${ret.map(x=>esc(x.level+' / '+x.area)).join(' · ')}</div>`:'';
+  if(p.hubProjectId)return `<div class="info-msg" style="margin-top:2px"><b>Linked to Master-OPS${p.hubShortCode?' ('+esc(p.hubShortCode)+')':''}.</b> Its name, supplier and levels and areas come from Master-OPS — change them in Project Setup there.${act.length?'':' No level / area pairs have arrived yet — nothing can be ordered.'}${list}${retired}</div>`;
+  if(act.length)return `<div class="info-msg" style="margin-top:2px"><b>Not linked to Master-OPS.</b> Its level / area ${act.length===1?'pair is':'pairs are'} REO-only (set by a migration):${list}${retired}</div>`;
+  return '<div class="warn-msg" style="margin-top:2px"><b>Not linked to Master-OPS yet — nothing can be ordered.</b> Its levels and areas come from Master-OPS once it is linked (the new-job checklist\'s “REO add + link” step).</div>'}
+function projItemPairsHtml(p,supBadge,schedTxt){
+  const pairs=pairsOf(p.id),act=activeOf(pairs).length,ret=pairs.length-act;
+  const link=p.hubProjectId?`<span class="pill pill-linked" title="Linked to Master-OPS — its levels and areas come from Project Setup there">Master-OPS${p.hubShortCode?' · '+esc(p.hubShortCode):''}</span>`:'<span class="pill pill-unlinked">Not linked to Master-OPS</span>';
+  const counts=act?`<b>${act}</b> level / area pair${act===1?'':'s'}${ret?` · ${ret} no longer on the job`:''}`:'<span style="color:var(--warn)">Nothing can be ordered yet — no level / area pairs</span>';
+  const del=pairs.length||p.hubProjectId?'':`<button class="btn btn-err btn-sm" onclick="deleteProj(${p.id})">Delete</button>`;
+  return `<div class="proj-item"><div class="proj-item-info"><h4>${esc(p.name)}${supBadge}${link}</h4><div class="counts">${counts}</div><div class="sum">${schedTxt}</div></div><div class="proj-actions"><button class="btn btn-sec btn-sm" onclick="openSchedulerModal(${p.id})">Schedulers</button><button class="btn btn-sec btn-sm" onclick="editProj(${p.id})">${p.hubProjectId?'View':'Edit'}</button>${del}</div></div>`}
+function editProjPairs(id){
+  const p=projects.find(pr=>pr.id===id);if(!p)return;editingId=id;
+  const linked=!!p.hubProjectId,filed=entries.some(e=>e.project===p.name)||pairsOf(p.id).length>0;
+  const nm=$('newProjName'),sup=$('newProjSupplier');
+  $('aFormTitle').textContent=linked?'Project — linked to Master-OPS':'Edit Project';
+  nm.value=p.name;nm.disabled=linked||filed;nm.title=linked?'Comes from Master-OPS':filed?'Entries or pairs are filed under this name, so it stays as it is':'';
+  sup.value=p.supplier||'Aus Reo';sup.disabled=linked;
+  $('projPairsBox').innerHTML=projPairsBoxHtml(p)+(!linked&&filed?'<div class="hint">The name stays as it is: entries and pairs are filed under it.</div>':'');
+  const save=$('saveProjBtn');save.textContent='Save';save.style.display=linked?'none':'';
+  const c=$('cancelPE');c.style.display='inline-block';c.textContent=linked?'Close':'Cancel';
+  $('projErr').innerHTML=''}
+function cancelPEPairs(){
+  editingId=null;$('aFormTitle').textContent='Add New Project';
+  const nm=$('newProjName'),sup=$('newProjSupplier');nm.value='';nm.disabled=false;nm.title='';sup.value='Aus Reo';sup.disabled=false;
+  $('projPairsBox').innerHTML=projPairsBoxHtml(null);
+  const save=$('saveProjBtn');save.textContent='Add Project';save.style.display='';
+  const c=$('cancelPE');c.style.display='none';c.textContent='Cancel';
+  $('projErr').innerHTML=''}
+async function saveProjectPairs(){
+  const err=$('projErr');err.innerHTML='';
+  const name=$('newProjName').value.trim(),supplier=($('newProjSupplier')&&$('newProjSupplier').value)||'Aus Reo';
+  const say=w=>{err.innerHTML='<div class="error-msg">'+esc(w)+'</div>'};
+  if(editingId){
+    const old=projects.find(p=>p.id===editingId);
+    if(!old)return say('This job is no longer in the list — refresh.');
+    if(old.hubProjectId)return say("This job is linked to Master-OPS — its name, supplier and levels / areas come from Master-OPS and can't be changed here.");
+    const data={};
+    if(!$('newProjName').disabled&&name!==old.name){
+      if(!name)return say('Name required');
+      if(projects.some(p=>p.id!==old.id&&p.name.toLowerCase()===name.toLowerCase()))return say('Another job already has that name.');
+      data.name=name}
+    if(supplier!==old.supplier)data.supplier=supplier;
+    if(!Object.keys(data).length){cancelPE();return}
+    let no=null;
+    try{const{data:done,error}=await sb.from('projects').update(data).eq('id',old.id).select('id');
+      if(error)no=projectRefusal(error);else if(!done||!done.length)no="the job wasn't changed — it may have been removed, or this login can't change it. Refresh and try again."}
+    catch(e){no=refusalWords(e)}
+    if(no)return say('Not saved — '+no);
+    await auditLog({action:'PROJECT_EDIT',field_changed:data.name||old.name,old_value:`${old.name} · ${old.supplier}`,new_value:`${data.name||old.name} · ${data.supplier||old.supplier}`});
+  }else{
+    if(!name)return say('Name required');
+    if(projects.find(p=>p.name.toLowerCase()===name.toLowerCase()))return say('Already exists');
+    let no=null;
+    try{const{error}=await sb.from('projects').insert({name,supplier,levels:'',areas:''});if(error)no=projectRefusal(error)}
+    catch(e){no=refusalWords(e)}
+    if(no)return say('Not added — '+no);
+    await auditLog({action:'PROJECT_ADD',new_value:`${name} (not linked to Master-OPS yet)`})}
+  cancelPE();await loadProjects();onProjectsChanged()}
 
 /* ═══ ADMIN: PROJECT FILES (b5.6) ═══
    Reference documents (marking plans, construction sequences, design notes, site photos).
@@ -2662,7 +2750,7 @@ function renderAdminFiles(){
         </div>
       </div>
       <div class="row2" id="pfScopeFields" style="display:none;margin-top:6px">
-        <div class="fg"><label>Level</label><select id="pfLevel"><option value="">Choose level…</option></select></div>
+        <div class="fg"><label>Level</label><select id="pfLevel" onchange="pfOnLevelChange()"><option value="">Choose level…</option></select></div>
         <div class="fg"><label>Area</label><select id="pfArea"><option value="">Choose area…</option></select></div>
       </div>
       <div class="fg" style="margin-top:10px"><label>Friendly Label <span style="font-weight:400;color:var(--muted);font-size:11px">(shown to users, e.g. "L2 Marking Plan v2")</span></label><input type="text" id="pfLabel" placeholder="e.g. L2 Marking Plan v2"></div>
@@ -2709,6 +2797,7 @@ function renderAdminFiles(){
 }
 
 function pfOnProjChange(){
+  if(pairsLive){pfFillPairs('','');pfRefreshSupersedeOptions();return}   // b5.14: level → area from the job's pairs
   const proj=$('pfProj').value;
   // Populate level/area dropdowns for that project
   const p=projects.find(x=>x.name===proj);
@@ -2718,6 +2807,23 @@ function pfOnProjChange(){
   // Refresh supersede-target dropdown
   pfRefreshSupersedeOptions();
 }
+/* b5.14 — Files with pairs live: a level + area reference file is tagged with one of the job's pairs — pick the level,
+   the areas are that level's. (The database doesn't guard file tags; reference files only.) */
+function pfFillPairs(keepL,keepA){
+  const lSel=$('pfLevel'),aSel=$('pfArea'),pS=$('pfProj');if(!lSel||!aSel||!pS)return;
+  const p=projects.find(x=>x.name===pS.value),pairs=p?pairsOf(p.id):[],levels=activeLevels(pairs);
+  lSel.innerHTML='<option value="">'+(p&&!levels.length?'No levels from Master-OPS yet':'Choose level…')+'</option>'+levels.map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join('');
+  lSel.value=keepL&&levels.includes(keepL)?keepL:'';
+  const areas=lSel.value?areasForLevel(pairs,lSel.value):[];
+  aSel.innerHTML='<option value="">'+(lSel.value?'Choose area…':'Pick a level first')+'</option>'+areas.map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join('');
+  aSel.disabled=!lSel.value;
+  aSel.value=keepA&&areas.includes(keepA)?keepA:''}
+function pfOnLevelChange(){if(!pairsLive)return;const a=$('pfArea');pfFillPairs($('pfLevel').value,a?a.value:'')}
+// The projects / pairs changed while the Files form is open: its lists follow, keeping the picks still there.
+function pfRefreshPickers(){
+  const pS=$('pfProj');if(!pS||!pairsLive)return;
+  const keep=pS.value;pS.innerHTML='<option value="">Choose project…</option>'+projects.map(p=>`<option value="${esc(p.name)}">${esc(p.name)}</option>`).join('');keepPick(pS,keep);
+  const l=$('pfLevel'),a=$('pfArea');pfFillPairs(l?l.value:'',a?a.value:'')}
 function pfOnScopeChange(){
   const scope=document.querySelector('input[name="pfScope"]:checked').value;
   $('pfScopeFields').style.display=scope==='level_area'?'flex':'none';
@@ -2781,6 +2887,8 @@ async function pfUpload(){
   if(!label){err.innerHTML='<div class="error-msg">Enter a friendly label</div>';return}
   if(!file){err.innerHTML='<div class="error-msg">Choose a file</div>';return}
   if(scope==='level_area'&&(!level||!area)){err.innerHTML='<div class="error-msg">Choose level and area for level+area-specific files</div>';return}
+  if(pairsLive&&scope==='level_area'){const p=projects.find(x=>x.name===proj);   // b5.14: one of the job's pairs
+    if(!p||!isActivePairIn(pairsOf(p.id),level,area)){err.innerHTML=`<div class="error-msg">${esc(level)} / ${esc(area)} isn't a level / area on this job in Master-OPS — pick it from the list (refresh if it was just added there).</div>`;return}}
   if($('pfSuperseding').checked&&!supersedes){err.innerHTML='<div class="error-msg">Choose the file being superseded, or untick the box</div>';return}
   const btn=$('pfUploadBtn');btn.disabled=true;info.innerHTML='<div class="info-msg">Uploading…</div>';
   try{
