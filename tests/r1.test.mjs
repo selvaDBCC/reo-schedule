@@ -422,3 +422,27 @@ test('attribute values built from data are escaped', ()=>{
   }
   assert.deepEqual(bad,[]);
 });
+
+// ── Fix round (4 Nov evening) ──
+test('Recalculate All stays off: it says why, asks nothing, fetches nothing and writes nothing', async()=>{
+  const a=loadApp(),r=src=>vm.runInContext(src,a);
+  const calls=[];const sb={from:t=>{const b={select(){return b},update(p){calls.push(t+':update');return b},insert(){calls.push(t+':insert');return b},eq(){return b},is(){return b},then(res){return Promise.resolve({data:[{id:1}],error:null}).then(res)}};return b}};
+  a.__sb=sb;
+  r(`sb=__sb;adminUnlocked=true;userName='Chris';__alerts=[];alert=m=>__alerts.push(String(m));__asked=0;confirm=()=>{__asked++;return true};__fetched=0;fetch=async()=>{__fetched++;throw new Error('no')};
+     entries=[{id:50,project:'Al-Taqwa',level:'GRD',area:'SLAB',schedule:'WAV4',file_url:'https://oekgtocjtloptrjacmcu.supabase.co/storage/v1/object/public/schedules/WAV4.pdf',starter_weight:0.42,status:'Delivered',entry_type:'scheduled'}];`);
+  await a.recalcOpenPreview();
+  assert.deepEqual([...r('__alerts')],['Recalculate All is off until Chris decides on starter bars — the schedules on file keep the weights they were read with. To re-read one schedule: Edit the entry → Delete schedule only, then upload the PDF again.']);
+  assert.equal(r('__asked'),0,'not even the "Continue?" question');
+  assert.equal(r('__fetched'),0,'no schedule fetched');
+  // the apply step writes nothing either, whatever reaches it
+  r(`recalcResults=[{entry:entries[0],oldValues:{starter_weight:0.42,recon_status:'ok'},newValues:{starter_weight:null,recon_status:'review'},changed:true}];
+     document.querySelectorAll=()=>[{getAttribute:()=>'0',checked:true}];document.getElementById=()=>({disabled:false,textContent:''});`);
+  await a.recalcApply();
+  assert.deepEqual(calls,[],'no entry written, no history line');
+  assert.equal(r('RECALC_ALL_ON'),false);
+  // if it is ever switched on: each PDF is read with the upload's own switch, and no row starts ticked
+  const pre=SRC.slice(SRC.indexOf('async function recalcOpenPreview'),SRC.indexOf('function rcSelectAll'));
+  assert.ok(pre.includes('looksLikeArc(native.allText)?parseArcText(native.pageOneText,native.allText):parseReoText(native.pageOneText,native.allText)'),'ARC schedules read by the ARC reader');
+  assert.ok(!/parsed=parseReoText\(/.test(pre),'never the Aus Reo reader alone');
+  assert.ok(/<input type="checkbox" class="rc-apply-box" data-idx="\$\{i\}">/.test(pre)&&!/rc-apply-box[^>]*checked/.test(pre),'rows start unticked');
+});

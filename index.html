@@ -414,7 +414,7 @@
 <div class="overlay" id="markupOv" onclick="if(event.target===this)closeOv('markupOv')"><div class="modal" id="markupModal"></div></div>
 <div class="overlay" id="commentOv" onclick="if(event.target===this)closeOv('commentOv')"><div class="modal" style="max-width:420px" id="commentModal"></div></div>
 <div class="overlay" id="confirmOv" onclick="if(event.target===this)closeOv('confirmOv')"><div class="modal" style="max-width:440px" id="confirmModal"></div></div>
-<!-- b5.14: the reference-files viewer (📎 badge) and the Recalculate All preview draw into this overlay — it was never in the page, so both threw. -->
+<!-- b5.14: the reference-files viewer (📎 badge) draws into this overlay — it was never in the page, so it threw. Recalculate All (Admin → Steel Fixers) would draw here too, but it is OFF (RECALC_ALL_ON in app.js) and refuses in words before it reaches this. -->
 <div class="overlay" id="viewerOv" onclick="if(event.target===this)closeOv('viewerOv')"><div class="modal modal-lg" id="viewerModal"></div></div>
 
 <div id="versionBadge" style="position:fixed;bottom:6px;right:8px;font-size:11px;color:#999;font-family:'JetBrains Mono',monospace;pointer-events:none;z-index:1;user-select:none;background:rgba(255,255,255,0.85);padding:2px 6px;border-radius:4px"></div>

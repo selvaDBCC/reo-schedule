@@ -3552,7 +3552,7 @@ function renderAdminFixers(){
     <select id="sfArea" onchange="renderSfTable()"><option value="">All Areas</option>${areas.map(a=>`<option>${esc(a)}</option>`).join('')}</select>
     <input type="text" id="sfSearch" placeholder="Search schedule..." oninput="renderSfTable()">
     <button class="btn btn-sec btn-sm" onclick="exportSfCSV()">Export CSV</button>
-    <button class="btn btn-sec btn-sm" onclick="recalcOpenPreview()" title="Re-run the current parser against every uploaded PDF and preview the changes before applying">🔄 Recalculate All</button>
+    <button class="btn btn-sec btn-sm" onclick="recalcOpenPreview()" title="Off until Chris decides on starter bars — press to see why">🔄 Recalculate All</button>
   </div>
 </div>
 <div class="tcard"><div class="tscroll" id="sfTable"></div></div>`;
@@ -3563,9 +3563,17 @@ function renderAdminFixers(){
    Purpose: after any parser improvement (like the b5.6.5 broadened starter detection), existing
    entries still hold the OLD extracted values. This tool fetches each PDF, re-parses, and shows
    a diff so admins can confirm and apply the corrections in bulk instead of re-uploading manually.
-   Admin-PIN gated. Every change is audit-logged. */
+   Admin-PIN gated. Every change is audit-logged.
+   b5.14: OFF (RECALC_ALL_ON). It has never run in production — the overlay it draws into was missing until b5.14, so
+   it stopped at its first line — and it writes the re-read weights over every entry's, which Master-OPS's money is
+   built on (Legacy tonnage, the approval re-check, the quantity check). Today's reader leaves starter bars in
+   (DEDUCT_STARTERS=false) until Chris decides, so a re-read would clear the deductions on file, and b5.10 left existing
+   entries as they were on purpose. Whether existing schedules are re-read is Selva and Chris's call. If it is ever
+   switched on, it reads each PDF with the upload's own switch (ARC or Aus Reo) and every row starts unticked. */
+const RECALC_ALL_ON=false;
 let recalcResults=[]; // [{entry, oldValues, newValues, delta, error}]
 async function recalcOpenPreview(){
+  if(!RECALC_ALL_ON){alert('Recalculate All is off until Chris decides on starter bars — the schedules on file keep the weights they were read with. To re-read one schedule: Edit the entry → Delete schedule only, then upload the PDF again.');return}
   if(!adminUnlocked){alert('Admin only. Enter the admin PIN first.');return}
   const list=entries.filter(e=>e.schedule&&e.file_url&&!e.deleted_at);
   if(!list.length){alert('No schedules to recalculate.');return}
@@ -3594,7 +3602,7 @@ async function recalcOpenPreview(){
       if(!native.hasText){
         recalcResults.push({entry:e,error:'No text layer (image-only PDF)'});continue;
       }
-      const parsed=parseReoText(native.pageOneText,native.allText);
+      const parsed=looksLikeArc(native.allText)?parseArcText(native.pageOneText,native.allText):parseReoText(native.pageOneText,native.allText);   // the upload's own switch
       const oldValues={
         total_weight:e.total_weight, bar_weight:e.bar_weight, starter_weight:e.starter_weight,
         mesh_sqm:e.mesh_sqm, trench_mesh_lm:e.trench_mesh_lm,
@@ -3661,7 +3669,7 @@ function renderRecalcPreview(){
       changed.forEach((r,i)=>{
         const e=r.entry;
         body+=`<tr style="border-top:1px solid var(--border)">
-          <td style="padding:6px 8px"><input type="checkbox" class="rc-apply-box" data-idx="${i}" checked></td>
+          <td style="padding:6px 8px"><input type="checkbox" class="rc-apply-box" data-idx="${i}"></td>
           <td style="padding:6px 8px;font-weight:600"><a ${fileLinkAttrs(e.file_url)} style="color:var(--accent-dk);text-decoration:none">${esc(e.schedule||'?')}</a></td>
           <td style="padding:6px 8px;color:var(--muted);font-size:11px">${esc(e.project||'')}<br>${esc(e.level||'—')} / ${esc(e.area||'—')}</td>
           <td style="padding:6px 8px;text-align:right">${diff(r.oldValues.total_weight,r.newValues.total_weight,'total_weight')}</td>
@@ -3692,6 +3700,7 @@ function renderRecalcPreview(){
 function rcSelectAll(v){document.querySelectorAll('.rc-apply-box').forEach(b=>b.checked=v)}
 
 async function recalcApply(){
+  if(!RECALC_ALL_ON)return;   // off: nothing is written, whatever called it
   const boxes=[...document.querySelectorAll('.rc-apply-box:checked')];
   if(!boxes.length){alert('No changes selected.');return}
   const changed=recalcResults.filter(r=>r.changed&&!r.error);
