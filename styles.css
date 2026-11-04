@@ -290,6 +290,12 @@ body.role-supplier .dbcc-only{display:none!important}
 .split-row .remove-split{background:none;border:none;color:var(--err);cursor:pointer;font-size:16px;padding:4px;opacity:.5}
 .split-row .remove-split:hover{opacity:1}
 
+/* b5.14 — New Entry with pairs live: the line under Level / Area */
+#laHint .hint,#laHint .la-hint{margin:-4px 0 6px}
+#laHint .warn-msg{margin-bottom:8px}
+.link-btn{background:none;border:none;padding:0;color:var(--accent-dk);text-decoration:underline;cursor:pointer;font-family:inherit;font-size:12px;font-weight:600;text-align:left}
+.link-btn:hover{color:var(--accent)}
+
 /* ORDER ITEMS (form) */
 .order-item{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:12px 14px;background:var(--input);border:1px solid var(--border);border-radius:8px;margin-bottom:6px;transition:border-color .15s;cursor:pointer}
 .order-item:hover{border-color:var(--accent-lt2)}

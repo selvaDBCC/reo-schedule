@@ -106,9 +106,10 @@
       <div class="sec-label">① Location</div>
       <div class="fg"><label>Project <span class="req">*</span></label><select id="selProj" onchange="onProjChange()"><option value="">Select a project...</option></select></div>
       <div class="row2">
-        <div class="fg"><label>Level</label><select id="selLevel" disabled onchange="onLevelAreaChange()"><option value="">Select project first</option></select></div>
+        <div class="fg"><label>Level</label><select id="selLevel" disabled onchange="onEntryLevelChange()"><option value="">Select project first</option></select></div>
         <div class="fg"><label>Area</label><select id="selArea" disabled onchange="onLevelAreaChange()"><option value="">Select project first</option></select></div>
       </div>
+      <div id="laHint"></div>
     </div>
     <div id="orderListSection" style="display:none"><div class="sec"><div class="sec-label">② Select Order</div><div id="orderListContent"></div></div></div>
     <div id="uploadSection" style="display:none">

@@ -146,7 +146,8 @@ function isLateDelivery(e){
   if(!e.supplier_delivery_date||e.status==='Delivered'||e.status==='Cancelled')return false;
   const d=daysAgo(e.supplier_delivery_date);
   return d!=null&&d>0}
-function getStatusPill(s,t,hold){let h='';if(t==='loose')h='<span class="pill pill-loose">Ad Hoc</span> ';h+='<span class="pill '+(ST_CLS[s]||'pill-notordered')+'">'+esc(s)+'</span>';if(hold)h+='<span class="pill pill-onhold">⏸ ON HOLD</span>';return h}
+// b5.14: with pairs live, an Ad hoc entry with no level / area yet says who places it — the same one pill, its words only.
+function getStatusPill(s,t,hold,unplaced){let h='';if(t==='loose')h='<span class="pill pill-loose">'+(pairsLive&&unplaced?'Ad hoc — DBCC will place it':'Ad Hoc')+'</span> ';h+='<span class="pill '+(ST_CLS[s]||'pill-notordered')+'">'+esc(s)+'</span>';if(hold)h+='<span class="pill pill-onhold">⏸ ON HOLD</span>';return h}
 function parseAusDate(s){const p=s.split('/');if(p.length!==3)return null;let[d,m,y]=p;if(y.length===2)y='20'+y;return`${y}-${m.padStart(2,'0')}-${d.padStart(2,'0')}`}
 async function auditLog(o){
   // Defensive: every audit row must have a name. If userName is somehow empty here, refuse to
@@ -279,6 +280,7 @@ async function init(){
     $('inpDate').value=today();$('inpLooseDate').value=today();
     $('loadingScreen').style.display='none';$('mainApp').style.display='block';
     setupDragDrop();renderDash();renderAdminProj();renderAdminProgram();renderAdminFixers();
+    pairsModeShown=pairsLive;refreshLaHint();   // b5.14: the mode the screens were drawn in (onProjectsChanged redraws on a switch)
   }catch(e){$('loadingScreen').innerHTML='<div style="text-align:center;padding:20px"><h2 style="color:var(--err)">Connection Error</h2><p style="color:var(--muted);font-size:13px">'+esc(e.message)+'</p><button class="btn btn-sm" onclick="location.reload()" style="width:auto;margin-top:12px">Retry</button></div>'}}
 
 function saveName(){const n=$('nameInput').value.trim();if(!n)return alert('Please enter your name');localStorage.setItem('reo_user_name',n);userName=n;$('nameOverlay').classList.remove('show');$('loadingScreen').style.display='flex';$('loadingScreen').innerHTML='<div class="spinner"></div><p style="color:var(--muted);font-size:13px">Loading your data...</p>';init()}
@@ -370,9 +372,86 @@ async function doLogout(){
 }
 
 /* ═══ DATA ═══ */
-async function loadProjects(){const{data,error}=await sb.from('projects').select('*').order('name');if(error)throw error;let rows=data.map(p=>({id:p.id,name:p.name,supplier:p.supplier||'Aus Reo',levels:p.levels?p.levels.split('||').filter(Boolean):[],areas:p.areas?p.areas.split('||').filter(Boolean):[]}));if(isSupplier())rows=rows.filter(p=>p.supplier===authSupplier);projects=rows}
+// b5.14: a project also carries its Master-OPS link (hub_project_id, set only by the hub link) — the pairs screens use it.
+// In the main app (not the Site / Foreman views) the level / area pairs are read with the projects (loadPairs).
+async function loadProjects(){const{data,error}=await sb.from('projects').select('*').order('name');if(error)throw error;let rows=data.map(p=>({id:p.id,name:p.name,supplier:p.supplier||'Aus Reo',levels:p.levels?p.levels.split('||').filter(Boolean):[],areas:p.areas?p.areas.split('||').filter(Boolean):[],hubProjectId:p.hub_project_id||null,hubShortCode:p.hub_short_code||null,hubName:p.hub_name||null}));if(isSupplier())rows=rows.filter(p=>p.supplier===authSupplier);projects=rows;if(!isSiteViewMode()&&!isForemanViewMode())await loadPairs()}
 async function seedProjects(){const rows=SEEDS.map(p=>({name:p.name,levels:p.levels.join('||'),areas:p.areas.join('||')}));await sb.from('projects').insert(rows);await loadProjects()}
 async function loadEntries(){const{data,error}=await sb.from('entries').select('*').order('created_at',{ascending:false});if(error)throw error;let rows=data;if(isSupplier()){const mine=new Set(projects.map(p=>p.name));rows=rows.filter(e=>mine.has(e.project))}entries=rows;$('countNum').textContent=entries.length}
+
+/* ═══ LEVEL / AREA PAIRS (b5.14) ═══
+   Which level goes with which area on a job comes from Master-OPS Project Setup: REO migration 0012's project_pairs
+   (active or retired — never deleted). The database guard (trigger entries_pair_guard) refuses an entry on a level /
+   area that isn't an active pair of its job; it is switched on together with app_settings pairs_live = 'on' (0013).
+   While pairs_live is anything but 'on' — or missing, before 0012 — the app behaves exactly as b5.13: no pairs are read
+   and no screen changes. The pure helpers below are checked by tests/r2.test.mjs. */
+let pairsLive=false,projectPairs=[],pairsModeShown=null,pairsChannel=null,projectsReloadTimer=null;
+function pairsSwitchOn(v){return typeof v==='string'&&v.trim().toLowerCase()==='on'}
+function blankName(v){return v==null||String(v).trim()===''}
+// One delivery-grid cell, as a key no level / area name can be confused in (dpSelected's 'L||A' keys stay for b5.13).
+function cellKey(level,area){return JSON.stringify([level==null?'':String(level),area==null?'':String(area)])}
+function pairsOf(projectId,pairs){const id=Number(projectId);return (pairs||projectPairs).filter(p=>p.project_id===id)}
+function activeOf(pairs){return pairs.filter(p=>p.status==='active')}
+function byName(a,b){return a<b?-1:a>b?1:0}
+// The order rule (REO migration 0012): a level's place = the smallest sort_order among its pairs, an area's place = the
+// smallest among its pairs; no sort_order goes last; ties by name (code-point order, as the database's "C" collation).
+function orderNames(pairs,field){
+  const min=new Map();
+  for(const p of pairs){const n=p[field],s=p.sort_order==null?null:Number(p.sort_order);
+    if(!min.has(n))min.set(n,s);else{const m=min.get(n);if(s!=null&&(m==null||s<m))min.set(n,s)}}
+  return[...min.keys()].sort((a,b)=>{const x=min.get(a),y=min.get(b);
+    if(x!=null&&y!=null&&x!==y)return x-y;if(x==null&&y!=null)return 1;if(y==null&&x!=null)return -1;return byName(a,b)})}
+// The levels a person may pick on a job: those with at least one active pair, in Master-OPS order.
+function activeLevels(pairs){return orderNames(activeOf(pairs),'level')}
+// The pair filter: the areas that go with one level on the job — its active pairs only, in Master-OPS order.
+function areasForLevel(pairs,level){return orderNames(activeOf(pairs).filter(p=>p.level===level),'area')}
+function isActivePairIn(pairs,level,area){return pairs.some(p=>p.status==='active'&&p.level===level&&p.area===area)}
+// What the database guard (0012 entries_pair_guard) would say about a level / area, in its own words — checked here first
+// so a person is told before anything is sent. The database still decides. null = fine.
+function pairProblem(pairs,{level,area,entryType,wasPlaced}){
+  const noL=blankName(level),noA=blankName(area);
+  if(noL&&noA){
+    if(wasPlaced)return "A placed entry can't be un-placed — move it to another level/area.";
+    if(entryType!=='loose')return 'Pick a level and area — or send it as Ad hoc.';
+    return null}
+  if(noL||noA)return 'Pick both a level and an area, or leave both blank.';
+  if(!isActivePairIn(pairs,level,area))return `${level} / ${area} isn't a level/area on this job — refresh, or send it as Ad hoc.`;
+  return null}
+// An ad hoc entry with no level and area yet — DBCC places it (in Master-OPS).
+function isUnplaced(e){return !!e&&e.entry_type==='loose'&&blankName(e.level)&&blankName(e.area)}
+
+// pairs_live is read with the projects (every load, realtime refresh and Refresh), so switching it on reaches an open
+// page at its next refresh. Missing or anything but 'on' → off, and nothing else is read. On, but the pairs can't be
+// read → the error goes up like a projects error (the pairs already on screen stay) — never a guess. Read in pages of
+// 1,000: the database answers at most that many rows at a time and doesn't say when it stopped.
+async function loadPairs(){
+  let live;
+  try{const{data,error}=await sb.from('app_settings').select('value').eq('key','pairs_live').maybeSingle();
+    if(error)throw error;live=!!data&&pairsSwitchOn(data.value)}
+  catch(e){console.warn('[REO] pairs_live not read — keeping it '+(pairsLive?'on':'off')+':',e&&e.message);live=pairsLive}
+  if(!live){pairsLive=false;projectPairs=[];return}
+  const rows=[];
+  for(let from=0;;from+=1000){
+    const{data,error}=await sb.from('project_pairs').select('id,project_id,level,area,sort_order,status,source').order('id').range(from,from+999);
+    if(error)throw error;
+    rows.push(...(data||[]));
+    if(!data||data.length<1000)break}
+  projectPairs=rows.map(r=>({id:Number(r.id),project_id:Number(r.project_id),level:r.level,area:r.area,sort_order:r.sort_order==null?null:Number(r.sort_order),status:r.status,source:r.source}));
+  pairsLive=true}
+// After the projects / pairs changed (realtime, Refresh, a save). Off: what b5.13 did — the project selects (they keep
+// their picks) and the admin project list. On: the screens that list levels / areas follow the new lists too, keeping
+// what was picked when it is still there. A switch of pairs_live itself redraws those screens in their other mode.
+function onProjectsChanged(){
+  const modeChanged=pairsModeShown!==null&&pairsModeShown!==pairsLive;
+  pairsModeShown=pairsLive;
+  populateDropdowns();
+  if(adminUnlocked)renderProjList();
+  if(modeChanged){redrawForPairsMode();return}
+  if(!pairsLive)return;
+  refreshEntryForm()}
+function redrawForPairsMode(){renderAdminProj();renderAdminProgram();onProjChange();refreshLaHint();renderDash();if(pairsLive)subscribePairs()}
+// Many pairs rows change in one Master-OPS push: one reload for the burst.
+function reloadProjectsSoon(){clearTimeout(projectsReloadTimer);projectsReloadTimer=setTimeout(()=>{loadProjects().then(onProjectsChanged).catch(e=>console.warn('[REO] projects / pairs refresh failed:',e&&e.message))},250)}
+function subscribePairs(){if(!pairsLive||pairsChannel||!sb)return;pairsChannel=sb.channel('pp').on('postgres_changes',{event:'*',schema:'public',table:'project_pairs'},()=>reloadProjectsSoon()).subscribe()}
 
 async function loadEmailContacts(){
   const{data,error}=await sb.from('email_contacts').select('*').order('sort_order',{ascending:true}).order('id',{ascending:true});
@@ -438,10 +517,13 @@ async function refreshAll(){
   await Promise.all([loadProjects(),loadEntries()]);
   if(isForemanViewMode()){populateForemanDropdowns();renderForeman();if(location.hash==='#report'||($('reportPage')&&$('reportPage').style.display==='block'))openReportPage();return}
   if(isSiteViewMode()){populateSiteDropdowns();renderSite();return}
+  if(pairsLive||(pairsModeShown!==null&&pairsModeShown!==pairsLive)){onProjectsChanged();renderDash();return}   // b5.14
   populateDropdowns();renderDash()}
 function subscribeRealtime(){
   sb.channel('e').on('postgres_changes',{event:'*',schema:'public',table:'entries'},()=>loadEntries().then(()=>{renderDash();renderActionRequired()})).subscribe();
-  sb.channel('p').on('postgres_changes',{event:'*',schema:'public',table:'projects'},()=>loadProjects().then(()=>{populateDropdowns();if(adminUnlocked)renderProjList()})).subscribe();
+  // b5.14: onProjectsChanged does what this did (selects + project list) and, with pairs live, keeps the other screens in step.
+  sb.channel('p').on('postgres_changes',{event:'*',schema:'public',table:'projects'},()=>{if(pairsLive)reloadProjectsSoon();else loadProjects().then(onProjectsChanged)}).subscribe();
+  subscribePairs();
   // Audit log realtime — when a new audit row appears, refresh the Notifications list
   // (only if the user is currently on that page, otherwise it'll refresh next time they switch).
   sb.channel('al').on('postgres_changes',{event:'INSERT',schema:'public',table:'audit_log'},()=>{
@@ -474,15 +556,64 @@ function setEntryType(t){
   $('commentsSection').style.display=t==='loose'?'block':'none';
   $('submitBtn').style.display=t==='loose'?'block':'none';
   if(t==='loose')$('uploadStepLabel').textContent='③ Upload (Optional)';
+  refreshLaHint();
   onLevelAreaChange()}
 
 function onProjChange(){
   const p=$('selProj').value,lS=$('selLevel'),aS=$('selArea');
   const proj=projects.find(pr=>pr.name===p);
+  if(pairsLive){entryPairFill('','');if(!proj){hideFormSteps();return}onLevelAreaChange();return}   // b5.14: level → area from the pairs
   if(!proj){lS.innerHTML='<option value="">Select project first</option>';lS.disabled=true;aS.innerHTML='<option value="">Select project first</option>';aS.disabled=true;hideFormSteps();return}
   lS.innerHTML='<option value="">Select level...</option>';proj.levels.forEach(l=>lS.appendChild(new Option(l,l)));lS.disabled=false;
   aS.innerHTML='<option value="">Select area...</option>';proj.areas.forEach(a=>aS.appendChild(new Option(a,a)));aS.disabled=false;
   onLevelAreaChange()}
+
+/* b5.14 — New Entry with pairs live: pick the level, then the area list holds only the areas that go with that level on
+   this job (its active pairs, in Master-OPS order). A level / area that isn't on the list can't be picked: a supplier
+   sends it as Ad hoc (no level / area) and DBCC places it. Off: none of this runs (onProjChange above, b5.13). */
+function entryPairFill(keepL,keepA){
+  const lS=$('selLevel'),aS=$('selArea');if(!lS||!aS)return;
+  const proj=projects.find(pr=>pr.name===$('selProj').value);
+  if(!proj){lS.innerHTML='<option value="">Select project first</option>';lS.disabled=true;aS.innerHTML='<option value="">Select project first</option>';aS.disabled=true;refreshLaHint();return}
+  const levels=activeLevels(pairsOf(proj.id));
+  lS.innerHTML=levels.length?'<option value="">Select level...</option>'+levels.map(l=>`<option value="${esc(l)}">${esc(l)}</option>`).join(''):'<option value="">No levels from Master-OPS yet</option>';
+  lS.disabled=!levels.length;
+  lS.value=keepL&&levels.includes(keepL)?keepL:'';
+  entryAreaFill(keepA);refreshLaHint()}
+function entryAreaFill(keepA){
+  const lS=$('selLevel'),aS=$('selArea');if(!lS||!aS)return;
+  const proj=projects.find(pr=>pr.name===$('selProj').value),lv=lS.value;
+  if(!proj||!lv){aS.innerHTML=`<option value="">${proj?'Pick a level first':'Select project first'}</option>`;aS.disabled=true;return}
+  const areas=areasForLevel(pairsOf(proj.id),lv);
+  aS.innerHTML='<option value="">Select area...</option>'+areas.map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join('');
+  aS.disabled=false;
+  aS.value=keepA&&areas.includes(keepA)?keepA:''}
+function onEntryLevelChange(){if(pairsLive)entryAreaFill($('selArea').value);onLevelAreaChange()}
+// The projects / pairs changed under an open form: the lists follow, the picks stay when they're still there, and the
+// steps below are redrawn only if a pick had to go (an upload in progress keeps its place).
+function refreshEntryForm(){
+  const lS=$('selLevel'),aS=$('selArea'),pS=$('selProj');if(!lS||!aS||!pS)return;
+  const before=[pS.value,lS.value,aS.value].join('\n');
+  entryPairFill(lS.value,aS.value);
+  if([pS.value,lS.value,aS.value].join('\n')===before)return;
+  if(!pS.value){hideFormSteps();return}
+  onLevelAreaChange()}
+// The line under Level / Area (pairs live only): why nothing can be picked, the ad hoc rule, a supplier's way out.
+function refreshLaHint(){
+  const h=$('laHint');if(!h)return;
+  const proj=pairsLive?projects.find(pr=>pr.name===$('selProj').value):null;
+  if(!proj){h.innerHTML='';return}
+  let s='';
+  if(!activeOf(pairsOf(proj.id)).length)s+=`<div class="warn-msg" style="margin-top:0">${proj.hubProjectId?'No levels or areas from Master-OPS on this job yet':'Not linked to Master-OPS yet'} — nothing can be ordered.</div>`;
+  if(currentEntryType==='loose')s+='<div class="hint">Pick both, or leave both blank — DBCC will place it.</div>';
+  else if(isSupplier())s+='<div class="la-hint"><button type="button" class="link-btn" onclick="sendAsAdHoc()">Can\'t find the level / area? Send it as Ad hoc — DBCC will place it</button></div>';
+  h.innerHTML=s}
+// One click: the Ad hoc form with level and area left blank.
+function sendAsAdHoc(){
+  setEntryType('loose');
+  const lS=$('selLevel');if(lS)lS.value='';
+  entryAreaFill('');refreshLaHint();
+  setTimeout(()=>{const d=$('inpLooseDesc');if(d)d.focus()},60)}
 
 function hideFormSteps(){['orderListSection','uploadSection','scheduleSection','markupSection','commentsSection'].forEach(id=>$(id).style.display='none');$('submitBtn').style.display='none';selectedOrderId=null}
 
@@ -695,6 +826,9 @@ async function submitMultiUpload(){
   const ed=today();// submission date = today for all
   const ready=multiUploadItems.filter(i=>i.status==='ready');
   if(!ready.length){err.innerHTML='<div class="error-msg">No ready files to submit.</div>';return}
+  if(pairsLive){const pj=projects.find(p=>p.name===proj);   // b5.14: new rows land on this level / area — it must be a pair of the job
+    const why=pairProblem(pj?pairsOf(pj.id):[],{level,area,entryType:'scheduled',wasPlaced:false});
+    if(why){err.innerHTML='<div class="error-msg">'+esc(why)+'</div>';return}}
   // Validate each ready item has a schedule number.
   for(const item of ready){
     if(!item.schedule.trim()){err.innerHTML='<div class="error-msg">Every schedule needs a Schedule Number. Check '+esc(item.file.name)+'.</div>';return}
@@ -1342,6 +1476,12 @@ async function submitEntry(){
   const err=$('formErr'),info=$('formInfo');err.innerHTML='';info.innerHTML='';
   const project=$('selProj').value,level=$('selLevel').value,area=$('selArea').value,comments=$('inpComm').value.trim();
   if(!project)return err.innerHTML='<div class="error-msg">Select a project</div>';
+  // b5.14 (pairs live): a new entry's level / area must be one of the job's pairs (or both blank for Ad hoc) — said here in
+  // the database guard's own words before anything is uploaded. Attaching to a placeholder doesn't move it, so no check.
+  if(pairsLive&&(currentEntryType==='loose'||!selectedOrderId)){
+    const pj=projects.find(p=>p.name===project);
+    const why=pairProblem(pj?pairsOf(pj.id):[],{level,area,entryType:currentEntryType,wasPlaced:false});
+    if(why)return err.innerHTML='<div class="error-msg">'+esc(why)+'</div>'}
   const btn=$('submitBtn');btn.disabled=true;btn.textContent='Saving...';
   try{
     if(currentEntryType==='loose'){
@@ -1447,7 +1587,7 @@ function renderDash(){
 <td title="${esc(e.area||'')}">${esc(e.area||'—')}</td>
 <td class="sched-td">${e.schedule?esc(e.schedule):'<span style="color:#ccc">—</span>'}${e.extraction_method==='ocr'?' <span class="ocr-badge" title="Extracted via OCR — verify values">🔍</span>':''}</td>
 <td>${e.total_weight?`<span class="weight-td" onclick="editWeight(${e.id})">${e.total_weight}T</span>`:`<span style="color:#ccc;cursor:pointer" onclick="editWeight(${e.id})">—</span>`}</td>
-<td>${getStatusPill(e.status,e.entry_type,e.on_hold)}</td>
+<td>${getStatusPill(e.status,e.entry_type,e.on_hold,isUnplaced(e))}</td>
 <td class="${mm?'mismatch-date':''}" style="white-space:nowrap;font-size:11px">${fmtDate(e.our_delivery_date)||'<span style="color:#ccc">—</span>'}</td>
 <td style="white-space:nowrap;font-size:11px">${fmtDate(e.entry_date)||'—'}</td>
 <td class="${mm?'mismatch-date':''}" style="white-space:nowrap;font-size:11px">${fmtDate(e.supplier_delivery_date)||'<span style="color:#ccc">—</span>'}${mm?'<span class="mismatch-icon" title="Dates mismatch">⚠️</span>':''}</td>
@@ -1750,7 +1890,7 @@ async function removeMarkup(id,idx){
 /* ═══ DETAIL ═══ */
 function showDetail(id){const e=entries.find(x=>x.id===id);if(!e)return;const mm=hasMismatch(e),mp=e.markup_plans?JSON.parse(e.markup_plans):[];
   $('detailModal').innerHTML=`<h3>Entry Details<button class="modal-close" onclick="closeOv('detailOv')">&times;</button></h3>
-${e.entry_type==='loose'?'<span class="pill pill-loose" style="margin-bottom:12px;display:inline-block">Ad Hoc</span> ':''}
+${e.entry_type==='loose'?'<span class="pill pill-loose" style="margin-bottom:12px;display:inline-block">'+(pairsLive&&isUnplaced(e)?'Ad hoc — DBCC will place it':'Ad Hoc')+'</span> ':''}
 ${e.on_hold?'<span class="pill pill-onhold" style="margin-bottom:12px;display:inline-block;margin-left:0">⏸ ON HOLD</span>':''}
 ${e.unmatched?'<div class="warn-msg" style="margin-top:0;margin-bottom:12px">⚠ Unmatched entry — no placeholder existed when submitted</div>':''}
 <div class="drow"><div class="dlbl">Project</div><div class="dval">${esc(e.project)}</div></div>
@@ -1759,7 +1899,7 @@ ${e.unmatched?'<div class="warn-msg" style="margin-top:0;margin-bottom:12px">⚠
 <div class="drow"><div class="dlbl">Schedule</div><div class="dval" style="font-family:'JetBrains Mono',monospace">${esc(e.schedule||'—')}</div></div>
 <div class="drow"><div class="dlbl">Drawing</div><div class="dval">${esc(e.drawing_reference||'—')}</div></div>
 <div class="drow"><div class="dlbl">Weight</div><div class="dval">${e.total_weight?e.total_weight+' T':'—'}</div></div>
-<div class="drow"><div class="dlbl">Status</div><div class="dval">${getStatusPill(e.status,e.entry_type,e.on_hold)}</div></div>
+<div class="drow"><div class="dlbl">Status</div><div class="dval">${getStatusPill(e.status,e.entry_type,e.on_hold,isUnplaced(e))}</div></div>
 ${e.cancel_reason?`<div class="drow"><div class="dlbl">Cancel Reason</div><div class="dval" style="color:var(--err)">${esc(e.cancel_reason)}</div></div>`:''}
 <div class="drow"><div class="dlbl">DBCC Requested Delivery Date</div><div class="dval">${fmtDate(e.our_delivery_date)||'—'}</div></div>
 <div class="drow"><div class="dlbl">Scheduler Entry Date</div><div class="dval">${fmtDate(e.entry_date)||'—'}</div></div>
@@ -1801,6 +1941,7 @@ function editOptions(list,pick,blankLabel,offListNote){
 // Level / Area choices for the job picked in the dialog. On the entry's own job its own level / area are always there;
 // on another job, what's picked stays only if that job has it (else the entry's own, if that job has it, else None).
 function editLevelAreaHtml(pn,opening){
+  if(pairsLive)return editPairHtml(pn,opening);   // b5.14
   const s=editSnap,p=projects.find(x=>x.name===pn),ownJob=pn===s.row.project;
   const choose=(selId,list,orig)=>{const cur=opening?'':($(selId)?$(selId).value:'');
     if(cur&&list.includes(cur))return cur;
@@ -1810,6 +1951,39 @@ function editLevelAreaHtml(pn,opening){
   return{level:editOptions(lv,choose('ed_level',lv,s.row.level),'None',"not on this job's list"),
          area:editOptions(ar,choose('ed_area',ar,s.row.area),'None',"not on this job's list")}}
 function onEditProjChange(){const la=editLevelAreaHtml($('ed_proj').value,false);$('ed_level').innerHTML=la.level;$('ed_area').innerHTML=la.area}
+/* b5.14 — the Edit dialog with pairs live. Level: the job's levels that have an active pair. Area: only the areas that go
+   with the level picked. The entry's own level / area is always there and picked when the dialog opens — marked "no
+   longer on this job in Master-OPS" when its pair was retired (it can still be saved unchanged: dates, status…), so an
+   entry Master-OPS moved away from never shows as blank. Blank is "None" only for an Ad hoc entry not placed yet;
+   for a placed entry it reads "Pick …" (a placed entry can't be un-placed). */
+function editPairHtml(pn,opening){
+  const s=editSnap,p=projects.find(x=>x.name===pn),ownJob=pn===s.row.project;
+  const pairs=p?pairsOf(p.id):[],levels=activeLevels(pairs);
+  const ownL=s.row.level==null?'':String(s.row.level),ownA=s.row.area==null?'':String(s.row.area);
+  const unplaced=blankName(ownL)&&blankName(ownA);
+  const cur=id=>opening?null:($(id)?$(id).value:null);
+  const curL=cur('ed_level'),curA=cur('ed_area');
+  let lv;
+  if(curL!=null&&(levels.includes(curL)||(ownJob&&curL===ownL)||curL===''))lv=curL;
+  else if(ownJob)lv=ownL;
+  else lv=levels.includes(ownL)?ownL:'';
+  const areas=lv?areasForLevel(pairs,lv):[],ownShown=ownJob&&lv===ownL;
+  let ar;
+  if(curA!=null&&curA!==''&&(areas.includes(curA)||(ownShown&&curA===ownA)))ar=curA;
+  else if(ownShown)ar=ownA;
+  else ar=areas.includes(ownA)?ownA:'';
+  const retiredL=ownJob&&pairs.some(x=>x.level===ownL&&x.status==='retired');
+  const retiredPair=ownJob&&pairs.some(x=>x.level===ownL&&x.area===ownA&&x.status==='retired');
+  return{level:editOptions(levels,lv,unplaced?'None':'Pick a level…',retiredL?'no longer on this job in Master-OPS':"not on this job's list"),
+         area:editOptions(areas,ar,unplaced?'None':(lv?'Pick an area…':'Pick a level first'),retiredPair?'no longer on this job in Master-OPS':"not on this job's list")}}
+function onEditLevelChange(){if(!pairsLive)return;const la=editLevelAreaHtml($('ed_proj').value,false);$('ed_area').innerHTML=la.area}
+// Save's pre-check (pairs live): a changed job / level / area must be a pair of the job — the guard's own words. An
+// unchanged one passes even on a retired pair, as in the database.
+function editPairProblem(row,form){
+  const same=(a,b)=>(a==null?'':String(a))===(b==null?'':String(b));
+  if(same(form.project,row.project)&&same(form.level,row.level)&&same(form.area,row.area))return null;
+  const p=projects.find(x=>x.name===form.project);
+  return pairProblem(p?pairsOf(p.id):[],{level:form.level,area:form.area,entryType:row.entry_type,wasPlaced:!blankName(row.level)&&!blankName(row.area)})}
 function readEditForm(){return{project:$('ed_proj').value,level:$('ed_level').value,area:$('ed_area').value,schedule:$('ed_sched').value.trim(),entry_date:$('ed_date').value,our_delivery_date:$('ed_ourD').value,supplier_delivery_date:$('ed_supD').value,drawing_reference:$('ed_draw').value.trim(),total_weight:$('ed_wt').value.trim(),split_reference:$('ed_split').value.trim()}}
 // What Save sends: only the fields the person changed (the dialog now vs when it opened), plus the status / mismatch
 // rules those changes trigger, judged on `cur` — the entry as the database holds it. Pure (tests/r1.test.mjs).
@@ -1873,9 +2047,12 @@ function openEditEntry(id){const e=entries.find(x=>x.id===id);if(!e)return;
     dangerSection+='</div>';
   }
   const la=editLevelAreaHtml(e.project,true);
+  // b5.14 (pairs live): once an entry is made only DBCC changes its job, level or area (REO 0012, the protect rules).
+  const laLock=pairsLive&&isSupplier()?' disabled':'';
   $('editModal').innerHTML=`<h3>Edit Entry<button class="modal-close" onclick="closeOv('editOv')">&times;</button></h3>
-<div class="fg"><label>Project</label><select id="ed_proj">${editOptions(projects.map(p=>p.name),e.project,e.project?null:'— no project —','not in the project list')}</select></div>
-<div class="row2"><div class="fg"><label>Level</label><select id="ed_level">${la.level}</select></div><div class="fg"><label>Area</label><select id="ed_area">${la.area}</select></div></div>
+<div class="fg"><label>Project</label><select id="ed_proj"${laLock}>${editOptions(projects.map(p=>p.name),e.project,e.project?null:'— no project —','not in the project list')}</select></div>
+<div class="row2"><div class="fg"><label>Level</label><select id="ed_level"${laLock}>${la.level}</select></div><div class="fg"><label>Area</label><select id="ed_area"${laLock}>${la.area}</select></div></div>
+${laLock?'<div class="hint" style="margin:-6px 0 10px">Only DBCC can change the job, level or area once an entry is made — ask DBCC.</div>':''}
 <div class="row2"><div class="fg"><label>Schedule</label><input type="text" id="ed_sched" value="${esc(e.schedule||'')}" style="font-family:'JetBrains Mono',monospace"></div><div class="fg"><label>Scheduler Entry Date</label><input type="date" id="ed_date" value="${esc(e.entry_date||'')}"></div></div>
 <div class="row2"><div class="fg"><label>DBCC Requested Delivery Date${isSupplier()?' <span style="font-weight:400;color:var(--muted);font-size:11px">(DBCC only)</span>':''}</label><input type="date" id="ed_ourD" value="${esc(e.our_delivery_date||'')}"${isSupplier()?' disabled title="Only DBCC can change the DBCC requested delivery date"':''}></div><div class="fg"><label>Production Delivery Date</label><input type="date" id="ed_supD" value="${esc(e.supplier_delivery_date||'')}"></div></div>
 <div class="row2"><div class="fg"><label>Drawing Reference</label><input type="text" id="ed_draw" value="${esc(e.drawing_reference||'')}"></div><div class="fg"><label>Weight (T)</label><input type="number" step="0.001" id="ed_wt" value="${esc(e.total_weight??'')}" style="font-family:'JetBrains Mono',monospace"></div></div>
@@ -1886,6 +2063,7 @@ ${dangerSection}
 <div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-sec btn-sm" onclick="closeOv('editOv')">Cancel</button><button class="btn btn-sm" id="edSaveBtn" onclick="saveEdit(${id})" style="width:auto">Save</button></div>`;
   $('editOv').classList.add('show');
   $('ed_proj').onchange=onEditProjChange;
+  $('ed_level').onchange=onEditLevelChange;   // b5.14: with pairs live the areas follow the level (off: nothing happens)
   editSnap.form=readEditForm()}   // what the dialog showed — Save compares against this
 
 function removeScheduleFromEntry(id){
@@ -1940,6 +2118,7 @@ async function saveEdit(id){const err=$('edErr');err.innerHTML='';
   const form1=readEditForm();
   if(!editPatch(snap.row,snap.form,form1,isSupplier()).changed.length){closeOv('editOv');return}   // nothing changed — nothing to send
   if(!form1.project){err.innerHTML='<div class="error-msg">Pick a project.</div>';return}
+  if(pairsLive){const why=editPairProblem(snap.row,form1);if(why){err.innerHTML='<div class="error-msg">'+esc(why)+'</div>';return}}   // b5.14
   const btn=$('edSaveBtn');if(btn){btn.disabled=true;btn.textContent='Saving…'}
   try{
     // 1. Re-read the entry. If anything the dialog shows or its rules read changed since it opened, save nothing.
