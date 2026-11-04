@@ -347,6 +347,8 @@ body.role-supplier .dbcc-only{display:none!important}
 .cc-datemode input[type=date]{width:auto;padding:6px 8px;font-size:12px}
 .cc-alldate{font-size:12px;color:var(--muted)}
 .cc-to{font-size:12px;color:var(--mid);margin-bottom:8px}
+/* b5.14: the card's To line as a warning (<p class="cc-to warn-msg">) — .cc-to comes later at the same weight and drew it grey; two classes win, size and spacing stay */
+.cc-to.warn-msg{color:var(--warn)}
 .cc-send .cc-files{padding:0 0 8px}
 .cc-sum{font-size:12px;color:var(--mid);margin:4px 0 8px 18px;line-height:1.6}
 .cc-sum ul{margin-left:16px}
