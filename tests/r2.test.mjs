@@ -274,3 +274,108 @@ test('a projects / pairs change: off does what b5.13 did; on keeps the form in s
   a2.onProjectsChanged();assert.deepEqual(calls(),['populate','projList','form']);
   r2('pairsLive=false');a2.onProjectsChanged();assert.deepEqual(calls(),['populate','projList','redraw'],'on → off redraws back');
 });
+
+// ── The delivery grid (pairs live) ──
+const E=(id,level,area,o={})=>({id,project:'Barwon Reservoir',level,area,status:'Ordered',entry_type:'scheduled',schedule:null,...o});
+const BARWON_ENTRIES=[
+  E(1,'GRD','SLAB'),E(2,'GRD','SLAB',{status:'Cancelled'}),            // an active pair with 2 entries (cancelled counts, as before)
+  E(3,'L1','WALLS'),                                                    // a retired pair that still has an entry → amber
+  E(4,'ROOF','PLANT',{status:'Delivered'}),                             // never a pair → amber (orphan), its names go last
+  E(5,null,'',{entry_type:'loose',schedule:'2LGU'}),                    // Ad hoc, not placed → listed under the grid
+  E(6,'GRD','',{entry_type:'loose'}),                                    // half-placed → listed too, never dropped
+];
+test('gridModel: rows / columns by the order rule; active, retired, orphan, none; nothing dropped', ()=>{
+  const m=app.gridModel(PROJECTS[0],app.pairsOf(6,PAIRS),BARWON_ENTRIES);
+  assert.deepEqual(plain(m.levels),['GRD','L1','GRD-L1','B1','ROOF'],'retired L1/WALLS shows because it has an entry; ROOF (orphan) last');
+  assert.deepEqual(plain(m.areas),['SLAB','COLUMNS','WALLS','PILES','PLANT']);
+  const st=(l,a)=>{const c=m.cell(l,a);return c.state+':'+c.count};
+  assert.equal(st('GRD','SLAB'),'active:2');assert.equal(st('GRD','COLUMNS'),'active:0');assert.equal(st('B1','PILES'),'active:0');
+  assert.equal(st('L1','WALLS'),'retired:1');assert.equal(st('ROOF','PLANT'),'orphan:1');
+  assert.equal(st('GRD','WALLS'),'none:0');assert.equal(st('GRD','PLANT'),'none:0');
+  assert.deepEqual(plain(m.unplaced).map(e=>e.id),[5,6]);
+  assert.equal(m.linked,true);assert.equal(m.hasPairs,true);assert.equal(m.activeCount,5);
+  // a retired pair with no entries isn't shown at all
+  const m2=app.gridModel(PROJECTS[0],app.pairsOf(6,PAIRS),[]);
+  assert.deepEqual(plain(m2.areas),['SLAB','COLUMNS','PILES']);assert.equal(m2.cell('L1','WALLS').state,'none');
+  // not linked, no pairs
+  const m3=app.gridModel(PROJECTS[2],[],[]);
+  assert.equal(m3.linked,false);assert.equal(m3.hasPairs,false);assert.equal(m3.activeCount,0);assert.equal(app.pairGridHtml(m3,new Set()),'');
+});
+
+test('pairGridHtml: one div per cell with its state, count and words; names only as escaped data attributes', ()=>{
+  const HOSTILE='GRD" onmouseover="alert(1)';
+  const pairs=[{id:1,project_id:9,level:HOSTILE,area:"L1 '); alert(1); ('",sort_order:0,status:'active'},{id:2,project_id:9,level:'L1',area:'<b>X</b>',sort_order:1,status:'active'}];
+  const m=app.gridModel({id:9,hubProjectId:'u'},pairs,[{id:1,level:'L1',area:'<b>X</b>',status:'Ordered'}]);
+  const ticks=new Set([app.cellKey('L1','<b>X</b>')]);
+  const h=app.pairGridHtml(m,ticks);
+  assert.ok(!/onmouseover="alert|<b>X<\/b>|alert\(1\); \('/.test(h),'no name reaches the page raw');
+  // every attribute of every tag, read the way a browser would (quoted values are whole: a name can't close one)
+  const attrNames=[...h.matchAll(/<[a-z]+((?:\s+[a-z-]+="[^"]*")*)\s*>/g)].flatMap(t=>[...t[1].matchAll(/\s([a-z-]+)="/g)].map(x=>x[1]));
+  assert.equal(attrNames.length,[...h.matchAll(/="/g)].length,'every attribute was read');
+  assert.deepEqual(attrNames.filter(n=>/^on/.test(n)),[],'no inline handlers in the grid — one listener on the grid reads the data attributes');
+  assert.match(h,/data-level="GRD&quot; onmouseover=&quot;alert\(1\)" data-area="L1 &#39;\); alert\(1\); \(&#39;" data-state="active"/);
+  assert.match(h,/<div class="grid-cell pair has-entry ticked" data-level="L1" data-area="&lt;b&gt;X&lt;\/b&gt;" data-state="active" title="L1 \/ &lt;b&gt;X&lt;\/b&gt; — 1 entry\. Click to open its card\." role="button" tabindex="0">1<\/div>/);
+  assert.match(h,/class="grid-cell not-pair"[^>]*title="L1 \/ L1 &#39;\); alert\(1\); \(&#39; isn&#39;t on this job in Master-OPS — add it there in Project Setup\."/);
+  const b=app.pairGridHtml(app.gridModel(PROJECTS[0],app.pairsOf(6,PAIRS),BARWON_ENTRIES),new Set());
+  assert.match(b,/class="grid-cell pair" data-level="GRD" data-area="COLUMNS" data-state="active" title="GRD \/ COLUMNS — on this job\. Click to order\."[^>]*><\/div>/);
+  assert.match(b,/class="grid-cell retired" data-level="L1" data-area="WALLS" data-state="retired" title="L1 \/ WALLS — no longer on this job in Master-OPS — move these \(1 entry\)\. Nothing new can be ordered here\."[^>]*>1<\/div>/);
+  assert.match(b,/class="grid-cell retired" data-level="ROOF" data-area="PLANT" data-state="orphan"[^>]*>1<\/div>/);
+  assert.match(b,/<th class="corner-th">/,'the sticky corner, header row and level column classes');
+  assert.equal((b.match(/class="level-td"/g)||[]).length,5);
+});
+
+// A page for the delivery program tab (a fresh app copy: this replaces openCellCard).
+function programApp(){
+  const a=loadApp(),r=src=>vm.runInContext(src,a);
+  a.__p={pairs:PAIRS,projects:PROJECTS,entries:BARWON_ENTRIES};
+  r(`pairsLive=true;projectPairs=JSON.parse(JSON.stringify(__p.pairs));projects=JSON.parse(JSON.stringify(__p.projects));entries=JSON.parse(JSON.stringify(__p.entries));
+     __opened=[];openCellCard=c=>__opened.push(c);`);
+  const els={};
+  for(const id of ['adminProgram','dpProj','dpContent','dpNotice','dpBanner','dpGridWrap','dpPickBar','dpUnplaced','dpMultiBtn'])
+    els[id]={id,value:'',innerHTML:'',textContent:'',style:{},classList:{toggle(){},add(){},remove(){}}};
+  els.dpProj.value='Barwon Reservoir';
+  a.document.getElementById=id=>els[id]||null;
+  return{a,r,els};
+}
+test('a grid press: grey → the banner in words; green / amber → its card; selecting several ticks; Select all green', ()=>{
+  const{a,r,els}=programApp();
+  a.renderPairGrid();
+  assert.match(els.dpGridWrap.innerHTML,/grid-table pair-grid/);assert.equal(els.dpNotice.innerHTML,'');
+  assert.match(els.dpUnplaced.innerHTML,/2 entries on this job have no level \/ area yet — Ad hoc items are placed by DBCC in Master-OPS/);
+  a.dpCellPress('GRD','WALLS');
+  assert.match(els.dpBanner.innerHTML,/<b>GRD \/ WALLS<\/b> isn't on this job in Master-OPS — add it there in Project Setup\./);
+  assert.equal(r('__opened.length'),0,'a grey cell opens nothing');
+  a.dpCellPress('GRD','SLAB');
+  assert.equal(els.dpBanner.innerHTML,'','the banner goes once a real cell is pressed');
+  assert.deepEqual(plain(r('__opened')),[[{level:'GRD',area:'SLAB'}]]);
+  a.dpCellPress('L1','WALLS');assert.deepEqual(plain(r('__opened[1]')),[{level:'L1',area:'WALLS'}],'amber opens its card too (to move or cancel what is there)');
+  // select several
+  a.dpToggleMulti();a.dpCellPress('GRD','COLUMNS');a.dpCellPress('B1','PILES');a.dpCellPress('B1','PILES');a.dpCellPress('GRD','WALLS');
+  assert.deepEqual(plain([...r('dpPick.ticks')]),[a.cellKey('GRD','COLUMNS')],'ticked, unticked; grey never ticks');
+  assert.match(els.dpPickBar.innerHTML,/<b>1<\/b> cell ticked/);
+  assert.equal(r('__opened.length'),2,'ticking opens nothing');
+  a.dpSelectAllGreen();
+  assert.deepEqual(plain([...r('dpPick.ticks')]).map(k=>JSON.parse(k).join(' / ')).sort(),['B1 / PILES','GRD / COLUMNS','GRD / SLAB','GRD-L1 / COLUMNS','L1 / SLAB'],'every active pair — never the amber or grey ones');
+  a.dpOpenTicked();assert.equal(r('__opened[2].length'),5);
+  a.dpClearTicks();assert.equal(r('dpPick.ticks.size'),0);
+  a.dpToggleMulti();assert.equal(r('dpPick.multi'),false);
+});
+
+test('the grid says when nothing can be ordered: not linked, or linked with no pairs yet', ()=>{
+  const{a,r,els}=programApp();
+  els.dpProj.value='New Job';a.renderPairGrid();
+  assert.match(els.dpNotice.innerHTML,/Not linked to Master-OPS yet — nothing can be ordered\./);assert.equal(els.dpGridWrap.innerHTML,'');
+  r("projects.push({id:12,name:'Linked No Pairs',supplier:'ARC',levels:[],areas:[],hubProjectId:'u-12'})");
+  els.dpProj.value='Linked No Pairs';a.renderPairGrid();
+  assert.match(els.dpNotice.innerHTML,/No levels or areas from Master-OPS on this job yet — nothing can be ordered\./);
+  els.dpProj.value='1033 Nepean Hwy';a.renderPairGrid();
+  assert.equal(els.dpNotice.innerHTML,'','an REO-only pair can be ordered');assert.match(els.dpGridWrap.innerHTML,/data-level="Driveway" data-area="Excavation"/);
+});
+
+test('a ticked cell whose pair Master-OPS removed drops out of the selection on the next refresh', ()=>{
+  const{a,r}=programApp();
+  a.dpSelectAllGreen();assert.ok(r('dpPick.ticks.has(cellKey("GRD","COLUMNS"))'));
+  r("projectPairs.find(p=>p.level==='GRD'&&p.area==='COLUMNS').status='retired'");
+  a.refreshProgramViews();
+  assert.ok(!r('dpPick.ticks.has(cellKey("GRD","COLUMNS"))'));assert.ok(r('dpPick.ticks.has(cellKey("GRD","SLAB"))'));
+});

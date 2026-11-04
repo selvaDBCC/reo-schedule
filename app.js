@@ -376,7 +376,7 @@ async function doLogout(){
 // In the main app (not the Site / Foreman views) the level / area pairs are read with the projects (loadPairs).
 async function loadProjects(){const{data,error}=await sb.from('projects').select('*').order('name');if(error)throw error;let rows=data.map(p=>({id:p.id,name:p.name,supplier:p.supplier||'Aus Reo',levels:p.levels?p.levels.split('||').filter(Boolean):[],areas:p.areas?p.areas.split('||').filter(Boolean):[],hubProjectId:p.hub_project_id||null,hubShortCode:p.hub_short_code||null,hubName:p.hub_name||null}));if(isSupplier())rows=rows.filter(p=>p.supplier===authSupplier);projects=rows;if(!isSiteViewMode()&&!isForemanViewMode())await loadPairs()}
 async function seedProjects(){const rows=SEEDS.map(p=>({name:p.name,levels:p.levels.join('||'),areas:p.areas.join('||')}));await sb.from('projects').insert(rows);await loadProjects()}
-async function loadEntries(){const{data,error}=await sb.from('entries').select('*').order('created_at',{ascending:false});if(error)throw error;let rows=data;if(isSupplier()){const mine=new Set(projects.map(p=>p.name));rows=rows.filter(e=>mine.has(e.project))}entries=rows;$('countNum').textContent=entries.length}
+async function loadEntries(){const{data,error}=await sb.from('entries').select('*').order('created_at',{ascending:false});if(error)throw error;let rows=data;if(isSupplier()){const mine=new Set(projects.map(p=>p.name));rows=rows.filter(e=>mine.has(e.project))}entries=rows;$('countNum').textContent=entries.length;if(pairsLive)afterEntriesLoaded()}
 
 /* ═══ LEVEL / AREA PAIRS (b5.14) ═══
    Which level goes with which area on a job comes from Master-OPS Project Setup: REO migration 0012's project_pairs
@@ -447,7 +447,10 @@ function onProjectsChanged(){
   if(adminUnlocked)renderProjList();
   if(modeChanged){redrawForPairsMode();return}
   if(!pairsLive)return;
-  refreshEntryForm()}
+  refreshEntryForm();refreshProgramViews()}
+// The delivery grid follows the entries / pairs on screen (pairs live), keeping its job and the ticked cells.
+function refreshProgramViews(){if(!pairsLive)return;if($('dpGridWrap')&&dpProject())renderPairGrid()}
+function afterEntriesLoaded(){try{refreshProgramViews()}catch(e){console.warn('[REO] delivery grid refresh failed:',e&&e.message)}}
 function redrawForPairsMode(){renderAdminProj();renderAdminProgram();onProjChange();refreshLaHint();renderDash();if(pairsLive)subscribePairs()}
 // Many pairs rows change in one Master-OPS push: one reload for the burst.
 function reloadProjectsSoon(){clearTimeout(projectsReloadTimer);projectsReloadTimer=setTimeout(()=>{loadProjects().then(onProjectsChanged).catch(e=>console.warn('[REO] projects / pairs refresh failed:',e&&e.message))},250)}
@@ -2959,10 +2962,11 @@ function pfConfirmAttach(){
 
 /* ═══ ADMIN: DELIVERY PROGRAM ═══ */
 function renderAdminProgram(){
+  if(pairsLive)return renderPairProgram();   // b5.14: the grid from the job's level / area pairs (below)
   $('adminProgram').innerHTML=`<div class="card" style="margin-bottom:20px"><div class="fg"><label>Select Project</label><select id="dpProj" onchange="onDpProjChange()"><option value="">Choose...</option>${projects.map(p=>`<option>${esc(p.name)}</option>`).join('')}</select></div></div><div id="dpContent" style="display:none"><div class="card" style="margin-bottom:20px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px"><div><h3 style="font-size:15px;font-weight:700;color:var(--gray-dk);margin-bottom:2px">Level / Area Grid</h3><p style="font-size:12px;color:var(--muted)">Tick empty cells to create placeholders. Click a green cell with a number to add another (e.g. for split pours).</p></div><div style="display:flex;gap:6px"><button class="btn btn-ghost btn-sm" onclick="dpSelectAll()">Select All</button><button class="btn btn-ghost btn-sm" onclick="dpClearAll()">Clear</button></div></div><div class="grid-wrap" id="dpGridWrap"></div></div><div id="dpSelArea" style="display:none"><div class="card"><h3 style="font-size:15px;font-weight:700;color:var(--gray-dk);margin-bottom:4px">Selected (<span id="dpSelCount">0</span>)</h3><p style="font-size:12px;color:var(--muted);margin-bottom:14px">Set splits and per-delivery dates.</p><div id="dpSelList"></div><button class="btn" onclick="dpCreate()" id="dpCreateBtn">Create Placeholder Entries</button><div id="dpErr"></div><div id="dpSuc"></div></div></div></div>`}
 
-function onDpProjChange(){dpSelected={};const p=$('dpProj').value;$('dpContent').style.display=p?'block':'none';if(p)renderDpGrid()}
-function renderDpGrid(){const pn=$('dpProj').value,proj=projects.find(p=>p.name===pn);if(!proj)return;
+function onDpProjChange(){dpSelected={};if(pairsLive){dpPick={multi:false,ticks:new Set()};dpHideBanner()}const p=$('dpProj').value;$('dpContent').style.display=p?'block':'none';if(p)renderDpGrid()}
+function renderDpGrid(){if(pairsLive)return renderPairGrid();const pn=$('dpProj').value,proj=projects.find(p=>p.name===pn);if(!proj)return;
   const pe=entries.filter(e=>e.project===pn);
   let h='<table class="grid-table"><thead><tr><th class="corner-th">Level \\ Area</th>';
   proj.areas.forEach(a=>{h+=`<th class="area-th" title="${esc(a)}">${esc(a)}</th>`});
@@ -3043,6 +3047,105 @@ function openOrderCreatedEmail(rows,projectName){
     : `A DBCC requested delivery date has been set for the following:`;
   const body=`Hi,\n\n${intro}\n\n${lines.join('\n')}\n\nPlease confirm receipt and the production delivery ${isBulk?'dates':'date'}.${EMAIL_FOOTER_TEXT}\n\nRegards,\n${userName}\nDebono Bros Concreting`;
   emailModal(subject,body,null,'order_created',projectName)}
+
+/* ═══ DELIVERY PROGRAM — the grid from the job's level / area pairs (b5.14, pairs live only) ═══
+   Rows = levels, columns = areas, in Master-OPS order (the order rule). A cell is:
+     active  — a pair of the job: green; with a count when it already has entries. Click → its cell card.
+     retired — a pair Master-OPS took off the job that still has entries: amber with the count — "no longer on this job
+               in Master-OPS — move these"; nothing new can be ordered there.
+     orphan  — entries on a level / area that was never a pair of the job (only data written around the guard): amber.
+     none    — not a pair: grey; a click says "LEVEL / AREA isn't on this job in Master-OPS — add it there in Project
+               Setup".
+   Entries with no level and area (Ad hoc, waiting for DBCC to place them) are listed under the grid — never dropped.
+   "Select several" ticks cells for one card; "Select all green" ticks every pair. The level column and the header row
+   stay put while the grid scrolls (.grid-table). Pure parts (gridModel, pairGridHtml) are checked by tests/r2. */
+let dpPick={multi:false,ticks:new Set()};
+function gridModel(proj,pairs,projEntries){
+  const cells=new Map();
+  const get=(level,area)=>{const k=cellKey(level,area);let c=cells.get(k);if(!c){c={key:k,level,area,pair:null,entries:[],count:0,state:'none'};cells.set(k,c)}return c};
+  for(const p of pairs)get(p.level,p.area).pair=p;
+  const unplaced=[];
+  for(const e of projEntries){if(blankName(e.level)||blankName(e.area))unplaced.push(e);else get(e.level,e.area).entries.push(e)}
+  const shown=[];
+  for(const c of cells.values()){
+    c.count=c.entries.length;
+    c.state=c.pair&&c.pair.status==='active'?'active':c.count?(c.pair?'retired':'orphan'):'none';
+    if(c.state!=='none')shown.push(c)}
+  // The order rule over the pairs on screen (active + retired that still have entries); names only orphans carry go last.
+  const ruled=shown.filter(c=>c.pair).map(c=>c.pair);
+  const lv=orderNames(ruled,'level'),ar=orderNames(ruled,'area');
+  const extra=(have,field)=>[...new Set(shown.filter(c=>!c.pair).map(c=>c[field]))].filter(n=>!have.includes(n)).sort(byName);
+  const levels=[...lv,...extra(lv,'level')],areas=[...ar,...extra(ar,'area')];
+  const cell=(level,area)=>cells.get(cellKey(level,area))||{key:cellKey(level,area),level,area,pair:null,entries:[],count:0,state:'none'};
+  return{levels,areas,cell,cells:[...cells.values()],unplaced,
+    linked:!!(proj&&proj.hubProjectId),hasPairs:pairs.length>0,activeCount:shown.filter(c=>c.state==='active').length}}
+function cellTitle(c){
+  const where=`${c.level} / ${c.area}`,n=c.count,ents=n+' entr'+(n===1?'y':'ies');
+  if(c.state==='active')return n?`${where} — ${ents}. Click to open its card.`:`${where} — on this job. Click to order.`;
+  if(c.state==='retired')return `${where} — no longer on this job in Master-OPS — move these (${ents}). Nothing new can be ordered here.`;
+  if(c.state==='orphan')return `${where} isn't on this job in Master-OPS — move these (${ents}).`;
+  return `${where} isn't on this job in Master-OPS — add it there in Project Setup.`}
+// The grid itself (pure). Every name reaches the page escaped, as data attributes — never inside handler code.
+function pairGridHtml(m,ticks){
+  if(!m.levels.length||!m.areas.length)return '';
+  let h='<table class="grid-table pair-grid"><thead><tr><th class="corner-th">Level \\ Area</th>';
+  m.areas.forEach(a=>{h+=`<th class="area-th" title="${esc(a)}">${esc(a)}</th>`});
+  h+='</tr></thead><tbody>';
+  m.levels.forEach(lv=>{
+    h+=`<tr><td class="level-td" title="${esc(lv)}">${esc(lv)}</td>`;
+    m.areas.forEach(ar=>{
+      const c=m.cell(lv,ar),ticked=!!(ticks&&ticks.has(c.key));
+      const cls='grid-cell '+(c.state==='active'?'pair'+(c.count?' has-entry':''):c.state==='none'?'not-pair':'retired')+(ticked?' ticked':'');
+      h+=`<td><div class="${cls}" data-level="${esc(lv)}" data-area="${esc(ar)}" data-state="${esc(c.state)}" title="${esc(cellTitle(c))}" role="button" tabindex="0">${c.count||''}</div></td>`});
+    h+='</tr>'});
+  return h+'</tbody></table>'}
+function dpProject(){const s=$('dpProj');return s?projects.find(p=>p.name===s.value)||null:null}
+function dpModel(proj){return gridModel(proj,pairsOf(proj.id),entries.filter(e=>e.project===proj.name))}
+function renderPairProgram(){
+  const keep=$('dpProj')?$('dpProj').value:'';
+  const legend='<div class="dp-legend"><span><i class="grid-cell pair"></i>On this job — click to order</span><span><i class="grid-cell pair has-entry">2</i>Has orders</span><span><i class="grid-cell retired">1</i>No longer on this job in Master-OPS — move these</span><span><i class="grid-cell not-pair"></i>Not on this job</span></div>';
+  $('adminProgram').innerHTML=`<div class="card" style="margin-bottom:20px"><div class="fg"><label>Select Project</label><select id="dpProj" onchange="onDpProjChange()"><option value="">Choose...</option>${projects.map(p=>`<option>${esc(p.name)}</option>`).join('')}</select></div></div><div id="dpContent" style="display:none"><div class="card" style="margin-bottom:20px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;flex-wrap:wrap;gap:8px"><div><h3 style="font-size:15px;font-weight:700;color:var(--gray-dk);margin-bottom:2px">Level / Area Grid</h3><p style="font-size:12px;color:var(--muted)">Green cells are this job's level / area pairs from Master-OPS Project Setup. Click one to open its card — order, dates, files, comments, cancel — with one email at the end. Select several to do many at once.</p></div><div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn btn-ghost btn-sm" id="dpMultiBtn" onclick="dpToggleMulti()">Select several</button><button class="btn btn-ghost btn-sm" onclick="dpSelectAllGreen()">Select all green</button><button class="btn btn-ghost btn-sm" onclick="dpClearTicks()">Clear</button></div></div>${legend}<div id="dpNotice"></div><div id="dpBanner"></div><div class="grid-wrap" id="dpGridWrap"></div><div id="dpPickBar"></div><div id="dpUnplaced"></div></div></div>`;
+  const sel=$('dpProj');keepPick(sel,keep);
+  const w=$('dpGridWrap');w.onclick=dpGridClick;w.onkeydown=dpGridKey;
+  if(sel.value){$('dpContent').style.display='block';renderPairGrid()}}
+function renderPairGrid(){
+  const w=$('dpGridWrap');if(!w)return;
+  const proj=dpProject();if(!proj){const c=$('dpContent');if(c)c.style.display='none';return}
+  const m=dpModel(proj);
+  for(const k of [...dpPick.ticks]){const[l,a]=JSON.parse(k);if(m.cell(l,a).state==='none')dpPick.ticks.delete(k)}   // a pair that left can't stay ticked
+  $('dpNotice').innerHTML=dpNoticeHtml(m);
+  w.innerHTML=pairGridHtml(m,dpPick.ticks);
+  $('dpPickBar').innerHTML=dpPickBarHtml();
+  $('dpUnplaced').innerHTML=dpUnplacedHtml(m);
+  const b=$('dpMultiBtn');if(b){b.classList.toggle('active',dpPick.multi);b.textContent=dpPick.multi?'✓ Selecting several':'Select several'}}
+function dpNoticeHtml(m){
+  if(m.activeCount)return '';
+  if(!m.linked&&!m.hasPairs)return '<div class="warn-msg" style="margin:0 0 10px"><b>Not linked to Master-OPS yet — nothing can be ordered.</b> This job\'s levels and areas come from Master-OPS once it is linked (the new-job checklist\'s “REO add + link” step).</div>';
+  return '<div class="warn-msg" style="margin:0 0 10px"><b>No levels or areas from Master-OPS on this job yet — nothing can be ordered.</b> They come from Master-OPS Project Setup.</div>'}
+function dpPickBarHtml(){
+  if(!dpPick.multi)return '';
+  const n=dpPick.ticks.size;
+  return `<div class="dp-pickbar"><span>${n?`<b>${n}</b> cell${n===1?'':'s'} ticked`:'Tick the cells you want, then open one card for all of them.'}</span>${n?'<button class="btn btn-sm" onclick="dpOpenTicked()" style="width:auto;margin:0">Open card</button>':''}</div>`}
+function dpUnplacedHtml(m){
+  const n=m.unplaced.length;if(!n)return '';
+  const rows=m.unplaced.map(e=>`<li><span class="cc-sched">${esc(e.schedule||'(no schedule)')}</span> ${getStatusPill(e.status,e.entry_type,e.on_hold,isUnplaced(e))} <span class="dp-un-meta">${esc(fmtDate(e.entry_date)||'')}${!isUnplaced(e)?' — only one of level / area is set':''}</span> <button class="action-btn view" onclick="showDetail(${e.id})">View</button></li>`).join('');
+  return `<details class="dp-unplaced"><summary>${n} entr${n===1?'y':'ies'} on this job ${n===1?'has':'have'} no level / area yet — Ad hoc items are placed by DBCC in Master-OPS</summary><ul>${rows}</ul></details>`}
+function dpGridClick(ev){const el=ev.target&&ev.target.closest?ev.target.closest('.grid-cell[data-level]'):null;if(el)dpCellPress(el.getAttribute('data-level'),el.getAttribute('data-area'))}
+function dpGridKey(ev){if(ev.key!=='Enter'&&ev.key!==' ')return;const el=ev.target&&ev.target.closest?ev.target.closest('.grid-cell[data-level]'):null;if(!el)return;ev.preventDefault();dpCellPress(el.getAttribute('data-level'),el.getAttribute('data-area'))}
+// A cell pressed: grey → the banner; otherwise its card (or, while selecting several, a tick).
+function dpCellPress(level,area){
+  const proj=dpProject();if(!proj)return;
+  const c=dpModel(proj).cell(level,area);
+  if(c.state==='none'){dpShowBanner(level,area);return}
+  dpHideBanner();
+  if(dpPick.multi){if(dpPick.ticks.has(c.key))dpPick.ticks.delete(c.key);else dpPick.ticks.add(c.key);renderPairGrid();return}
+  openCellCard([{level,area}])}
+function dpShowBanner(level,area){const b=$('dpBanner');if(b)b.innerHTML=`<div class="warn-msg dp-banner"><span><b>${esc(level)} / ${esc(area)}</b> isn't on this job in Master-OPS — add it there in Project Setup.</span><button class="modal-close" onclick="dpHideBanner()" title="Close">&times;</button></div>`}
+function dpHideBanner(){const b=$('dpBanner');if(b)b.innerHTML=''}
+function dpToggleMulti(){dpPick.multi=!dpPick.multi;if(!dpPick.multi)dpPick.ticks.clear();renderPairGrid()}
+function dpSelectAllGreen(){const proj=dpProject();if(!proj)return;dpPick.multi=true;for(const c of dpModel(proj).cells)if(c.state==='active')dpPick.ticks.add(c.key);renderPairGrid()}
+function dpClearTicks(){dpPick.ticks.clear();renderPairGrid()}
+function dpOpenTicked(){const cells=[...dpPick.ticks].map(k=>{const[level,area]=JSON.parse(k);return{level,area}});if(cells.length)openCellCard(cells)}
 
 /* ═══ ADMIN: STEEL FIXERS ═══ */
 let sfSort={col:'our_delivery_date',asc:true};

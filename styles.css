@@ -276,6 +276,32 @@ body.role-supplier .dbcc-only{display:none!important}
 .grid-cell.has-entry.add-more{border-color:var(--accent);background:var(--accent-lt);color:var(--accent-dk);box-shadow:0 0 0 2px var(--accent-lt2)}
 .grid-cell.has-entry.add-more::before{content:'+';position:absolute;top:-7px;right:-7px;background:var(--accent);color:#fff;border-radius:50%;width:16px;height:16px;font-size:11px;line-height:14px;font-weight:700;display:flex;align-items:center;justify-content:center;border:2px solid var(--card)}
 
+/* b5.14 — the grid from the job's level / area pairs (pairs live): green = a pair (a count when it has entries), amber =
+   no longer on this job in Master-OPS but still has entries, grey = not a pair. Header row and level column stay put. */
+.grid-cell.pair{border-color:#9FD1AC;background:#F1FAF3}
+.grid-cell.pair.has-entry{border-color:var(--success);background:var(--success-lt);color:var(--success);font-weight:700}
+.grid-cell.retired{border-color:var(--warn);background:var(--warn-lt);color:var(--warn);font-weight:700}
+.grid-cell.not-pair{border:2px dashed #E2DED7;background:#F4F2EE;cursor:help}
+.grid-cell.not-pair:hover{border-color:#C9C3BA;background:#EFECE6}
+.grid-cell.ticked{border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-lt2)}
+.grid-cell.ticked::before{content:'✓';position:absolute;top:-7px;right:-7px;background:var(--accent);color:#fff;border-radius:50%;width:16px;height:16px;font-size:10px;line-height:14px;font-weight:700;display:flex;align-items:center;justify-content:center;border:2px solid var(--card)}
+.grid-cell:focus-visible{outline:2px solid var(--info);outline-offset:2px}
+.pair-grid td.level-td{max-width:220px;overflow:hidden;text-overflow:ellipsis}
+.dp-legend{display:flex;gap:16px;flex-wrap:wrap;font-size:11px;color:var(--muted);margin:2px 0 12px}
+.dp-legend span{display:inline-flex;align-items:center;gap:6px}
+.dp-legend .grid-cell{width:20px;height:20px;font-size:10px;font-style:normal;cursor:default;border-radius:5px}
+.dp-legend .grid-cell:hover{border-color:inherit}
+.dp-banner{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:0 0 10px}
+.dp-banner .modal-close{font-size:20px;color:var(--warn)}
+.dp-pickbar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-top:12px;padding:10px 14px;background:var(--accent-lt);border:1px solid var(--accent-lt2);border-radius:10px;font-size:13px;color:var(--accent-dk)}
+#dpMultiBtn.active{background:var(--accent-lt);border-color:var(--accent);color:var(--accent-dk)}
+.dp-unplaced{margin-top:14px;font-size:12px;color:var(--mid)}
+.dp-unplaced summary{cursor:pointer;font-weight:600;color:var(--purple)}
+.dp-unplaced ul{list-style:none;margin:8px 0 0;padding:0}
+.dp-unplaced li{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 0;border-top:1px solid #f0eeea}
+.dp-un-meta{color:var(--muted);font-size:11px}
+.cc-sched{font-family:'JetBrains Mono',monospace;font-weight:600;font-size:12px;color:var(--gray-dk)}
+
 /* SPLIT ITEMS */
 .sel-item{padding:14px;background:var(--input);border:1px solid var(--border);border-radius:10px;margin-bottom:10px}
 .sel-item-header{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
