@@ -759,3 +759,22 @@ test('Edit: a supplier can\'t change an entry\'s job, level or area — REO 0012
     assert.equal(/id="ed_ourD" value="2026-11-05" disabled/.test(h),locked,`${tag}: DBCC's requested date, as before`);
   }
 });
+
+test('the b5.13 grid (pairs off) never creates placeholders on no job — the project list changed under it', async()=>{
+  const a=loadApp(),r=src=>vm.runInContext(src,a);
+  r(`pairsLive=false;userName='Chris';entries=[];loadEntries=async()=>{};
+     projects=[{id:6,name:'Barwon Reservoir',supplier:'Aus Reo',levels:['GRD'],areas:['SLAB']}];
+     dpSelected={'GRD||SLAB':{splits:[{label:'',date:''}]}};`);
+  const els={};
+  a.document.getElementById=id=>els[id]||(els[id]={id,value:'',innerHTML:'',textContent:'',disabled:false,style:{},classList:{add(){},remove(){},toggle(){}}});
+  const sb=fakeSb(()=>({data:null,error:null}));a.__sb=sb;r('sb=__sb');
+  for(const pn of ['','Gone Job']){
+    a.document.getElementById('dpProj').value=pn;
+    await a.dpCreate();
+    assert.match(els.dpErr.innerHTML,/Pick the project again — the project list changed\. Nothing was created\./,pn||'(blank)');
+    assert.equal(sb.calls.length,0,'nothing sent');
+  }
+  els.dpProj.value='Barwon Reservoir';await a.dpCreate();
+  assert.deepEqual(sb.calls.map(c=>c.table+':'+c.op),['entries:insert','audit_log:insert'],'a job that is there creates as before');
+  assert.equal(sb.calls[0].payload[0].project,'Barwon Reservoir');
+});
