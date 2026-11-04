@@ -37,7 +37,27 @@ let currentEntryType='scheduled',selectedOrderId=null,selectedIds=new Set(),dpSe
 /* ═══ HELPERS ═══ */
 function today(){return new Date().toISOString().slice(0,10)}
 function fmtDate(d){if(!d)return '';const p=d.split('-');return p.length===3?`${p[2]}/${p[1]}/${p[0]}`:d}
-function esc(s){const d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML}
+// b5.14 — names can never become code. esc() makes any value safe as HTML text AND inside a quoted attribute: it now
+// also escapes " and ' (before, a level / area / project name with a quote could close an attribute and run script in
+// whoever's page showed it). Plain string work, no DOM, so tests/r1.test.mjs can check it in node.
+const ESC_MAP={'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'};
+function esc(s){return (s==null?'':String(s)).replace(/[&<>"']/g,c=>ESC_MAP[c])}
+// A data value handed to an inline handler: onclick="f(${jsArg(v)})". JSON.stringify turns it into a JavaScript
+// literal, esc() keeps the attribute closed; the browser decodes the entities before running the handler, so f gets
+// exactly v. Never put a data string into handler code any other way (no '${...}' quoting by hand).
+function jsArg(v){return esc(JSON.stringify(v===undefined?null:v))}
+// Links to stored files (schedules, markup plans, reference files) open only when they are http(s) links on the REO
+// file store (this project's Supabase storage — every file link in the data is). javascript:, data:, another site or
+// anything unreadable is refused: returns ''.
+const FILE_ORIGIN=new URL(SUPA_URL).origin;
+function safeUrl(u){
+  if(typeof u!=='string'||!u.trim())return '';
+  let p;try{p=new URL(u.trim())}catch(_){return ''}
+  if(p.protocol!=='https:'&&p.protocol!=='http:')return '';
+  if(p.origin!==FILE_ORIGIN)return '';
+  return p.href}
+// The attributes for an <a> to a stored file. A refused link is still shown, but goes nowhere and says why.
+function fileLinkAttrs(u){const s=safeUrl(u);return s?`href="${esc(s)}" target="_blank" rel="noopener noreferrer"`:`title="This link isn't on the REO file store, so it won't open" aria-disabled="true"`}
 function fmtSize(b){return b<1024?b+' B':b<1048576?(b/1024).toFixed(1)+' KB':(b/1048576).toFixed(1)+' MB'}
 function closeOv(id){document.getElementById(id).classList.remove('show')}
 function $(id){return document.getElementById(id)}
@@ -482,7 +502,7 @@ function onLevelAreaChange(){
   let html='<p style="font-size:12px;color:var(--muted);margin-bottom:10px">Orders for <b>'+esc(proj)+'</b>'+(level?' / '+esc(level):'')+(area?' / '+esc(area):'')+':</p>';
   matching.forEach(e=>{
     const has=!!e.schedule,can=!has&&e.status!=='Cancelled'&&e.status!=='Delivered';
-    html+=`<div class="order-item${selectedOrderId===e.id?' selected':''}${can?'':' disabled'}" ${can?`onclick="selectOrder(${e.id})"`:''}><div class="order-item-info"><div class="oi-title">${esc(e.level||'—')} / ${esc(e.area||'—')}${e.split_reference?' <span style="color:var(--accent-dk)">('+esc(e.split_reference)+')</span>':''}</div><div class="oi-meta">DBCC Requested Delivery: ${fmtDate(e.our_delivery_date)||'Not set'} · ${e.status}${has?' · '+esc(e.schedule):''}</div></div><div>${has?'<span class="pill pill-scheduled">Has Schedule</span>':can?'<span class="pill pill-ordered">Attach →</span>':'<span class="pill pill-cancelled">'+esc(e.status)+'</span>'}</div></div>`});
+    html+=`<div class="order-item${selectedOrderId===e.id?' selected':''}${can?'':' disabled'}" ${can?`onclick="selectOrder(${e.id})"`:''}><div class="order-item-info"><div class="oi-title">${esc(e.level||'—')} / ${esc(e.area||'—')}${e.split_reference?' <span style="color:var(--accent-dk)">('+esc(e.split_reference)+')</span>':''}</div><div class="oi-meta">DBCC Requested Delivery: ${fmtDate(e.our_delivery_date)||'Not set'} · ${esc(e.status)}${has?' · '+esc(e.schedule):''}</div></div><div>${has?'<span class="pill pill-scheduled">Has Schedule</span>':can?'<span class="pill pill-ordered">Attach →</span>':'<span class="pill pill-cancelled">'+esc(e.status)+'</span>'}</div></div>`});
   // Always offer an escape hatch: even when matching orders exist (e.g. all "Has Schedule"),
   // the user might need to create another entry — common case is when a single placeholder was
   // created but the actual delivery is being split into multiple parts and Aus Reo is uploading
@@ -1429,7 +1449,7 @@ function renderDash(){
 <td style="white-space:nowrap;font-size:11px">${fmtDate(e.entry_date)||'—'}</td>
 <td class="${mm?'mismatch-date':''}" style="white-space:nowrap;font-size:11px">${fmtDate(e.supplier_delivery_date)||'<span style="color:#ccc">—</span>'}${mm?'<span class="mismatch-icon" title="Dates mismatch">⚠️</span>':''}</td>
 <td style="white-space:nowrap;font-size:11px">${foremanCell(e)}</td>
-<td>${e.file_url?`<a class="att-link" href="${e.file_url}" target="_blank">📄 ${esc((e.file_name||'').slice(0,14))}</a>`:`<button class="action-btn" onclick="uploadScheduleFile(${e.id})" style="color:var(--accent-dk);font-size:10px">+ Upload</button>`}</td>
+<td>${e.file_url?`<a class="att-link" ${fileLinkAttrs(e.file_url)}>📄 ${esc((e.file_name||'').slice(0,14))}</a>`:`<button class="action-btn" onclick="uploadScheduleFile(${e.id})" style="color:var(--accent-dk);font-size:10px">+ Upload</button>`}</td>
 <td>${mp.length?`<button class="att-link markup-link" onclick="viewMarkups(${e.id})">📐 ${mp.length}</button>`:''}<button class="action-btn" onclick="uploadMarkup(${e.id})" style="font-size:10px;color:var(--info)">+📐</button></td>
 <td class="comment-td" onclick="editChunkComment(${e.id},'aus_reo')" title="${esc(chunksToPlain(parseChunks(e.aus_reo_comment)))}"><div class="comment-preview">${chunksToCell(parseChunks(e.aus_reo_comment))}</div></td>
 <td class="comment-td" onclick="editChunkComment(${e.id},'dbcc')" title="${esc(chunksToPlain(parseChunks(e.dbcc_comment)))}"><div class="comment-preview">${chunksToCell(parseChunks(e.dbcc_comment))}${rowFilesBadge(e)}</div></td>
@@ -1452,10 +1472,13 @@ function clearSel(){selectedIds.clear();updateBulkBar();renderDash()}
 function updateBulkBar(){const n=selectedIds.size;$('bulkBar').classList.toggle('show',n>0);$('bulkCount').textContent=n+' selected'}
 
 async function bulkDownload(type){
-  const sel=entries.filter(e=>selectedIds.has(e.id)),files=[];
+  const sel=entries.filter(e=>selectedIds.has(e.id)),files=[];let refused=0;
+  // b5.14: only links on the REO file store are opened or fetched (safeUrl); any other link is counted and skipped.
+  const add=(u,name)=>{const s=safeUrl(u);if(s)files.push({url:s,name});else refused++};
   sel.forEach(e=>{
-    if((type==='schedules'||type==='all')&&e.file_url)files.push({url:e.file_url,name:`sched_${e.schedule||e.id}.${(e.file_name||'pdf').split('.').pop()}`});
-    if((type==='markups'||type==='all')&&e.markup_plans){JSON.parse(e.markup_plans).forEach((m,i)=>files.push({url:m.url,name:`markup_${e.id}_${i}.${(m.name||'pdf').split('.').pop()}`}))}});
+    if((type==='schedules'||type==='all')&&e.file_url)add(e.file_url,`sched_${e.schedule||e.id}.${(e.file_name||'pdf').split('.').pop()}`);
+    if((type==='markups'||type==='all')&&e.markup_plans){JSON.parse(e.markup_plans).forEach((m,i)=>add(m.url,`markup_${e.id}_${i}.${(m.name||'pdf').split('.').pop()}`))}});
+  if(refused)alert(refused+' file link'+(refused===1?' is':'s are')+" not on the REO file store and won't be downloaded.");
   if(!files.length)return alert('No files');
   if(files.length===1){window.open(files[0].url,'_blank');return}
   try{const zip=new JSZip();$('bulkCount').textContent='Downloading...';
@@ -1587,7 +1610,7 @@ function resolveMismatch(id){
 
 /* ═══ WEIGHT / COMMENT / MARKUP ═══ */
 function editWeight(id){const e=entries.find(x=>x.id===id);if(!e)return;
-  $('weightModal').innerHTML=`<h3>Weight<button class="modal-close" onclick="closeOv('weightOv')">&times;</button></h3><div class="fg"><label>Tonnes</label><input type="number" step="0.001" id="wInp" value="${e.total_weight||''}" style="font-family:'JetBrains Mono',monospace"></div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn btn-sec btn-sm" onclick="closeOv('weightOv')">Cancel</button><button class="btn btn-sm" onclick="saveWeight(${id})" style="width:auto">Save</button></div>`;$('weightOv').classList.add('show')}
+  $('weightModal').innerHTML=`<h3>Weight<button class="modal-close" onclick="closeOv('weightOv')">&times;</button></h3><div class="fg"><label>Tonnes</label><input type="number" step="0.001" id="wInp" value="${esc(e.total_weight||'')}" style="font-family:'JetBrains Mono',monospace"></div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn btn-sec btn-sm" onclick="closeOv('weightOv')">Cancel</button><button class="btn btn-sm" onclick="saveWeight(${id})" style="width:auto">Save</button></div>`;$('weightOv').classList.add('show')}
 async function saveWeight(id){const v=$('wInp').value;const e=entries.find(x=>x.id===id);
   await sb.from('entries').update({total_weight:v?parseFloat(v):null}).eq('id',id);
   await auditLog({entry_id:id,action:'UPDATE',field_changed:'total_weight',old_value:String(e.total_weight||''),new_value:v||''});
@@ -1632,8 +1655,8 @@ ${intro}
   <div style="margin-top:6px"><button class="btn btn-sec btn-sm" onclick="pfAttachToComment(${id})" style="width:auto;font-size:11px;padding:5px 10px">📎 Attach reference file</button></div>
 </div>
 <div style="display:flex;gap:8px;justify-content:space-between;margin-top:14px">
-  <button class="btn btn-err btn-sm" onclick="clearChunkComment(${id},'${col}')" style="width:auto" ${chunks.length?'':'disabled'}>Clear All</button>
-  <div style="display:flex;gap:8px"><button class="btn btn-sec btn-sm" onclick="closeOv('commentOv')">Cancel</button><button class="btn btn-sm" onclick="saveChunkComment(${id},'${col}')" style="width:auto">Save</button></div>
+  <button class="btn btn-err btn-sm" onclick="clearChunkComment(${id},${jsArg(col)})" style="width:auto" ${chunks.length?'':'disabled'}>Clear All</button>
+  <div style="display:flex;gap:8px"><button class="btn btn-sec btn-sm" onclick="closeOv('commentOv')">Cancel</button><button class="btn btn-sm" onclick="saveChunkComment(${id},${jsArg(col)})" style="width:auto">Save</button></div>
 </div>`;
   $('commentOv').classList.add('show');
   setTimeout(()=>{const ta=$('newChunkInp');if(ta)ta.focus()},80)}
@@ -1687,7 +1710,7 @@ function uploadMarkup(id){const inp=document.createElement('input');inp.type='fi
     await loadEntries();renderDash();}catch(e){alert('Failed: '+e.message)}};inp.click()}
 
 function viewMarkups(id){const e=entries.find(x=>x.id===id);if(!e)return;const mp=e.markup_plans?JSON.parse(e.markup_plans):[];
-  $('markupModal').innerHTML=`<h3>Markup Plans<button class="modal-close" onclick="closeOv('markupOv')">&times;</button></h3><p style="font-size:12px;color:var(--muted);margin-bottom:12px">${esc(e.project)} / ${esc(e.level||'')} / ${esc(e.area||'')}</p>${mp.map((m,i)=>`<div class="fitem mitem"><a href="${m.url}" target="_blank" style="color:var(--info);text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">📐 ${esc(m.name)}</a> <span style="color:var(--muted);font-size:10px">by ${esc(m.uploaded_by||'?')}</span><button onclick="removeMarkup(${id},${i})">×</button></div>`).join('')}${!mp.length?'<p style="color:var(--muted);padding:14px 0">None yet.</p>':''}<button class="btn btn-sec btn-sm" onclick="uploadMarkup(${id});closeOv('markupOv')" style="margin-top:12px">+ Add Markup</button>`;$('markupOv').classList.add('show')}
+  $('markupModal').innerHTML=`<h3>Markup Plans<button class="modal-close" onclick="closeOv('markupOv')">&times;</button></h3><p style="font-size:12px;color:var(--muted);margin-bottom:12px">${esc(e.project)} / ${esc(e.level||'')} / ${esc(e.area||'')}</p>${mp.map((m,i)=>`<div class="fitem mitem"><a ${fileLinkAttrs(m.url)} style="color:var(--info);text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">📐 ${esc(m.name)}</a> <span style="color:var(--muted);font-size:10px">by ${esc(m.uploaded_by||'?')}</span><button onclick="removeMarkup(${id},${i})">×</button></div>`).join('')}${!mp.length?'<p style="color:var(--muted);padding:14px 0">None yet.</p>':''}<button class="btn btn-sec btn-sm" onclick="uploadMarkup(${id});closeOv('markupOv')" style="margin-top:12px">+ Add Markup</button>`;$('markupOv').classList.add('show')}
 async function removeMarkup(id,idx){
   confirmDialog('Remove Markup?','Remove this markup plan?','Remove','btn-err',async()=>{
     const e=entries.find(x=>x.id===id);const mp=JSON.parse(e.markup_plans||'[]');mp.splice(idx,1);
@@ -1716,8 +1739,8 @@ ${e.cancel_reason?`<div class="drow"><div class="dlbl">Cancel Reason</div><div c
 <div class="drow"><div class="dlbl">Site Notes</div><div class="dval">${(function(){const n=parseChunks(e.foreman_notes);return n.length?n.map(c=>esc(c.text)+' <span style="color:var(--muted);font-size:11px">— '+esc((c.authors||[]).join(', '))+'</span>').join('<br>'):'—'})()}</div></div>
 <div class="drow"><div class="dlbl">${esc(projectSupplier(e.project))} Comments</div><div class="dval">${chunksToHtml(parseChunks(e.aus_reo_comment))}</div></div>
 <div class="drow"><div class="dlbl">DBCC Comments</div><div class="dval">${chunksToHtml(parseChunks(e.dbcc_comment))}</div></div>
-<div class="drow"><div class="dlbl">Schedule File</div><div class="dval">${e.file_url?`<a class="att-link" href="${e.file_url}" target="_blank">📄 ${esc(e.file_name)}</a>`:'None'}</div></div>
-<div class="drow"><div class="dlbl">Markup Plans</div><div class="dval">${mp.length?mp.map(m=>`<a class="att-link markup-link" href="${m.url}" target="_blank">📐 ${esc(m.name)}</a>`).join(' '):'None'}</div></div>
+<div class="drow"><div class="dlbl">Schedule File</div><div class="dval">${e.file_url?`<a class="att-link" ${fileLinkAttrs(e.file_url)}>📄 ${esc(e.file_name)}</a>`:'None'}</div></div>
+<div class="drow"><div class="dlbl">Markup Plans</div><div class="dval">${mp.length?mp.map(m=>`<a class="att-link markup-link" ${fileLinkAttrs(m.url)}>📐 ${esc(m.name)}</a>`).join(' '):'None'}</div></div>
 <div style="margin-top:20px;display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
 ${e.status!=='Cancelled'&&e.status!=='Delivered'?`<button class="btn btn-err btn-sm" onclick="closeOv('detailOv');cancelEntry(${e.id})">Cancel</button>`:''}
 ${e.status==='Cancelled'?`<button class="btn btn-sec btn-sm" onclick="closeOv('detailOv');reinstateEntry(${e.id})">Reinstate</button>`:''}
@@ -1753,7 +1776,7 @@ function openEditEntry(id){const e=entries.find(x=>x.id===id);if(!e)return;
         <div style="font-size:12px;font-weight:600;color:var(--gray-dk);margin-bottom:6px">Markup Plans (${mp.length})</div>
         <p style="font-size:11px;color:var(--muted);margin-bottom:8px;line-height:1.4">Click × to remove a single file. The schedule is NOT affected.</p>
         ${mp.map((m,i)=>`<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:#fff;border:1px solid #EFE8DA;border-radius:6px;margin-bottom:6px">
-          <a href="${m.url}" target="_blank" style="flex:1;color:var(--info);font-size:12px;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(m.name)}">📐 ${esc(m.name)}</a>
+          <a ${fileLinkAttrs(m.url)} style="flex:1;color:var(--info);font-size:12px;text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(m.name)}">📐 ${esc(m.name)}</a>
           <span style="color:var(--muted);font-size:10px;white-space:nowrap">by ${esc(m.uploaded_by||'?')}</span>
           <button class="btn btn-err btn-sm" onclick="removeMarkupFromEdit(${id},${i})" style="width:auto;padding:3px 9px;font-size:11px;flex-shrink:0" title="Delete this markup file">×</button>
         </div>`).join('')}
@@ -1764,9 +1787,9 @@ function openEditEntry(id){const e=entries.find(x=>x.id===id);if(!e)return;
   $('editModal').innerHTML=`<h3>Edit Entry<button class="modal-close" onclick="closeOv('editOv')">&times;</button></h3>
 <div class="fg"><label>Project</label><select id="ed_proj">${projects.map(p=>`<option${p.name===e.project?' selected':''}>${esc(p.name)}</option>`).join('')}</select></div>
 <div class="row2"><div class="fg"><label>Level</label><select id="ed_level"><option value="">None</option>${(proj?proj.levels:[]).map(l=>`<option${l===e.level?' selected':''}>${esc(l)}</option>`).join('')}</select></div><div class="fg"><label>Area</label><select id="ed_area"><option value="">None</option>${(proj?proj.areas:[]).map(a=>`<option${a===e.area?' selected':''}>${esc(a)}</option>`).join('')}</select></div></div>
-<div class="row2"><div class="fg"><label>Schedule</label><input type="text" id="ed_sched" value="${esc(e.schedule||'')}" style="font-family:'JetBrains Mono',monospace"></div><div class="fg"><label>Scheduler Entry Date</label><input type="date" id="ed_date" value="${e.entry_date||''}"></div></div>
-<div class="row2"><div class="fg"><label>DBCC Requested Delivery Date${isSupplier()?' <span style="font-weight:400;color:var(--muted);font-size:11px">(DBCC only)</span>':''}</label><input type="date" id="ed_ourD" value="${e.our_delivery_date||''}"${isSupplier()?' disabled title="Only DBCC can change the DBCC requested delivery date"':''}></div><div class="fg"><label>Production Delivery Date</label><input type="date" id="ed_supD" value="${e.supplier_delivery_date||''}"></div></div>
-<div class="row2"><div class="fg"><label>Drawing Reference</label><input type="text" id="ed_draw" value="${esc(e.drawing_reference||'')}"></div><div class="fg"><label>Weight (T)</label><input type="number" step="0.001" id="ed_wt" value="${e.total_weight||''}" style="font-family:'JetBrains Mono',monospace"></div></div>
+<div class="row2"><div class="fg"><label>Schedule</label><input type="text" id="ed_sched" value="${esc(e.schedule||'')}" style="font-family:'JetBrains Mono',monospace"></div><div class="fg"><label>Scheduler Entry Date</label><input type="date" id="ed_date" value="${esc(e.entry_date||'')}"></div></div>
+<div class="row2"><div class="fg"><label>DBCC Requested Delivery Date${isSupplier()?' <span style="font-weight:400;color:var(--muted);font-size:11px">(DBCC only)</span>':''}</label><input type="date" id="ed_ourD" value="${esc(e.our_delivery_date||'')}"${isSupplier()?' disabled title="Only DBCC can change the DBCC requested delivery date"':''}></div><div class="fg"><label>Production Delivery Date</label><input type="date" id="ed_supD" value="${esc(e.supplier_delivery_date||'')}"></div></div>
+<div class="row2"><div class="fg"><label>Drawing Reference</label><input type="text" id="ed_draw" value="${esc(e.drawing_reference||'')}"></div><div class="fg"><label>Weight (T)</label><input type="number" step="0.001" id="ed_wt" value="${esc(e.total_weight||'')}" style="font-family:'JetBrains Mono',monospace"></div></div>
 <div class="fg"><label>Split Reference</label><input type="text" id="ed_split" value="${esc(e.split_reference||'')}"></div>
 <div class="info-msg" style="margin-top:8px;font-size:12px;background:#F0F5FF;border-color:#C7D2FE;color:var(--info)">💡 Comments are now edited directly on the dashboard — click the Supplier Comments or DBCC Comments cell on the row.</div>
 ${dangerSection}
@@ -1886,7 +1909,7 @@ function emailModal(subject,body,entryId,auditContext,projectName){
       ${files.map(f=>{
         const cat=FILE_CATEGORIES.find(c=>c.id===f.category);const icon=cat?cat.icon:'📎';
         const loc=f.scope==='level_area'?` <span style="color:#E65100;font-size:11px">(${esc(f.level)}/${esc(f.area)})</span>`:' <span style="color:#2E7D32;font-size:11px">(project-wide)</span>';
-        return `<label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--gray-dk);cursor:pointer;font-weight:400"><input type="checkbox" class="em_file_box" data-url="${esc(f.file_url)}" data-label="${esc(f.label)}" style="width:auto"${preTick?' checked':''}> ${icon} <b>${esc(f.label)}</b>${loc}</label>`;
+        return `<label style="display:flex;align-items:center;gap:8px;font-size:12px;color:var(--gray-dk);cursor:pointer;font-weight:400"><input type="checkbox" class="em_file_box" data-url="${esc(safeUrl(f.file_url))}" data-label="${esc(f.label)}" style="width:auto"${preTick?' checked':''}> ${icon} <b>${esc(f.label)}</b>${loc}</label>`;
       }).join('')}
       </div></div>`;
   }
@@ -1897,7 +1920,7 @@ function emailModal(subject,body,entryId,auditContext,projectName){
 ${filesHtml}
 <div class="fg"><label>Message</label><textarea id="em_body" rows="12" style="font-size:13px">${esc(body)}</textarea></div>
 <p style="font-size:11px;color:var(--muted);margin-top:4px">Clicking Send will open your default email app (Outlook, Gmail, etc.) with the message pre-filled. Review and hit Send in your email app.</p>
-<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn btn-sec btn-sm" onclick="closeOv('emailOv')">Cancel</button><button class="btn btn-purple btn-sm" onclick="sendEmail(${entryId},'${esc(auditContext)}')" style="width:auto">✉ Open in Email</button></div>`;$('emailOv').classList.add('show')}
+<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn btn-sec btn-sm" onclick="closeOv('emailOv')">Cancel</button><button class="btn btn-purple btn-sm" onclick="sendEmail(${jsArg(entryId==null?null:entryId)},${jsArg(auditContext)})" style="width:auto">✉ Open in Email</button></div>`;$('emailOv').classList.add('show')}
 
 function openMismatchEmail(id){const e=entries.find(x=>x.id===id);if(!e)return;
   const subject=`Date Mismatch — ${e.project} / ${e.level||''} / ${e.area||''}`;
@@ -2142,8 +2165,8 @@ function renderNotif(){
       }
     }
     else if(a.action==='BULK_CREATE'){icon='create';iconChar='⚡';msg=`<b>Bulk create:</b> ${esc(a.new_value)}`}
-    else if(a.action==='UPDATE'&&a.field_changed==='our_delivery_date'){icon='update';iconChar='📅';msg=`DBCC requested delivery date changed from <b>${fmtDate(a.old_value)||'not set'}</b> to <b>${fmtDate(a.new_value)||'not set'}</b> — ${ctx}`}
-    else if(a.action==='UPDATE'&&a.field_changed==='supplier_delivery_date'){icon='update';iconChar='📅';msg=`Production delivery date changed from <b>${fmtDate(a.old_value)||'not set'}</b> to <b>${fmtDate(a.new_value)||'not set'}</b> — ${ctx}`}
+    else if(a.action==='UPDATE'&&a.field_changed==='our_delivery_date'){icon='update';iconChar='📅';msg=`DBCC requested delivery date changed from <b>${esc(fmtDate(a.old_value))||'not set'}</b> to <b>${esc(fmtDate(a.new_value))||'not set'}</b> — ${ctx}`}
+    else if(a.action==='UPDATE'&&a.field_changed==='supplier_delivery_date'){icon='update';iconChar='📅';msg=`Production delivery date changed from <b>${esc(fmtDate(a.old_value))||'not set'}</b> to <b>${esc(fmtDate(a.new_value))||'not set'}</b> — ${ctx}`}
     else if(a.action==='UPDATE'&&a.field_changed==='schedule_attached'){icon='create';iconChar='📎';msg=`Schedule attached: <b>${esc(a.new_value)}</b> — ${ctx}`}
     else if(a.action==='UPDATE'&&a.field_changed==='status'){icon='update';iconChar='⇄';msg=`Status changed from <b>${esc(a.old_value)}</b> to <b>${esc(a.new_value)}</b> — ${ctx}`}
     else if(a.action==='UPDATE'){icon='update';iconChar='✎';msg=`Updated <b>${esc(a.field_changed||'entry')}</b> — ${ctx}`}
@@ -2189,8 +2212,8 @@ async function renderAdminSecurity(){
     const lockedPill=c.manually_locked
       ? '<span class="pill" style="background:#FDECEA;color:#C62828;font-size:10px;padding:2px 8px">LOCKED</span>'
       : '<span class="pill" style="background:#E8F5E9;color:#2E7D32;font-size:10px;padding:2px 8px">Active</span>';
-    const unlockBtn=c.manually_locked?`<button class="btn btn-err btn-sm" onclick="doUnlock('${esc(c.company)}')" style="width:auto">Unlock</button>`:'';
-    return `<div class="proj-item"><div class="proj-item-info"><h4>${esc(c.company)} ${lockedPill}</h4><div class="sum">${c.supplier?('Supplier login · '+esc(c.supplier)):'DBCC admin login'}</div></div><div class="proj-actions"><button class="btn btn-sec btn-sm" onclick="promptSetPin('${esc(c.company)}')" style="width:auto">Change PIN</button>${unlockBtn}</div></div>`;
+    const unlockBtn=c.manually_locked?`<button class="btn btn-err btn-sm" onclick="doUnlock(${jsArg(c.company)})" style="width:auto">Unlock</button>`:'';
+    return `<div class="proj-item"><div class="proj-item-info"><h4>${esc(c.company)} ${lockedPill}</h4><div class="sum">${c.supplier?('Supplier login · '+esc(c.supplier)):'DBCC admin login'}</div></div><div class="proj-actions"><button class="btn btn-sec btn-sm" onclick="promptSetPin(${jsArg(c.company)})" style="width:auto">Change PIN</button>${unlockBtn}</div></div>`;
   }).join('');
   const attempts=(at&&at.attempts)||[];
   const failCount=attempts.filter(a=>!a.success).length;
@@ -2214,7 +2237,7 @@ function promptSetPin(company){
   });
 }
 function doUnlock(company){
-  confirmDialog('Unlock '+esc(company)+'?','This clears the failed-attempt lockout so '+esc(company)+' can sign in again.','Unlock','',()=>{
+  confirmDialog('Unlock '+company+'?','This clears the failed-attempt lockout so '+esc(company)+' can sign in again.','Unlock','',()=>{   // confirmDialog escapes the title itself
     authFnCall('unlock',{targetCompany:company}).then(r=>{
       if(r&&r.status==='ok')renderAdminSecurity();
       else alert('Failed to unlock: '+((r&&r.error)||'unknown error'));
@@ -2394,7 +2417,7 @@ function pfRefreshSupersedeOptions(){
   const opts=projectFilesFor(proj,null,null,{scope:'all'}).filter(f=>!f.superseded);
   sel.innerHTML='<option value="">Choose the file being replaced…</option>'+opts.map(f=>{
     const loc=f.scope==='level_area'?` (${esc(f.level)}/${esc(f.area)})`:' (project-wide)';
-    return `<option value="${f.id}">${fileCategoryLabel(f.category)} — ${esc(f.label)}${loc}</option>`;
+    return `<option value="${f.id}">${esc(fileCategoryLabel(f.category))} — ${esc(f.label)}${loc}</option>`;
   }).join('');
   wrap.style.display=chk.checked?'block':'none';
 }
@@ -2523,7 +2546,7 @@ function renderPfRow(f){
   const uploaded=new Date(f.uploaded_at).toLocaleDateString('en-AU',{day:'2-digit',month:'2-digit',year:'2-digit'});
   return `<div style="padding:10px 14px;border-top:1px solid var(--border);display:flex;align-items:center;gap:10px;flex-wrap:wrap${f.superseded?';opacity:.65':''}">
     <div style="flex:1;min-width:250px">
-      <div style="font-weight:600;color:var(--text);font-size:13px;margin-bottom:3px"><a href="${esc(f.file_url)}" target="_blank" rel="noopener" style="color:var(--accent-dk);text-decoration:none" title="${esc(f.file_name)}">${esc(f.label)}</a></div>
+      <div style="font-weight:600;color:var(--text);font-size:13px;margin-bottom:3px"><a ${fileLinkAttrs(f.file_url)} style="color:var(--accent-dk);text-decoration:none" title="${esc(f.file_name)}">${esc(f.label)}</a></div>
       <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:3px">${catBadge}${scopeBadge}${supBadge}</div>
       <div style="font-size:11px;color:var(--muted)">By ${esc(f.uploaded_by)} on ${uploaded}</div>
     </div>
@@ -2551,7 +2574,8 @@ function pfDelete(id){
 function rowFilesBadge(e){
   const files=projectFilesFor(e.project,e.level,e.area,{scope:'row'});
   if(!files.length)return '';
-  return ` <span class="pf-row-badge" title="${files.length} reference file${files.length===1?'':'s'} available — click to view" onclick="event.stopPropagation();openProjectFilesViewer('${esc(e.project).replace(/'/g,"\\'")}',${e.level?"'"+esc(e.level).replace(/'/g,"\\'")+"'":'null'},${e.area?"'"+esc(e.area).replace(/'/g,"\\'")+"'":'null'})">📎 ${files.length}</span>`;
+  // b5.14: project / level / area reach the handler through jsArg — a quote in a name can't end the string or the attribute.
+  return ` <span class="pf-row-badge" title="${files.length} reference file${files.length===1?'':'s'} available — click to view" onclick="event.stopPropagation();openProjectFilesViewer(${jsArg(e.project)},${jsArg(e.level||null)},${jsArg(e.area||null)})">📎 ${files.length}</span>`;
 }
 
 // ── File viewer modal — for a given project + optional level/area context. ──
@@ -2575,7 +2599,7 @@ function openProjectFilesViewer(project,level,area){
           const loc=f.scope==='level_area'?` <span style="font-size:10px;color:#E65100">(${esc(f.level)}/${esc(f.area)})</span>`:'';
           const date=new Date(f.uploaded_at).toLocaleDateString('en-AU',{day:'2-digit',month:'2-digit',year:'2-digit'});
           return `<div style="padding:6px 10px;background:#FAFAF8;border:1px solid var(--border);border-radius:6px;margin-bottom:4px;display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-            <a href="${esc(f.file_url)}" target="_blank" rel="noopener" style="flex:1;min-width:200px;color:var(--accent-dk);font-weight:600;text-decoration:none;font-size:13px" title="${esc(f.file_name)}">📄 ${esc(f.label)}${loc}</a>
+            <a ${fileLinkAttrs(f.file_url)} style="flex:1;min-width:200px;color:var(--accent-dk);font-weight:600;text-decoration:none;font-size:13px" title="${esc(f.file_name)}">📄 ${esc(f.label)}${loc}</a>
             <span style="font-size:11px;color:var(--muted)">${esc(f.uploaded_by)} · ${date}</span>
           </div>`;
         }).join('')}
@@ -2608,7 +2632,7 @@ function pfAttachToComment(entryId){
   const html=cats.map(c=>`<div style="margin-bottom:10px"><div style="font-size:11px;color:var(--muted);font-weight:600;margin-bottom:4px">${c.icon} ${c.label}</div>${byCat[c.id].map(f=>{
     const loc=f.scope==='level_area'?` <span style="color:#E65100;font-size:11px">(${esc(f.level)}/${esc(f.area)})</span>`:'';
     return `<label style="display:flex;gap:8px;align-items:center;padding:6px 10px;background:#FAFAF8;border:1px solid var(--border);border-radius:6px;margin-bottom:4px;cursor:pointer;font-weight:400;color:var(--text)">
-      <input type="checkbox" class="pf-att-box" data-url="${esc(f.file_url)}" data-label="${esc(f.label)}">
+      <input type="checkbox" class="pf-att-box" data-url="${esc(safeUrl(f.file_url))}" data-label="${esc(f.label)}">
       <span style="flex:1;font-size:13px">${esc(f.label)}${loc}</span>
     </label>`;
   }).join('')}</div>`).join('');
@@ -2626,7 +2650,8 @@ function pfAttachToComment(entryId){
 function pfConfirmAttach(){
   const picked=[];
   document.querySelectorAll('.pf-att-box:checked').forEach(b=>{
-    picked.push({url:b.getAttribute('data-url'),label:b.getAttribute('data-label')});
+    const url=b.getAttribute('data-url');if(!url)return;   // b5.14: a link that isn't on the REO file store isn't inserted
+    picked.push({url,label:b.getAttribute('data-label')});
   });
   if(!picked.length){closeOv('weightOv');return}
   // Markdown-style link syntax that chunksToHtml renders as a real link
@@ -2668,7 +2693,7 @@ function renderDpGrid(){const pn=$('dpProj').value,proj=projects.find(p=>p.name=
         if(ck)cls+=' checked';
         title=ck?'Selected — click to deselect':'Click to create a placeholder';
       }
-      h+=`<td><div class="${cls}" onclick="toggleDp('${k.replace(/'/g,"\\'")}')" title="${esc(title)}">${inner}</div></td>`});h+='</tr>'});
+      h+=`<td><div class="${cls}" onclick="toggleDp(${jsArg(k)})" title="${esc(title)}">${inner}</div></td>`});h+='</tr>'});
   h+='</tbody></table>';$('dpGridWrap').innerHTML=h;renderDpSel()}
 
 function toggleDp(k){if(dpSelected[k])delete dpSelected[k];else dpSelected[k]={splits:[{label:'',date:''}]};renderDpGrid()}
@@ -2684,12 +2709,17 @@ function renderDpSel(){const keys=Object.keys(dpSelected);$('dpSelArea').style.d
     // suggest sensible default split labels for the new ones being added.
     const existCount=pe.filter(e=>e.level===lv&&e.area===ar).length;
     const titleSuffix=existCount?` <span style="font-size:11px;color:var(--accent-dk);font-weight:600">(adding to ${existCount} existing)</span>`:'';
-    html+=`<div class="sel-item"><div class="sel-item-header"><div class="sel-item-title">${esc(lv)} / ${esc(ar)}${titleSuffix}</div><div class="sel-item-controls"><button onclick="dpRemSplit('${k.replace(/'/g,"\\'")}')">−</button><span>${sel.splits.length}</span><button onclick="dpAddSplit('${k.replace(/'/g,"\\'")}')">+</button><button onclick="delete dpSelected['${k.replace(/'/g,"\\'")}'];renderDpGrid()" style="color:var(--err);border-color:#f5c6c6">×</button></div></div>`;
+    // b5.14: the level||area key reaches every handler through jsArg (it used to be quoted by hand, so a " or \ in a
+    // level / area name broke out of the handler).
+    html+=`<div class="sel-item"><div class="sel-item-header"><div class="sel-item-title">${esc(lv)} / ${esc(ar)}${titleSuffix}</div><div class="sel-item-controls"><button onclick="dpRemSplit(${jsArg(k)})">−</button><span>${sel.splits.length}</span><button onclick="dpAddSplit(${jsArg(k)})">+</button><button onclick="dpRemoveCell(${jsArg(k)})" style="color:var(--err);border-color:#f5c6c6">×</button></div></div>`;
     sel.splits.forEach((sp,i)=>{
       // Placeholder text for the label input. If we're adding to existing, suggest the next Part number.
       const ph=existCount>0?'Part '+(existCount+i+1)+' (recommended)':(sel.splits.length>1?'Part '+(i+1):'No split');
-      html+=`<div class="split-row"><input type="text" value="${esc(sp.label)}" placeholder="${ph}" onchange="dpSelected['${k.replace(/'/g,"\\'")}'].splits[${i}].label=this.value"><input type="date" value="${sp.date||''}" onchange="dpSelected['${k.replace(/'/g,"\\'")}'].splits[${i}].date=this.value">${sel.splits.length>1?`<button class="remove-split" onclick="dpSelected['${k.replace(/'/g,"\\'")}'].splits.splice(${i},1);renderDpSel()">×</button>`:'<span style="width:24px"></span>'}</div>`});
+      html+=`<div class="split-row"><input type="text" value="${esc(sp.label)}" placeholder="${esc(ph)}" onchange="dpSetSplit(${jsArg(k)},${i},'label',this.value)"><input type="date" value="${esc(sp.date||'')}" onchange="dpSetSplit(${jsArg(k)},${i},'date',this.value)">${sel.splits.length>1?`<button class="remove-split" onclick="dpRemoveSplitRow(${jsArg(k)},${i})">×</button>`:'<span style="width:24px"></span>'}</div>`});
     html+='</div>'});$('dpSelList').innerHTML=html}
+function dpSetSplit(k,i,field,v){const s=dpSelected[k]&&dpSelected[k].splits[i];if(s&&(field==='label'||field==='date'))s[field]=v}
+function dpRemoveCell(k){delete dpSelected[k];renderDpGrid()}
+function dpRemoveSplitRow(k,i){if(!dpSelected[k])return;dpSelected[k].splits.splice(i,1);renderDpSel()}
 
 function dpAddSplit(k){if(!dpSelected[k])return;const n=dpSelected[k].splits.length;
   // Auto-label existing splits as Part 1, Part 2... when adding a second
@@ -2773,7 +2803,8 @@ async function recalcOpenPreview(){
     $('rcStatus').textContent=`Schedule ${i+1} of ${list.length}: ${e.schedule||'?'} (${e.project})`;
     try{
       // Fetch the PDF as a Blob so we can feed it into the same parser used at upload time
-      const resp=await fetch(e.file_url,{cache:'no-store'});
+      const fileUrl=safeUrl(e.file_url);if(!fileUrl)throw new Error("the schedule's link isn't on the REO file store");
+      const resp=await fetch(fileUrl,{cache:'no-store'});
       if(!resp.ok)throw new Error('HTTP '+resp.status);
       const blob=await resp.blob();
       const file=new File([blob],e.file_name||'schedule.pdf',{type:'application/pdf'});
@@ -2849,7 +2880,7 @@ function renderRecalcPreview(){
         const e=r.entry;
         body+=`<tr style="border-top:1px solid var(--border)">
           <td style="padding:6px 8px"><input type="checkbox" class="rc-apply-box" data-idx="${i}" checked></td>
-          <td style="padding:6px 8px;font-weight:600"><a href="${esc(e.file_url)}" target="_blank" rel="noopener" style="color:var(--accent-dk);text-decoration:none">${esc(e.schedule||'?')}</a></td>
+          <td style="padding:6px 8px;font-weight:600"><a ${fileLinkAttrs(e.file_url)} style="color:var(--accent-dk);text-decoration:none">${esc(e.schedule||'?')}</a></td>
           <td style="padding:6px 8px;color:var(--muted);font-size:11px">${esc(e.project||'')}<br>${esc(e.level||'—')} / ${esc(e.area||'—')}</td>
           <td style="padding:6px 8px;text-align:right">${diff(r.oldValues.total_weight,r.newValues.total_weight,'total_weight')}</td>
           <td style="padding:6px 8px;text-align:right">${diff(r.oldValues.bar_weight,r.newValues.bar_weight,'bar_weight')}</td>
@@ -2987,7 +3018,7 @@ function renderSfTable(){
 <td class="weight-td" style="text-align:right" onclick="sfEdit('mesh_sqm',${e.id})">${e.mesh_sqm!=null?parseFloat(e.mesh_sqm).toFixed(2):'<span style="color:#ccc">—</span>'}</td>
 <td class="weight-td" style="text-align:right" onclick="sfEdit('trench_mesh_lm',${e.id})">${e.trench_mesh_lm!=null?parseFloat(e.trench_mesh_lm).toFixed(2):'<span style="color:#ccc">—</span>'}</td>
 <td style="text-align:center">${reconCell}</td>
-<td><a class="att-link" href="${e.file_url}" target="_blank">📄 ${esc((e.file_name||'').slice(0,16))}</a></td>
+<td><a class="att-link" ${fileLinkAttrs(e.file_url)}>📄 ${esc((e.file_name||'').slice(0,16))}</a></td>
 <td>${mpCell}</td>
 <td>${instDate}</td>
 <td>${cmtDisplay}</td>
@@ -3037,7 +3068,7 @@ function sfEdit(field,id){
   const e=entries.find(x=>x.id===id);if(!e)return;
   const labels={bar_weight:'Bar Weight (T)',starter_weight:'Starter Bars (T)',mesh_sqm:'Square Mesh (m²)',trench_mesh_lm:'Trench Mesh (LM)'};
   const step=field==='bar_weight'?'0.001':'0.01';
-  $('weightModal').innerHTML=`<h3>${esc(labels[field])}<button class="modal-close" onclick="closeOv('weightOv')">&times;</button></h3><p style="font-size:12px;color:var(--muted);margin-bottom:10px">${esc(e.project)} / ${esc(e.level||'—')} / ${esc(e.area||'—')} · ${esc(e.schedule||'')}</p><div class="fg"><input type="number" step="${step}" id="sfInp" value="${e[field]!=null?e[field]:''}" style="font-family:'JetBrains Mono',monospace" placeholder="Leave blank to clear"></div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn btn-sec btn-sm" onclick="closeOv('weightOv')">Cancel</button><button class="btn btn-sm" onclick="sfSave('${field}',${id})" style="width:auto">Save</button></div>`;
+  $('weightModal').innerHTML=`<h3>${esc(labels[field])}<button class="modal-close" onclick="closeOv('weightOv')">&times;</button></h3><p style="font-size:12px;color:var(--muted);margin-bottom:10px">${esc(e.project)} / ${esc(e.level||'—')} / ${esc(e.area||'—')} · ${esc(e.schedule||'')}</p><div class="fg"><input type="number" step="${step}" id="sfInp" value="${esc(e[field]!=null?e[field]:'')}" style="font-family:'JetBrains Mono',monospace" placeholder="Leave blank to clear"></div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn btn-sec btn-sm" onclick="closeOv('weightOv')">Cancel</button><button class="btn btn-sm" onclick="sfSave(${jsArg(field)},${id})" style="width:auto">Save</button></div>`;
   $('weightOv').classList.add('show')}
 
 async function sfSave(field,id){
@@ -3049,7 +3080,7 @@ async function sfSave(field,id){
 
 function sfEditInstalled(id){
   const e=entries.find(x=>x.id===id);if(!e)return;
-  $('weightModal').innerHTML=`<h3>Installed Date<button class="modal-close" onclick="closeOv('weightOv')">&times;</button></h3><p style="font-size:12px;color:var(--muted);margin-bottom:10px">${esc(e.project)} / ${esc(e.level||'—')} / ${esc(e.area||'—')} · ${esc(e.schedule||'')}</p><div class="fg"><label style="display:block;margin-bottom:4px">Date installed on site</label><input type="date" id="sfDateInp" value="${e.installed_date||''}"></div><div style="display:flex;gap:8px;justify-content:space-between;margin-top:14px"><button class="btn btn-err btn-sm" onclick="sfClearInstalled(${id})" style="width:auto" ${e.installed_date?'':'disabled'}>Clear</button><div style="display:flex;gap:8px"><button class="btn btn-sec btn-sm" onclick="closeOv('weightOv')">Cancel</button><button class="btn btn-sm" onclick="sfSaveInstalled(${id})" style="width:auto">Save</button></div></div>`;
+  $('weightModal').innerHTML=`<h3>Installed Date<button class="modal-close" onclick="closeOv('weightOv')">&times;</button></h3><p style="font-size:12px;color:var(--muted);margin-bottom:10px">${esc(e.project)} / ${esc(e.level||'—')} / ${esc(e.area||'—')} · ${esc(e.schedule||'')}</p><div class="fg"><label style="display:block;margin-bottom:4px">Date installed on site</label><input type="date" id="sfDateInp" value="${esc(e.installed_date||'')}"></div><div style="display:flex;gap:8px;justify-content:space-between;margin-top:14px"><button class="btn btn-err btn-sm" onclick="sfClearInstalled(${id})" style="width:auto" ${e.installed_date?'':'disabled'}>Clear</button><div style="display:flex;gap:8px"><button class="btn btn-sec btn-sm" onclick="closeOv('weightOv')">Cancel</button><button class="btn btn-sm" onclick="sfSaveInstalled(${id})" style="width:auto">Save</button></div></div>`;
   $('weightOv').classList.add('show')}
 
 async function sfSaveInstalled(id){
@@ -3269,7 +3300,7 @@ function deletePerson(id){
   const p=people.find(x=>x.id===id);if(!p)return;
   const projCount=projectsForPerson(id).length;
   const detailMsg=projCount?`This person is assigned to ${projCount} project${projCount===1?'':'s'}. Those assignments will also be removed. `:'';
-  confirmDialog('Delete Person?',`${detailMsg}This cannot be undone.<br><br><b>${esc(p.name)}</b> (${p.role})`,'Delete','btn-err',async()=>{
+  confirmDialog('Delete Person?',`${detailMsg}This cannot be undone.<br><br><b>${esc(p.name)}</b> (${esc(p.role)})`,'Delete','btn-err',async()=>{
     // Cascade in project_assignments handles the assignments side via FK ON DELETE CASCADE.
     const{error}=await sb.from('people').delete().eq('id',id);
     if(error){alert('Error: '+error.message);return}
@@ -3298,7 +3329,7 @@ async function renderAdminAssign(){
           <div style="display:flex;flex-wrap:wrap;gap:6px">
             ${dbccPeople.map(p=>{
               const on=assignedIds.has(p.id);
-              return `<button onclick="toggleAssignment('${esc(pr.name).replace(/'/g,"\\'")}',${p.id})" class="btn btn-sm" style="width:auto;padding:5px 12px;font-size:12px;background:${on?'var(--accent)':'#fff'};color:${on?'#fff':'var(--gray-dk)'};border:1px solid ${on?'var(--accent)':'var(--border)'};font-weight:${on?'600':'500'}">${on?'✓ ':''}${esc(p.name)}</button>`;
+              return `<button onclick="toggleAssignment(${jsArg(pr.name)},${p.id})" class="btn btn-sm" style="width:auto;padding:5px 12px;font-size:12px;background:${on?'var(--accent)':'#fff'};color:${on?'#fff':'var(--gray-dk)'};border:1px solid ${on?'var(--accent)':'var(--border)'};font-weight:${on?'600':'500'}">${on?'✓ ':''}${esc(p.name)}</button>`;
             }).join('')}
           </div>
           ${assigned.length===0?'<div style="font-size:11px;color:var(--muted);margin-top:6px;font-style:italic">⚠ Unassigned</div>':''}
@@ -3342,11 +3373,11 @@ async function renderAdminAccount(){
     <div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap">
       <div>
         <label style="display:block;font-size:11px;color:var(--gray-dk);font-weight:600;margin-bottom:4px">From</label>
-        <input type="date" id="accFrom" value="${_accountRange.from}" style="padding:6px 9px;border:1px solid var(--border);border-radius:6px;font-size:12px">
+        <input type="date" id="accFrom" value="${esc(_accountRange.from)}" style="padding:6px 9px;border:1px solid var(--border);border-radius:6px;font-size:12px">
       </div>
       <div>
         <label style="display:block;font-size:11px;color:var(--gray-dk);font-weight:600;margin-bottom:4px">To</label>
-        <input type="date" id="accTo" value="${_accountRange.to}" style="padding:6px 9px;border:1px solid var(--border);border-radius:6px;font-size:12px">
+        <input type="date" id="accTo" value="${esc(_accountRange.to)}" style="padding:6px 9px;border:1px solid var(--border);border-radius:6px;font-size:12px">
       </div>
       <div style="display:flex;gap:6px;margin-top:18px">
         <button class="btn btn-ghost btn-sm" onclick="setAccountPreset('thisWeek')" style="width:auto;padding:6px 12px;font-size:11px">This Week</button>
@@ -3356,7 +3387,7 @@ async function renderAdminAccount(){
       </div>
       <div style="margin-left:auto;border-left:1px solid var(--border);padding-left:14px">
         <label style="display:block;font-size:11px;color:var(--gray-dk);font-weight:600;margin-bottom:4px">Overdue install threshold</label>
-        <div style="display:flex;align-items:center;gap:6px"><input type="number" id="overdueThresholdInp" value="${appSettings.overdue_install_days}" min="1" max="60" style="width:60px;padding:6px;border:1px solid var(--border);border-radius:6px;font-size:12px"><span style="font-size:11px;color:var(--muted)">days</span><button class="btn btn-sm" onclick="saveOverdueThreshold()" style="width:auto;padding:5px 10px;font-size:11px">Save</button></div>
+        <div style="display:flex;align-items:center;gap:6px"><input type="number" id="overdueThresholdInp" value="${esc(appSettings.overdue_install_days)}" min="1" max="60" style="width:60px;padding:6px;border:1px solid var(--border);border-radius:6px;font-size:12px"><span style="font-size:11px;color:var(--muted)">days</span><button class="btn btn-sm" onclick="saveOverdueThreshold()" style="width:auto;padding:5px 10px;font-size:11px">Save</button></div>
       </div>
     </div>
   </div>
@@ -3586,8 +3617,8 @@ function renderSite(){
     const statusPill=`<span class="pill ${ST_CLS[e.status]||'pill-notordered'}">${esc(e.status)}</span>`;
     // Files section
     let filesHtml='';
-    if(e.file_url){filesHtml+=`<a class="sv-file-link" href="${e.file_url}" target="_blank" rel="noopener"><span class="sv-file-icon">📄</span><span class="sv-file-name">${esc(e.file_name||'Schedule')}</span></a>`}
-    mp.forEach(m=>{filesHtml+=`<a class="sv-file-link markup" href="${m.url}" target="_blank" rel="noopener"><span class="sv-file-icon">📐</span><span class="sv-file-name">${esc(m.name||'Markup plan')}</span></a>`});
+    if(e.file_url){filesHtml+=`<a class="sv-file-link" ${fileLinkAttrs(e.file_url)}><span class="sv-file-icon">📄</span><span class="sv-file-name">${esc(e.file_name||'Schedule')}</span></a>`}
+    mp.forEach(m=>{filesHtml+=`<a class="sv-file-link markup" ${fileLinkAttrs(m.url)}><span class="sv-file-icon">📐</span><span class="sv-file-name">${esc(m.name||'Markup plan')}</span></a>`});
     if(!filesHtml)filesHtml='<div class="sv-no-files">No files attached yet</div>';
     return `<div class="sv-card${cls}">
       <div class="sv-card-head">
@@ -3692,9 +3723,9 @@ function renderForeman(){
     const cls=delivered?' delivered':'';
     const statusPill=`<span class="pill ${ST_CLS[e.status]||'pill-notordered'}">${esc(e.status)}</span>`;
     let filesHtml='';
-    if(e.file_url){filesHtml+=`<a class="sv-file-link" href="${e.file_url}" target="_blank" rel="noopener"><span class="sv-file-icon">📄</span><span class="sv-file-name">${esc(e.file_name||'Schedule')}</span></a>`}
+    if(e.file_url){filesHtml+=`<a class="sv-file-link" ${fileLinkAttrs(e.file_url)}><span class="sv-file-icon">📄</span><span class="sv-file-name">${esc(e.file_name||'Schedule')}</span></a>`}
     const mp=e.markup_plans?JSON.parse(e.markup_plans):[];
-    mp.forEach(m=>{filesHtml+=`<a class="sv-file-link markup" href="${m.url}" target="_blank" rel="noopener"><span class="sv-file-icon">📐</span><span class="sv-file-name">${esc(m.name||'Markup plan')}</span></a>`});
+    mp.forEach(m=>{filesHtml+=`<a class="sv-file-link markup" ${fileLinkAttrs(m.url)}><span class="sv-file-icon">📐</span><span class="sv-file-name">${esc(m.name||'Markup plan')}</span></a>`});
     if(!filesHtml)filesHtml='<div class="sv-no-files">No files attached yet</div>';
     // Action row: install date + delivered toggle
     const installHtml=e.installed_date
@@ -3710,10 +3741,10 @@ function renderForeman(){
     // Legacy day-labour flag — one-tap toggle (with a fail-safe confirm in the handler).
     // REO install-detail dropdown (single mutually-exclusive choice; unset = Legacy tonnage).
     const idv=e.install_detail||'';
-    const installDetailHtml=`<div class="fm-install-row"><span class="fm-install-lbl">REO install</span><select class="fm-install${idv?' set':''}${idv.startsWith('dbcc')?' dbcc':''}" onchange="foremanSetInstallDetail(${e.id},this)" title="How this schedule was fixed — for checking Legacy's invoices">${INSTALL_DETAILS.map(o=>`<option value="${o.v}"${o.v===idv?' selected':''}>${esc(o.label)}</option>`).join('')}</select></div>`;
+    const installDetailHtml=`<div class="fm-install-row"><span class="fm-install-lbl">REO install</span><select class="fm-install${idv?' set':''}${idv.startsWith('dbcc')?' dbcc':''}" onchange="foremanSetInstallDetail(${e.id},this)" title="How this schedule was fixed — for checking Legacy's invoices">${INSTALL_DETAILS.map(o=>`<option value="${esc(o.v)}"${o.v===idv?' selected':''}>${esc(o.label)}</option>`).join('')}</select></div>`;
     // Foreman notes (who did what) — attributed chunks.
     const fnotes=parseChunks(e.foreman_notes);
-    const notesHtml=`<div class="fm-notes">${fnotes.length?fnotes.map(c=>`<div class="fm-note">📝 ${esc(c.text)} <span class="fm-note-meta">— ${esc((c.authors||[]).join(', '))}${c.created_at?' · '+fmtDate(c.created_at.slice(0,10)):''}</span></div>`).join(''):'<div class="fm-note-empty">No notes yet</div>'}<button class="fm-mini-btn" onclick="foremanAddNote(${e.id})">+ Note</button></div>`;
+    const notesHtml=`<div class="fm-notes">${fnotes.length?fnotes.map(c=>`<div class="fm-note">📝 ${esc(c.text)} <span class="fm-note-meta">— ${esc((c.authors||[]).join(', '))}${c.created_at?' · '+esc(fmtDate(String(c.created_at).slice(0,10))):''}</span></div>`).join(''):'<div class="fm-note-empty">No notes yet</div>'}<button class="fm-mini-btn" onclick="foremanAddNote(${e.id})">+ Note</button></div>`;
     return `<div class="sv-card${cls}">
       <div class="sv-card-head">
         <div style="flex:1;min-width:0">
@@ -3746,7 +3777,7 @@ async function foremanUndoDelivered(id){
 }
 function foremanSetInstall(id){
   const e=entries.find(x=>x.id===id);if(!e)return;
-  $('weightModal').innerHTML=`<h3>Install Date<button class="modal-close" onclick="closeOv('weightOv')">&times;</button></h3><p style="font-size:12px;color:var(--muted);margin-bottom:10px">${esc(e.project)} / ${esc(e.level||'—')} / ${esc(e.area||'—')}${e.schedule?' · '+esc(e.schedule):''}</p><div class="fg"><label style="display:block;margin-bottom:4px">Date installed on site</label><input type="date" id="fmDateInp" value="${e.installed_date||''}"></div><div style="display:flex;gap:8px;justify-content:space-between;margin-top:14px"><button class="btn btn-err btn-sm" onclick="foremanClearInstall(${id})" style="width:auto" ${e.installed_date?'':'disabled'}>Clear</button><div style="display:flex;gap:8px"><button class="btn btn-sec btn-sm" onclick="closeOv('weightOv')">Cancel</button><button class="btn btn-sm" onclick="foremanSaveInstall(${id})" style="width:auto">Save</button></div></div>`;
+  $('weightModal').innerHTML=`<h3>Install Date<button class="modal-close" onclick="closeOv('weightOv')">&times;</button></h3><p style="font-size:12px;color:var(--muted);margin-bottom:10px">${esc(e.project)} / ${esc(e.level||'—')} / ${esc(e.area||'—')}${e.schedule?' · '+esc(e.schedule):''}</p><div class="fg"><label style="display:block;margin-bottom:4px">Date installed on site</label><input type="date" id="fmDateInp" value="${esc(e.installed_date||'')}"></div><div style="display:flex;gap:8px;justify-content:space-between;margin-top:14px"><button class="btn btn-err btn-sm" onclick="foremanClearInstall(${id})" style="width:auto" ${e.installed_date?'':'disabled'}>Clear</button><div style="display:flex;gap:8px"><button class="btn btn-sec btn-sm" onclick="closeOv('weightOv')">Cancel</button><button class="btn btn-sm" onclick="foremanSaveInstall(${id})" style="width:auto">Save</button></div></div>`;
   $('weightOv').classList.add('show');
 }
 async function foremanSaveInstall(id){
@@ -3759,7 +3790,7 @@ async function foremanSaveInstall(id){
 }
 function foremanSetProgress(id){
   const e=entries.find(x=>x.id===id);if(!e)return;
-  $('weightModal').innerHTML=`<h3>Progress %<button class="modal-close" onclick="closeOv('weightOv')">&times;</button></h3><p style="font-size:12px;color:var(--muted);margin-bottom:10px">${esc(e.project)} / ${esc(e.level||'—')} / ${esc(e.area||'—')}${e.schedule?' · '+esc(e.schedule):''}</p><div class="fg"><label style="display:block;margin-bottom:4px">How much is installed? (0–100%)</label><input type="number" min="0" max="100" id="fmPctInp" value="${e.progress_pct!=null?e.progress_pct:''}" placeholder="0"></div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn btn-sec btn-sm" onclick="closeOv('weightOv')">Cancel</button><button class="btn btn-sm" onclick="foremanSaveProgress(${id})" style="width:auto">Save</button></div>`;
+  $('weightModal').innerHTML=`<h3>Progress %<button class="modal-close" onclick="closeOv('weightOv')">&times;</button></h3><p style="font-size:12px;color:var(--muted);margin-bottom:10px">${esc(e.project)} / ${esc(e.level||'—')} / ${esc(e.area||'—')}${e.schedule?' · '+esc(e.schedule):''}</p><div class="fg"><label style="display:block;margin-bottom:4px">How much is installed? (0–100%)</label><input type="number" min="0" max="100" id="fmPctInp" value="${esc(e.progress_pct!=null?e.progress_pct:'')}" placeholder="0"></div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn btn-sec btn-sm" onclick="closeOv('weightOv')">Cancel</button><button class="btn btn-sm" onclick="foremanSaveProgress(${id})" style="width:auto">Save</button></div>`;
   $('weightOv').classList.add('show');
   setTimeout(()=>{const t=$('fmPctInp');if(t)t.focus()},60);
 }
@@ -3843,14 +3874,14 @@ function renderReportPage(){
   const dtLabel={installed_date:'Installed date',supplier_delivery_date:'Production delivery date',our_delivery_date:'DBCC requested delivery date'}[dt];
   const summary=(proj||'All projects')+' · '+dtLabel+(from||to?(' · '+(from?fmtDate(from):'…')+' to '+(to?fmtDate(to):'…')):' · all dates');
   window._reoReport={rows,summary};
-  const body=rows.length?`<div class="tscroll"><table><thead><tr><th>Code</th><th>Project</th><th>Level / Area</th><th>Delivered</th><th>Installed</th><th>%</th><th>Status</th><th>REO install</th><th>Notes</th></tr></thead><tbody>${rows.map(r=>`<tr style="background:${r.state.bg}"><td style="font-family:'JetBrains Mono',monospace">${esc(r.e.schedule||'—')}</td><td>${esc(r.e.project)}</td><td>${esc((r.e.level||'—')+' / '+(r.e.area||'—'))}</td><td style="white-space:nowrap">${fmtDate(r.e.supplier_delivery_date||r.e.our_delivery_date)||'—'}</td><td style="white-space:nowrap">${fmtDate(r.e.installed_date)||'—'}</td><td>${r.e.progress_pct!=null?r.e.progress_pct+'%':'—'}</td><td style="color:${r.state.fg};font-weight:700;white-space:nowrap">${r.state.label}</td><td>${esc(installDetailShort(r.e.install_detail))}</td><td style="font-size:11px;color:var(--muted)">${esc(chunksToPlain(parseChunks(r.e.foreman_notes)))}</td></tr>`).join('')}</tbody></table></div>`:'<p style="color:var(--muted)">No rows match those filters.</p>';
+  const body=rows.length?`<div class="tscroll"><table><thead><tr><th>Code</th><th>Project</th><th>Level / Area</th><th>Delivered</th><th>Installed</th><th>%</th><th>Status</th><th>REO install</th><th>Notes</th></tr></thead><tbody>${rows.map(r=>`<tr style="background:${r.state.bg}"><td style="font-family:'JetBrains Mono',monospace">${esc(r.e.schedule||'—')}</td><td>${esc(r.e.project)}</td><td>${esc((r.e.level||'—')+' / '+(r.e.area||'—'))}</td><td style="white-space:nowrap">${fmtDate(r.e.supplier_delivery_date||r.e.our_delivery_date)||'—'}</td><td style="white-space:nowrap">${fmtDate(r.e.installed_date)||'—'}</td><td>${r.e.progress_pct!=null?r.e.progress_pct+'%':'—'}</td><td style="color:${r.state.fg};font-weight:700;white-space:nowrap">${esc(r.state.label)}</td><td>${esc(installDetailShort(r.e.install_detail))}</td><td style="font-size:11px;color:var(--muted)">${esc(chunksToPlain(parseChunks(r.e.foreman_notes)))}</td></tr>`).join('')}</tbody></table></div>`:'<p style="color:var(--muted)">No rows match those filters.</p>';
   $('rpSummary').textContent=`${summary} · ${rows.length} rows`;
   $('rpResult').innerHTML=body;
 }
 function generateForemanReport(){renderReportPage()}   // older name
 function printForemanReport(){
   const d=window._reoReport;if(!d)return;
-  const rows=d.rows.map(r=>`<tr style="background:${r.state.bg}"><td class="nc">${esc(r.e.schedule||'—')}</td><td>${esc(r.e.project)}</td><td>${esc((r.e.level||'—')+' / '+(r.e.area||'—'))}</td><td class="nc">${fmtDate(r.e.supplier_delivery_date||r.e.our_delivery_date)||'—'}</td><td class="nc">${fmtDate(r.e.installed_date)||'—'}</td><td class="nc">${r.e.progress_pct!=null?r.e.progress_pct+'%':'—'}</td><td style="color:${r.state.fg};font-weight:bold">${r.state.label}</td><td>${esc(installDetailShort(r.e.install_detail))}</td><td>${esc(chunksToPlain(parseChunks(r.e.foreman_notes)))}</td></tr>`).join('');
+  const rows=d.rows.map(r=>`<tr style="background:${r.state.bg}"><td class="nc">${esc(r.e.schedule||'—')}</td><td>${esc(r.e.project)}</td><td>${esc((r.e.level||'—')+' / '+(r.e.area||'—'))}</td><td class="nc">${fmtDate(r.e.supplier_delivery_date||r.e.our_delivery_date)||'—'}</td><td class="nc">${fmtDate(r.e.installed_date)||'—'}</td><td class="nc">${r.e.progress_pct!=null?r.e.progress_pct+'%':'—'}</td><td style="color:${r.state.fg};font-weight:bold">${esc(r.state.label)}</td><td>${esc(installDetailShort(r.e.install_detail))}</td><td>${esc(chunksToPlain(parseChunks(r.e.foreman_notes)))}</td></tr>`).join('');
   const html=`<!doctype html><html><head><meta charset="utf-8"><title>REO Delivery & Install Report</title><style>
 @page{size:A4 landscape;margin:8mm}
 body{font-family:Arial,Helvetica,sans-serif;padding:16px;color:#222}
