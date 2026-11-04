@@ -446,3 +446,112 @@ test('Recalculate All stays off: it says why, asks nothing, fetches nothing and 
   assert.ok(!/parsed=parseReoText\(/.test(pre),'never the Aus Reo reader alone');
   assert.ok(/<input type="checkbox" class="rc-apply-box" data-idx="\$\{i\}">/.test(pre)&&!/rc-apply-box[^>]*checked/.test(pre),'rows start unticked');
 });
+
+// ── Review fix: one odd JSON value written by another login (a supplier, or the shared crew login) can't blank the dashboard ──
+const plainJ=x=>JSON.parse(JSON.stringify(x));   // arrays made inside the vm have their own prototype
+// What the comment / notes / markup columns might hold after someone writes to them directly (they are plain text).
+const ODD=['null','x','[null]','[{"authors":"y"}]','[{"name":5}]','{}','5','"text"','[[1,2]]','[1,"a",true]','',
+  '[{"text":{"a":1},"authors":[null,7,"Chris"],"created_at":{"x":1}}]','[{"url":["https://a"],"name":{"n":1},"uploaded_by":3,"date":null}]'];
+
+test('parseChunks and parseMarkups read whatever another login wrote: a list of objects with text fields, or nothing', ()=>{
+  for(const v of [...ODD,null,undefined,42,{},[]]){
+    const tag=JSON.stringify(v)??String(v);
+    const ch=plainJ(app.parseChunks(v)),mk=plainJ(app.parseMarkups(v));
+    assert.ok(Array.isArray(ch)&&Array.isArray(mk),tag);
+    for(const c of ch){assert.equal(typeof c.text,'string',tag);assert.ok(Array.isArray(c.authors)&&c.authors.every(a=>typeof a==='string'&&a),tag)}
+    for(const m of mk)for(const k of ['url','name','uploaded_by','date'])assert.equal(typeof m[k],'string',`${tag}: ${k}`);
+    // and everything that draws them
+    for(const f of ['chunksToPlain','chunksToCell','chunksToHtml'])assert.equal(typeof app[f](app.parseChunks(v)),'string',`${f} ${tag}`);
+    assert.equal(typeof app.foremanCell({progress_pct:null,foreman_notes:v}),'string',tag);
+  }
+  assert.deepEqual(plainJ(app.parseChunks('[null]')),[],'a list item that is not an object is dropped');
+  assert.deepEqual(plainJ(app.parseChunks('[{"authors":"y"}]')),[{text:'',authors:[]}],'authors that are not a list read as none');
+  assert.deepEqual(plainJ(app.parseChunks('[{"text":7,"authors":[null,7,"Chris",""]}]')),[{text:'7',authors:['7','Chris']}]);
+  assert.deepEqual(plainJ(app.parseMarkups('[{"name":5}]')),[{name:'5',url:'',uploaded_by:'',date:''}]);
+  for(const v of ['null','x','{}','5','"text"'])assert.deepEqual(plainJ(app.parseMarkups(v)),[],v);
+  // a well-formed value reads exactly as before — every field it carries kept
+  const good=[{text:'pour moved — see [plan](https://x.example/p.pdf)',authors:['Chris','Troy'],created_at:'2026-11-01T00:00:00Z',edited_at:'2026-11-02T00:00:00Z'}];
+  assert.deepEqual(plainJ(app.parseChunks(JSON.stringify(good))),good);
+  const mgood=[{url:'https://oekgtocjtloptrjacmcu.supabase.co/storage/v1/object/public/schedules/a.pdf',name:'a.pdf',uploaded_by:'Chris',date:'2026-11-01'}];
+  assert.deepEqual(plainJ(app.parseMarkups(JSON.stringify(mgood))),mgood);
+});
+
+// A fresh app with a page whose elements are made as they are asked for.
+function pageApp(){
+  const a=loadApp(),r=src=>vm.runInContext(src,a);
+  const els={};
+  a.document.getElementById=id=>els[id]||(els[id]={id,value:'',innerHTML:'',textContent:'',disabled:false,checked:false,style:{},
+    classList:{_s:new Set(),add(c){this._s.add(c)},remove(c){this._s.delete(c)},toggle(){},contains(c){return this._s.has(c)}},focus(){}});
+  return{a,r,els};
+}
+const FILE='https://oekgtocjtloptrjacmcu.supabase.co/storage/v1/object/public/schedules/';
+const oddRows=()=>ODD.map((v,i)=>({id:100+i,project:'Barwon',level:'GRD',area:'SLAB',schedule:'S'+i,status:'Ordered',entry_type:'scheduled',file_url:FILE+'s'+i+'.pdf',file_name:'s'+i+'.pdf',
+  markup_plans:v,foreman_notes:v,aus_reo_comment:v,dbcc_comment:v}));
+
+test('every screen draws an entry holding odd JSON: the dashboard (all of it), search, detail, markups, edit, Steel Fixers, Site and Foreman', ()=>{
+  const{a,r,els}=pageApp();
+  a.__rows=oddRows();
+  r(`entries=JSON.parse(JSON.stringify(__rows));projects=[{id:1,name:'Barwon',supplier:'Aus Reo',levels:['GRD'],areas:['SLAB'],hubProjectId:null}];projectFiles=[];authRole='dbcc';adminUnlocked=true;`);
+  a.renderDash();
+  const t=els.dashTable.innerHTML;
+  for(const e of a.__rows)assert.ok(t.includes(`showDetail(${e.id})`),`row ${e.id} (${JSON.stringify(e.markup_plans)}) is drawn`);
+  els.fSearch.value='chris';assert.doesNotThrow(()=>a.renderDash(),'the search box reads the comments too');
+  for(const e of a.__rows){
+    const tag=JSON.stringify(e.markup_plans);
+    assert.doesNotThrow(()=>a.showDetail(e.id),tag);assert.match(els.detailModal.innerHTML,/Entry Details/);
+    assert.doesNotThrow(()=>a.viewMarkups(e.id),tag);
+    assert.doesNotThrow(()=>a.openEditEntry(e.id),tag);
+    assert.doesNotThrow(()=>a.siteCardHtml({e,isNew:false}),tag);
+    assert.doesNotThrow(()=>a.foremanCardHtml({e,isNew:false}),tag);
+  }
+  assert.doesNotThrow(()=>a.renderSfTable());
+  for(const e of a.__rows)assert.ok(els.sfTable.innerHTML.includes(`sfEditInstalled(${e.id})`),`Steel Fixers row ${e.id}`);
+  // the good fields still show: a markup with a number for a name, a note whose authors were not a list
+  a.__rows=[{id:7,project:'Barwon',level:'GRD',area:'SLAB',schedule:'U9AV',status:'Ordered',entry_type:'scheduled',
+    markup_plans:JSON.stringify([null,{url:FILE+'m.pdf',name:5,uploaded_by:'Chris'}]),foreman_notes:'[{"text":"fixed","authors":"Fiona"}]'}];
+  r('entries=JSON.parse(JSON.stringify(__rows))');els.fSearch.value='';a.renderDash();
+  assert.match(els.dashTable.innerHTML,/onclick="viewMarkups\(7\)">📐 1<\/button>/);
+  assert.match(els.dashTable.innerHTML,/<span title="fixed" style="cursor:help">📝1<\/span>/);
+  a.viewMarkups(7);assert.match(els.markupModal.innerHTML,/📐 5<\/a> <span style="color:var\(--muted\);font-size:10px">by Chris<\/span><button onclick="removeMarkup\(7,0\)">/);
+});
+
+test('a row holding odd JSON can be repaired from the screen: a save writes the cleaned list back', async()=>{
+  const{a,r,els}=pageApp();
+  const sb=fakeSb(q=>q.table==='entries'?{data:[{id:7}],error:null}:{data:null,error:null});a.__sb=sb;
+  a.__rows=[{id:7,project:'Barwon',level:'GRD',area:'SLAB',schedule:'U9AV',status:'Ordered',entry_type:'scheduled',
+    markup_plans:JSON.stringify([null,{url:FILE+'a.pdf',name:'a.pdf',uploaded_by:'Chris',date:'2026-11-01'},'junk',{url:FILE+'b.pdf',name:5}]),
+    foreman_notes:'[null,{"text":"half done","authors":"Fiona"}]',dbcc_comment:'[7]'}];
+  r(`sb=__sb;entries=JSON.parse(JSON.stringify(__rows));userName='Chris';foremanName='Fiona';authRole='dbcc';
+     loadEntries=async()=>{};renderDash=()=>{};renderForeman=()=>{};confirmDialog=(t,m,ok,c,fn)=>{__confirmed=fn};`);
+  // remove the first markup the screen lists: the odd items go, the other markup stays
+  a.viewMarkups(7);assert.match(els.markupModal.innerHTML,/removeMarkup\(7,1\)/);assert.ok(!/removeMarkup\(7,2\)/.test(els.markupModal.innerHTML),'two markups listed');
+  await a.removeMarkup(7,0);await r('__confirmed()');
+  const w=sb.calls.filter(c=>c.table==='entries'&&c.op==='update');
+  assert.deepEqual(JSON.parse(w[0].payload.markup_plans),[{url:FILE+'b.pdf',name:'5',uploaded_by:'',date:''}]);
+  // the foreman adds a note: the note before it stays, the odd item goes
+  a.document.getElementById('fmNoteInp').value='finished';
+  await a.foremanSaveNote(7);
+  const notes=JSON.parse(sb.calls.filter(c=>c.table==='entries'&&c.op==='update')[1].payload.foreman_notes);
+  assert.deepEqual(notes.map(n=>[n.text,n.authors]),[['half done',[]],['finished',['Fiona']]]);
+  // a DBCC comment saved over an odd value
+  a.editChunkComment(7,'dbcc');assert.match(els.commentModal.innerHTML,/No comments yet/);
+  a.document.getElementById('newChunkInp').value='call Bolek';a.document.querySelectorAll=()=>[];
+  await a.saveChunkComment(7,'dbcc');
+  const c=JSON.parse(sb.calls.filter(c=>c.table==='entries'&&c.op==='update')[2].payload.dbcc_comment);
+  assert.deepEqual(c.map(x=>[x.text,x.authors]),[['call Bolek',['Chris']]]);
+});
+
+test('every read of a JSON column goes through parseChunks / parseMarkups — never a bare JSON.parse', ()=>{
+  const at=i=>'app.js:'+SRC.slice(0,i).split('\n').length;
+  const bare=[...SRC.matchAll(/JSON\.parse\(([^)]*)\)/g)].filter(m=>/markup_plans|foreman_notes|_comment\b|\[col(?:Name)?\]/.test(m[1]));
+  assert.deepEqual(bare.map(m=>at(m.index)+' '+m[0]),[],'a JSON column parsed outside the two readers');
+  const unread=[];
+  for(const m of SRC.matchAll(/\b\w+(?:\.\w+)*\.(markup_plans|foreman_notes|aus_reo_comment|dbcc_comment)\b(=?)/g)){
+    if(m[2])continue;   // a write (up.markup_plans=…)
+    const want=m[1]==='markup_plans'?'parseMarkups(':'parseChunks(';
+    if(!SRC.slice(0,m.index).endsWith(want))unread.push(at(m.index)+' '+m[0]);
+  }
+  for(const m of SRC.matchAll(/\b\w+\[col(?:Name)?\]/g))if(!SRC.slice(0,m.index).endsWith('parseChunks('))unread.push(at(m.index)+' '+m[0]);
+  assert.deepEqual(unread,[],'a JSON column read without its reader');
+  assert.ok([...SRC.matchAll(/parseMarkups\(/g)].length>=15&&[...SRC.matchAll(/parseChunks\(/g)].length>=20,'the readers are in use');
+});

@@ -71,11 +71,24 @@ function hasMismatch(e){return e.our_delivery_date&&e.supplier_delivery_date&&e.
      - If they're already in authors → no change.
      - If they're not → append their name to authors (deduplicated, order preserved).
      - If text becomes empty → remove the chunk entirely.
-   Cleared comments (everyone removed) → column set to null. */
+   Cleared comments (everyone removed) → column set to null.
+   b5.14 — these JSON columns (the two comment columns, foreman_notes, markup_plans) are written by other logins too:
+   suppliers on their own jobs and the crew login (Site / Foreman). One odd value ("null", "x", "[null]", authors that
+   aren't a list) used to throw while the dashboard drew — the entries table stayed blank for everyone, and every screen
+   that could fix the row read it first, so only SQL could. parseChunks and parseMarkups are now the only readers:
+   anything that isn't a list of objects reads as nothing, and each object's fields read as text. A save writes the
+   cleaned list back, so the screen can repair the row. */
+function asText(v){return typeof v==='string'?v:typeof v==='number'||typeof v==='boolean'?String(v):''}
+// A JSON list of objects, or [] for anything else (not text, not JSON, not a list); items that aren't objects dropped.
+function readJsonList(raw){
+  if(!raw||typeof raw!=='string')return[];
+  let a;try{a=JSON.parse(raw)}catch{return[]}
+  return Array.isArray(a)?a.filter(x=>x!==null&&typeof x==='object'&&!Array.isArray(x)):[]}
 function parseChunks(raw){
-  if(!raw)return[];
-  try{const a=JSON.parse(raw);return Array.isArray(a)?a:[]}
-  catch{return[]}}
+  return readJsonList(raw).map(c=>({...c,text:asText(c.text),authors:Array.isArray(c.authors)?c.authors.map(asText).filter(Boolean):[]}))}
+// Markup plans: [{url, name, uploaded_by, date}, ...] — each of the four read as text.
+function parseMarkups(raw){
+  return readJsonList(raw).map(m=>({...m,url:asText(m.url),name:asText(m.name),uploaded_by:asText(m.uploaded_by),date:asText(m.date)}))}
 function chunksToJson(chunks){return chunks.length?JSON.stringify(chunks):null}
 // Plain-text rendering for tooltips, CSV, emails — joins chunks by newlines, includes authors.
 function chunksToPlain(chunks){
@@ -1524,7 +1537,7 @@ async function submitEntry(){
       const breakdown=extractionBreakdown(ex);
       if(selectedOrderId){
         const entry=entries.find(e=>e.id===selectedOrderId);
-        const existing=entry.markup_plans?JSON.parse(entry.markup_plans):[];
+        const existing=parseMarkups(entry.markup_plans);
         const combined=[...existing,...mkNew];
         const up={schedule,entry_date:ed,supplier_delivery_date:supD,file_url:furl,file_name:fname,status:'Scheduled',total_weight:weight?parseFloat(weight):null,drawing_reference:drawing,comments:comments||entry.comments,...breakdown};
         if(combined.length)up.markup_plans=JSON.stringify(combined);
@@ -1590,7 +1603,7 @@ function renderDash(){
   const ar=c=>sortCol===c?(sortAsc?' ▲':' ▼'):'';
   const allCk=f.every(e=>selectedIds.has(e.id));
   w.innerHTML=`<table><thead><tr><th class="no-sort" style="width:36px"><input type="checkbox" ${allCk?'checked':''} onchange="toggleAll(this.checked)"></th><th onclick="tSort('project')">Project${ar('project')}</th><th onclick="tSort('level')">Level${ar('level')}</th><th onclick="tSort('area')">Area${ar('area')}</th><th onclick="tSort('schedule')">Schedule${ar('schedule')}</th><th onclick="tSort('total_weight')">Wt${ar('total_weight')}</th><th onclick="tSort('status')">Status${ar('status')}</th><th class="date-col" onclick="tSort('our_delivery_date')">DBCC Requested Delivery Date${ar('our_delivery_date')}</th><th class="date-col" onclick="tSort('entry_date')">Scheduler Entry Date${ar('entry_date')}</th><th class="date-col" onclick="tSort('supplier_delivery_date')">Production Delivery Date${ar('supplier_delivery_date')}</th><th class="no-sort" title="Foreman progress % + site notes">Progress</th><th class="no-sort">Schedule File</th><th class="no-sort">Markup Plans</th><th class="no-sort" style="max-width:120px">${esc(isSupplier()?authSupplier:'Supplier')} Comments</th><th class="no-sort" style="max-width:120px">DBCC Comments</th><th class="no-sort">Actions</th></tr></thead><tbody>${f.map(e=>{
-    const mm=hasMismatch(e),cn=e.status==='Cancelled',mp=e.markup_plans?JSON.parse(e.markup_plans):[];
+    const mm=hasMismatch(e),cn=e.status==='Cancelled',mp=parseMarkups(e.markup_plans);
     return`<tr class="${cn?'cancelled':''}${e.on_hold?' on-hold':''}${mm?' mismatch':''}" ondragover="event.preventDefault();this.classList.add('drag-over')" ondragleave="this.classList.remove('drag-over')" ondrop="handleRowDrop(event,${e.id});this.classList.remove('drag-over')">
 <td class="td-check"><input type="checkbox" ${selectedIds.has(e.id)?'checked':''} onchange="toggleSel(${e.id},this.checked)"></td>
 <td class="proj-td" title="${esc(e.project)}">${esc(e.project)}${e.unmatched?'<span class="unmatched-icon" title="No placeholder existed">⚠</span>':''}</td>
@@ -1631,7 +1644,7 @@ async function bulkDownload(type){
   const add=(u,name)=>{const s=safeUrl(u);if(s)files.push({url:s,name});else refused++};
   sel.forEach(e=>{
     if((type==='schedules'||type==='all')&&e.file_url)add(e.file_url,`sched_${e.schedule||e.id}.${(e.file_name||'pdf').split('.').pop()}`);
-    if((type==='markups'||type==='all')&&e.markup_plans){JSON.parse(e.markup_plans).forEach((m,i)=>add(m.url,`markup_${e.id}_${i}.${(m.name||'pdf').split('.').pop()}`))}});
+    if(type==='markups'||type==='all')parseMarkups(e.markup_plans).forEach((m,i)=>add(m.url,`markup_${e.id}_${i}.${(m.name||'pdf').split('.').pop()}`))});
   if(refused)alert(refused+' file link'+(refused===1?' is':'s are')+" not on the REO file store and won't be downloaded.");
   if(!files.length)return alert('No files');
   if(files.length===1){window.open(files[0].url,'_blank');return}
@@ -1889,25 +1902,25 @@ function clearChunkComment(id,col){
 
 function uploadMarkup(id){const inp=document.createElement('input');inp.type='file';inp.accept='.pdf,.jpg,.jpeg,.png,.dwg';inp.multiple=true;
   inp.onchange=async()=>{if(!inp.files.length)return;try{const e=entries.find(x=>x.id===id);
-    const mp=e.markup_plans?JSON.parse(e.markup_plans):[];
+    const mp=parseMarkups(e.markup_plans);
     for(const file of inp.files){const furl=await uploadFile(file,e.project+'/_markups',e.level,e.area);mp.push({url:furl,name:file.name,uploaded_by:userName,date:today()})}
     const no=await writeEntry(id,{markup_plans:JSON.stringify(mp)});
     if(no){alert("The file uploaded, but it wasn't added to the entry — "+no);await loadEntries();renderDash();return}
     await auditLog({entry_id:id,action:'UPDATE',field_changed:'markup_plans',new_value:'Added '+inp.files.length+' file(s)'});
     await loadEntries();renderDash();}catch(e){alert('Failed: '+e.message)}};inp.click()}
 
-function viewMarkups(id){const e=entries.find(x=>x.id===id);if(!e)return;const mp=e.markup_plans?JSON.parse(e.markup_plans):[];
+function viewMarkups(id){const e=entries.find(x=>x.id===id);if(!e)return;const mp=parseMarkups(e.markup_plans);
   $('markupModal').innerHTML=`<h3>Markup Plans<button class="modal-close" onclick="closeOv('markupOv')">&times;</button></h3><p style="font-size:12px;color:var(--muted);margin-bottom:12px">${esc(e.project)} / ${esc(e.level||'')} / ${esc(e.area||'')}</p>${mp.map((m,i)=>`<div class="fitem mitem"><a ${fileLinkAttrs(m.url)} style="color:var(--info);text-decoration:none;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">📐 ${esc(m.name)}</a> <span style="color:var(--muted);font-size:10px">by ${esc(m.uploaded_by||'?')}</span><button onclick="removeMarkup(${id},${i})">×</button></div>`).join('')}${!mp.length?'<p style="color:var(--muted);padding:14px 0">None yet.</p>':''}<button class="btn btn-sec btn-sm" onclick="uploadMarkup(${id});closeOv('markupOv')" style="margin-top:12px">+ Add Markup</button>`;$('markupOv').classList.add('show')}
 async function removeMarkup(id,idx){
   confirmDialog('Remove Markup?','Remove this markup plan?','Remove','btn-err',async()=>{
-    const e=entries.find(x=>x.id===id);const mp=JSON.parse(e.markup_plans||'[]');mp.splice(idx,1);
+    const e=entries.find(x=>x.id===id);const mp=parseMarkups(e.markup_plans);mp.splice(idx,1);
     const no=await writeEntry(id,{markup_plans:mp.length?JSON.stringify(mp):null});
     if(no){alert('Markup plan not removed — '+no);await loadEntries();renderDash();return}
     await auditLog({entry_id:id,action:'UPDATE',field_changed:'markup_plans',old_value:'Removed'});
     await loadEntries();renderDash();closeOv('markupOv')})}
 
 /* ═══ DETAIL ═══ */
-function showDetail(id){const e=entries.find(x=>x.id===id);if(!e)return;const mm=hasMismatch(e),mp=e.markup_plans?JSON.parse(e.markup_plans):[];
+function showDetail(id){const e=entries.find(x=>x.id===id);if(!e)return;const mm=hasMismatch(e),mp=parseMarkups(e.markup_plans);
   $('detailModal').innerHTML=`<h3>Entry Details<button class="modal-close" onclick="closeOv('detailOv')">&times;</button></h3>
 ${e.entry_type==='loose'?'<span class="pill pill-loose" style="margin-bottom:12px;display:inline-block">'+(pairsLive&&isUnplaced(e)?'Ad hoc — DBCC will place it':'Ad Hoc')+'</span> ':''}
 ${e.on_hold?'<span class="pill pill-onhold" style="margin-bottom:12px;display:inline-block;margin-left:0">⏸ ON HOLD</span>':''}
@@ -2039,7 +2052,7 @@ function openEditEntry(id){const e=entries.find(x=>x.id===id);if(!e)return;
   //   - the attached schedule only (schedule file + extracted data — keeps markup plans)
   //   - individual markup plans (one at a time, no impact on schedule)
   // Both kept separate so you can fix one without nuking the other.
-  const mp=e.markup_plans?JSON.parse(e.markup_plans):[];
+  const mp=parseMarkups(e.markup_plans);
   const hasSchedule=!!(e.file_url||e.schedule);
   const hasMarkups=mp.length>0;
   let dangerSection='';
@@ -2116,7 +2129,7 @@ function removeScheduleFromEntry(id){
 // so the user can continue editing or remove additional markups without re-navigating.
 async function removeMarkupFromEdit(id,idx){
   const e=entries.find(x=>x.id===id);if(!e)return;
-  const mp=JSON.parse(e.markup_plans||'[]');
+  const mp=parseMarkups(e.markup_plans);
   if(idx<0||idx>=mp.length)return;
   const fileName=mp[idx].name||'(unnamed)';
   confirmDialog(
@@ -3390,7 +3403,7 @@ function ccToggleOpen(el){const cc=cellCard;if(!cc||!el)return;const k=el.getAtt
 function ccFileTickHtml(f){return `<label class="cc-file"><input type="checkbox" onchange="ccTickFile(${f.id},this.checked)"${cellCard&&cellCard.files.has(f.id)?' checked':''}> <a ${fileLinkAttrs(f.file_url)}>${esc(f.label)}</a></label>`}
 function ccEntryRowHtml(e,state){
   const cc=cellCard,done=e.status==='Cancelled',mm=hasMismatch(e);
-  let mp=[];try{mp=e.markup_plans?JSON.parse(e.markup_plans)||[]:[]}catch(_){mp=[]}
+  const mp=parseMarkups(e.markup_plans);
   const own=e.our_delivery_date||'',draft=Object.prototype.hasOwnProperty.call(cc.dateDraft,e.id)?cc.dateDraft[e.id]:own;
   const canDate=!done&&e.status!=='Delivered',saving=cc.saving.has(e.id);   // saving: read-only, "Saving…", whatever redraws the card
   const lost=!!cc.lost['date:'+e.id];   // an answer that never came back: Save stays pressable to settle it, even with the date shown
@@ -3954,7 +3967,7 @@ function renderSfTable(){
 <th class="no-sort">Comments</th>
 <th onclick="sfTSort('sf_dispute')" style="text-align:center">Dispute Raised${ar('sf_dispute')}</th>
 </tr></thead><tbody>${list.map(e=>{
-  const mp=e.markup_plans?JSON.parse(e.markup_plans):[];
+  const mp=parseMarkups(e.markup_plans);
   const mpCell=mp.length
     ? `<button class="att-link markup-link" onclick="viewMarkups(${e.id})" style="border:none;cursor:pointer;font-family:inherit">📐 ${mp.length}</button>`
     : '<span style="color:#ccc">—</span>';
@@ -4114,7 +4127,7 @@ function exportSfCSV(){
   // Map dispute state to a clear English label for the CSV
   const dispLabel=v=>v==='tick'?'Resolved':v==='cross'?'Disputed':v==='dash'?'N/A':'';
   const reconLabel=e=>!e.recon_status?'':e.recon_status==='reconciled'?'Reconciled':(e.recon_reviewed?'Reviewed':'REVIEW: '+(e.recon_reason||''));
-  const rows=list.map(e=>{const mp=e.markup_plans?JSON.parse(e.markup_plans):[];return [e.project,e.level||'',e.area||'',e.split_reference||'',e.schedule||'',e.our_delivery_date||'',e.bar_weight??'',e.starter_weight??'',e.mesh_sqm??'',e.trench_mesh_lm??'',reconLabel(e),e.recon_diff??'',e.recon_reviewed_by||'',mp.length,e.installed_date||'',e.file_name||'',e.sf_comment||'',dispLabel(e.sf_dispute)]});
+  const rows=list.map(e=>{const mp=parseMarkups(e.markup_plans);return [e.project,e.level||'',e.area||'',e.split_reference||'',e.schedule||'',e.our_delivery_date||'',e.bar_weight??'',e.starter_weight??'',e.mesh_sqm??'',e.trench_mesh_lm??'',reconLabel(e),e.recon_diff??'',e.recon_reviewed_by||'',mp.length,e.installed_date||'',e.file_name||'',e.sf_comment||'',dispLabel(e.sf_dispute)]});
   // Totals row
   let sumBar=0,sumMesh=0,sumTr=0,sumInstalled=0,sumDisputes=0,sumStarter=0;list.forEach(e=>{sumBar+=parseFloat(e.bar_weight)||0;sumMesh+=parseFloat(e.mesh_sqm)||0;sumTr+=parseFloat(e.trench_mesh_lm)||0;sumStarter+=parseFloat(e.starter_weight)||0;if(e.installed_date)sumInstalled++;if(e.sf_dispute==='cross')sumDisputes++});
   rows.push(['','','','','','TOTALS',sumBar.toFixed(3),sumStarter.toFixed(3),sumMesh.toFixed(2),sumTr.toFixed(2),'','','','',sumInstalled+'/'+list.length+' installed','','',sumDisputes+' disputed']);
@@ -4634,7 +4647,7 @@ function renderSite(){
   w.innerHTML=cardListsHtml(top,main,siteCardHtml,'site');
   restoreCardAnchor(w,anchor)}
 function siteCardHtml({e,isNew}){
-    const mp=e.markup_plans?JSON.parse(e.markup_plans):[];
+    const mp=parseMarkups(e.markup_plans);
     const cls=(e.status==='Delivered'?' delivered':e.status==='Cancelled'?' cancelled':'')+(isNew?' is-new':'');
     const statusPill=`<span class="pill ${ST_CLS[e.status]||'pill-notordered'}">${esc(e.status)}</span>`;
     // Files section
@@ -4758,7 +4771,7 @@ function foremanCardHtml({e,isNew}){
     const statusPill=`<span class="pill ${ST_CLS[e.status]||'pill-notordered'}">${esc(e.status)}</span>`;
     let filesHtml='';
     if(e.file_url){filesHtml+=`<a class="sv-file-link" ${fileLinkAttrs(e.file_url)}><span class="sv-file-icon">📄</span><span class="sv-file-name">${esc(e.file_name||'Schedule')}</span></a>`}
-    const mp=e.markup_plans?JSON.parse(e.markup_plans):[];
+    const mp=parseMarkups(e.markup_plans);
     mp.forEach(m=>{filesHtml+=`<a class="sv-file-link markup" ${fileLinkAttrs(m.url)}><span class="sv-file-icon">📐</span><span class="sv-file-name">${esc(m.name||'Markup plan')}</span></a>`});
     if(!filesHtml)filesHtml='<div class="sv-no-files">No files attached yet</div>';
     // Action row: install date + delivered toggle
