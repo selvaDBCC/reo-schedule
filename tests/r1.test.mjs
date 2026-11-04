@@ -95,6 +95,70 @@ test('fileLinkAttrs() links a file-store URL and leaves anything else unlinked',
   }
 });
 
+// ── Foreman / Site: cards stay where they are ──
+// spread first: arrays made inside the vm context have their own Array prototype, and strict deepEqual checks it
+const ids=rows=>[...rows].map(r=>r.e.id);
+const newIds=r=>[...r.top,...r.main].filter(x=>x.isNew).map(x=>x.e.id);
+const E=(id,status,date)=>({id,status,our_delivery_date:date});
+
+test('Foreman cards keep the order taken when the list was opened; delivered cards change in place', ()=>{
+  const open=e=>e.status!=='Delivered';
+  let list=[E(1,'Ordered','2026-11-10'),E(2,'Delivered','2026-11-01'),E(3,'Scheduled','2026-11-05'),E(4,'Not Ordered',null)];
+  let r=app.keepCardOrder(null,'Qudos||',list,app.fmSort,open);
+  assert.deepEqual(ids(r.main),[3,1,4,2],'fresh order: not delivered first by DBCC requested date, delivered last');
+  assert.equal(r.top.length,0);assert.equal(r.kept,false);assert.deepEqual(newIds(r),[]);
+
+  // own edit: 3 marked delivered — a fresh sort would move it to the bottom; the kept order leaves it first
+  list=list.map(e=>e.id===3?{...e,status:'Delivered'}:e);
+  r=app.keepCardOrder(r.state,'Qudos||',list,app.fmSort,open);
+  assert.deepEqual(ids(r.main),[3,1,4,2]);assert.equal(r.kept,true);
+  assert.equal(r.main[0].e.status,'Delivered','the card is drawn with its new status, in the same place');
+  assert.deepEqual(newIds(r),[]);
+
+  // realtime: a new open entry → its own block at the top, tagged New; nothing already on screen moves
+  list=[...list,E(5,'Ordered','2026-11-20')];
+  r=app.keepCardOrder(r.state,'Qudos||',list,app.fmSort,open);
+  assert.deepEqual(ids(r.top),[5]);assert.deepEqual(ids(r.main),[3,1,4,2]);assert.deepEqual(newIds(r),[5]);
+
+  // a new entry that is already delivered → the end of the list, tagged New
+  list=[...list,E(6,'Delivered','2026-10-01')];
+  r=app.keepCardOrder(r.state,'Qudos||',list,app.fmSort,open);
+  assert.deepEqual(ids(r.top),[5]);assert.deepEqual(ids(r.main),[3,1,4,2,6]);assert.deepEqual(newIds(r).sort(),[5,6]);
+
+  // an entry that leaves (cancelled elsewhere) drops out; New stays New on later refreshes; a later new one goes above
+  list=[...list.filter(e=>e.id!==1),E(7,'Ordered','2026-11-02')];
+  r=app.keepCardOrder(r.state,'Qudos||',list,app.fmSort,open);
+  assert.deepEqual(ids(r.top),[7,5]);assert.deepEqual(ids(r.main),[3,4,2,6]);assert.deepEqual(newIds(r).sort(),[5,6,7]);
+
+  // a new card marked delivered stays in the New block where it is
+  list=list.map(e=>e.id===7?{...e,status:'Delivered'}:e);
+  r=app.keepCardOrder(r.state,'Qudos||',list,app.fmSort,open);
+  assert.deepEqual(ids(r.top),[7,5]);
+
+  // picking another level / area (another key) or Re-sort (no previous state) takes a fresh order, nothing New
+  const fresh=[...list].sort(app.fmSort).map(e=>e.id);
+  for(const again of [app.keepCardOrder(r.state,'Qudos|L1|',list,app.fmSort,open),app.keepCardOrder(null,'Qudos||',list,app.fmSort,open)]){
+    assert.deepEqual(ids(again.main),fresh);assert.equal(again.top.length,0);assert.deepEqual(newIds(again),[]);assert.equal(again.kept,false);
+  }
+});
+
+test('Site cards: same rule — new open ones on top, new delivered / cancelled ones on the end', ()=>{
+  const open=e=>e.status!=='Delivered'&&e.status!=='Cancelled';
+  let list=[E(1,'Cancelled','2026-11-01'),E(2,'Scheduled','2026-11-09'),E(3,'Not Ordered','2026-11-20'),E(4,'Delivered','2026-11-02')];
+  let r=app.keepCardOrder(null,'k',list,app.svSort,open);
+  assert.deepEqual(ids(r.main),[3,2,4,1],'fresh: Not Ordered, Ordered, Scheduled, Delivered, Cancelled — then by date');
+  list=[...list.map(e=>e.id===3?{...e,status:'Ordered'}:e),E(5,'Cancelled',null),E(6,'Ordered','2026-11-03')];
+  r=app.keepCardOrder(r.state,'k',list,app.svSort,open);
+  assert.deepEqual(ids(r.top),[6]);assert.deepEqual(ids(r.main),[3,2,4,1,5]);
+});
+
+test('keepCardOrder never changes the list it is given', ()=>{
+  const list=[E(2,'Ordered','2026-11-09'),E(1,'Ordered','2026-11-01')];const copy=JSON.stringify(list);
+  const r=app.keepCardOrder(null,'k',list,app.fmSort,()=>true);
+  app.keepCardOrder(r.state,'k',[...list,E(3,'Ordered',null)],app.fmSort,()=>true);
+  assert.equal(JSON.stringify(list),copy);
+});
+
 // ── Static sweep: pins that no data string is ever written into handler code or a link again ──
 
 // Every on<event>="…" attribute value written in app.js, with the ${…} / '+…+' expressions inside it.

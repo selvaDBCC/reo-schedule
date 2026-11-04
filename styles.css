@@ -339,6 +339,11 @@ body.role-supplier .dbcc-only{display:none!important}
 .sv-no-files{font-size:11px;color:var(--muted);font-style:italic;padding:8px 0}
 .sv-empty{text-align:center;padding:60px 20px;color:var(--muted);background:var(--card);border:1px solid var(--border);border-radius:10px}
 .sv-empty p{font-size:13px}
+/* b5.14 — cards stay put: new cards get their own block at the top (or go on the end), tagged New */
+.card-new-bar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:8px 12px;margin:4px 0 8px;background:var(--info-lt);color:var(--info);border:1px solid #c5d8f8;border-radius:8px;font-size:12px}
+.sv-list-new{margin-bottom:14px;padding-bottom:14px;border-bottom:1px dashed #c5d8f8}
+.sv-card.is-new{border-color:#9db8f2;box-shadow:0 0 0 2px var(--info-lt),var(--shadow)}
+.pill-new{background:var(--info-lt);color:var(--info);flex-shrink:0}
 @media(max-width:680px){
   .sv-list{grid-template-columns:1fr}
   .page{padding:12px 14px}.card{padding:20px}.row2{grid-template-columns:1fr}

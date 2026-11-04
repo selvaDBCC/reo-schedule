@@ -450,12 +450,15 @@ function subscribeRealtime(){
   }).subscribe();}
 
 /* ═══ DROPDOWNS ═══ */
+// b5.14: a projects refresh (realtime, Refresh) keeps what each select had picked when it still exists — it used to
+// reset them all, which emptied the delivery-program project under an open grid and reset the filters.
+function keepPick(sel,keep){if(keep&&[...sel.options].some(o=>o.value===keep))sel.value=keep}
 function populateDropdowns(){
   const names=projects.map(p=>p.name);
-  ['selProj','fProj','dpProj','nfProj'].forEach(id=>{const sel=$(id);if(!sel)return;const f=sel.options[0]?.text||'';sel.innerHTML=`<option value="">${f}</option>`;names.forEach(n=>sel.appendChild(new Option(n,n)))});
+  ['selProj','fProj','dpProj','nfProj'].forEach(id=>{const sel=$(id);if(!sel)return;const keep=sel.value;const f=sel.options[0]?.text||'';sel.innerHTML=`<option value="">${esc(f)}</option>`;names.forEach(n=>sel.appendChild(new Option(n,n)));keepPick(sel,keep)});
   const allL=new Set(),allA=new Set();projects.forEach(p=>{p.levels.forEach(l=>allL.add(l));p.areas.forEach(a=>allA.add(a))});
-  const fL=$('fLevel');fL.innerHTML='<option value="">All Levels</option>';[...allL].sort().forEach(l=>fL.appendChild(new Option(l,l)));
-  const fA=$('fArea');fA.innerHTML='<option value="">All Areas</option>';[...allA].sort().forEach(a=>fA.appendChild(new Option(a,a)))}
+  const fL=$('fLevel'),kL=fL.value;fL.innerHTML='<option value="">All Levels</option>';[...allL].sort().forEach(l=>fL.appendChild(new Option(l,l)));keepPick(fL,kL);
+  const fA=$('fArea'),kA=fA.value;fA.innerHTML='<option value="">All Areas</option>';[...allA].sort().forEach(a=>fA.appendChild(new Option(a,a)));keepPick(fA,kA)}
 
 /* ═══ FORM: ENTRY TYPE ═══ */
 function setEntryType(t){
@@ -3576,61 +3579,112 @@ async function loadAuditLog(){const{data,error}=await sb.from('audit_log').selec
     else d=esc(a.action)+': '+esc(a.new_value||'');
     return`<div class="audit-item"><div class="audit-time">${t}<span class="audit-user">${esc(a.user_identifier||'?')}</span></div><div class="audit-details">${d}</div></div>`}).join('')}</div></div>`}
 
+/* ═══ CARD ORDER (b5.14) — Foreman and Site cards stay where they are ═══
+   The order is taken when a project / level / area is picked. Every later refresh — your own saves, everyone else's
+   (realtime), the Refresh button — keeps it: a card marked delivered changes its look where it is. Cards that appear
+   later go into a "new" block at the top (open ones) or onto the end (delivered / cancelled ones), tagged New, so no
+   card already on screen moves. Picking another project / level / area, or Re-sort, takes a fresh order. The search
+   box only hides cards; it never re-orders. Pure — tests/r1.test.mjs checks it.
+     prev:   the state this returned last time (or null)    key:    the picked project / level / area
+     list:   the entries to show now (before search)        sortFn: the fresh order    isOpen(e): goes to the top if new
+   → {state, top:[{e,isNew}], main:[{e,isNew}], kept}  — kept=false when a fresh order was taken. */
+function keepCardOrder(prev,key,list,sortFn,isOpen){
+  const byId=new Map(list.map(e=>[e.id,e]));
+  let fresh=new Set();
+  const row=id=>({e:byId.get(id),isNew:fresh.has(id)});
+  if(!prev||prev.key!==key){
+    const main=list.slice().sort(sortFn).map(e=>e.id);
+    return{state:{key,top:[],main,fresh:[]},top:[],main:main.map(row),kept:false}}
+  const known=new Set([...prev.top,...prev.main]);
+  const added=list.filter(e=>!known.has(e.id)).sort(sortFn);
+  const top=[...added.filter(isOpen).map(e=>e.id),...prev.top.filter(id=>byId.has(id))];
+  const main=[...prev.main.filter(id=>byId.has(id)),...added.filter(e=>!isOpen(e)).map(e=>e.id)];
+  fresh=new Set([...prev.fresh.filter(id=>byId.has(id)),...added.map(e=>e.id)]);
+  return{state:{key,top,main,fresh:[...fresh]},top:top.map(row),main:main.map(row),kept:true}}
+// Keep the card you're looking at where it is on screen when the list is drawn again (only once you've scrolled — at
+// the top of the page new cards simply show).
+function cardAnchor(box){
+  if(!box||window.scrollY<=0)return null;
+  for(const c of box.querySelectorAll('[data-card-id]')){const r=c.getBoundingClientRect();if(r.bottom>0)return{id:c.getAttribute('data-card-id'),top:r.top}}
+  return null}
+function restoreCardAnchor(box,a){
+  if(!a)return;
+  const c=[...box.querySelectorAll('[data-card-id]')].find(x=>x.getAttribute('data-card-id')===a.id);if(!c)return;
+  const d=c.getBoundingClientRect().top-a.top;if(Math.abs(d)>=1)window.scrollBy(0,d)}
+// The cards on screen: a line saying how many are new (with Re-sort), the block of new open cards, then the kept list.
+function cardListsHtml(top,main,cardFn,view){
+  const n=top.length+main.filter(x=>x.isNew).length;
+  let h='';
+  if(n)h+=`<div class="card-new-bar"><span><b>${n} new</b> since you opened this list${top.length?' — at the top':''}, marked New.</span><button class="btn btn-ghost btn-sm" onclick="resortCards(${jsArg(view)})" style="width:auto">Re-sort</button></div>`;
+  if(top.length)h+='<div class="sv-list sv-list-new">'+top.map(cardFn).join('')+'</div>';
+  if(main.length)h+='<div class="sv-list">'+main.map(cardFn).join('')+'</div>';
+  return h}
+function resortCards(view){if(view==='foreman')resortForeman();else if(view==='site')resortSite()}
+function cardMatches(e,fq){return !fq||[e.schedule,e.project,e.level,e.area].some(f=>(f||'').toLowerCase().includes(fq))}
+
 /* ═══ SITE VIEW (steel fixers — read-only) ═══ */
 function populateSiteDropdowns(){
-  const names=projects.map(p=>p.name);
-  const pSel=$('svProj');if(pSel){pSel.innerHTML='<option value="">All Projects</option>';names.forEach(n=>pSel.appendChild(new Option(n,n)))}
-  const allL=new Set(),allA=new Set();projects.forEach(p=>{p.levels.forEach(l=>allL.add(l));p.areas.forEach(a=>allA.add(a))});
-  const lSel=$('svLevel');if(lSel){lSel.innerHTML='<option value="">All Levels</option>';[...allL].sort().forEach(l=>lSel.appendChild(new Option(l,l)))}
-  const aSel=$('svArea');if(aSel){aSel.innerHTML='<option value="">All Areas</option>';[...allA].sort().forEach(a=>aSel.appendChild(new Option(a,a)))}
+  const pSel=$('svProj');
+  if(pSel){
+    const keep=pSel.value;   // b5.14: a projects refresh keeps the picked project (it used to reset the view)
+    pSel.innerHTML='<option value="">All Projects</option>';projects.forEach(p=>pSel.appendChild(new Option(p.name,p.name)));
+    if(keep&&projects.some(p=>p.name===keep))pSel.value=keep}
+  refreshSiteLevelAreaOptions();   // keeps the picked level / area when the project still has them
 }
 
 function subscribeSiteRealtime(){
   sb.channel('sv_e').on('postgres_changes',{event:'*',schema:'public',table:'entries'},()=>loadEntries().then(()=>renderSite())).subscribe();
   sb.channel('sv_p').on('postgres_changes',{event:'*',schema:'public',table:'projects'},()=>loadProjects().then(()=>{populateSiteDropdowns();renderSite()})).subscribe()}
 
+let svOrder=null;   // b5.14: the card order taken when this project / level / area was picked (keepCardOrder)
+// Fresh order: pending / ordered first by DBCC requested date (soonest first), then delivered, then cancelled.
+const SV_RANK={'Not Ordered':0,'Ordered':1,'Scheduled':2,'Delivered':3,'Cancelled':4};
+function svSort(a,b){const ra=SV_RANK[a.status]??99,rb=SV_RANK[b.status]??99;if(ra!==rb)return ra-rb;
+  return new Date(a.our_delivery_date||'2099-01-01')-new Date(b.our_delivery_date||'2099-01-01')}
+function resortSite(){svOrder=null;renderSite()}
 function renderSite(){
+  // Narrow the Level/Area dropdowns to the project's own lists first, so the filters read below are the ones on screen.
+  refreshSiteLevelAreaOptions();
   const fp=$('svProj').value,fl=$('svLevel').value,fa=$('svArea').value,fq=($('svSearch').value||'').toLowerCase().trim();
   const w=$('siteList');
-  // Constrain Level/Area dropdowns to the selected project's own lists
-  refreshSiteLevelAreaOptions();
   // Step-by-step gating: require a project first
   if(!fp){
+    svOrder=null;
     $('siteCountNum').textContent=0;
     w.innerHTML='<div class="sv-empty" style="padding:80px 20px"><div style="font-size:40px;margin-bottom:10px">📁</div><p style="font-size:14px;font-weight:600;color:var(--gray-dk);margin-bottom:4px">Select a project to begin</p><p>Pick a project from the dropdown above to see schedules and markup plans.</p></div>';
     return}
   let list=entries.filter(e=>e.project===fp);
   if(fl)list=list.filter(e=>e.level===fl);
   if(fa)list=list.filter(e=>e.area===fa);
-  if(fq)list=list.filter(e=>[e.schedule,e.project,e.level,e.area].some(f=>(f||'').toLowerCase().includes(fq)));
-  // Sort: pending/ordered first by delivery date (soonest first), then delivered, then cancelled
-  const rank={'Not Ordered':0,'Ordered':1,'Scheduled':2,'Delivered':3,'Cancelled':4};
-  list.sort((a,b)=>{
-    const ra=rank[a.status]??99,rb=rank[b.status]??99;if(ra!==rb)return ra-rb;
-    const da=new Date(a.our_delivery_date||'2099-01-01'),db=new Date(b.our_delivery_date||'2099-01-01');
-    return da-db});
-  $('siteCountNum').textContent=list.length;
-  if(!list.length){w.innerHTML='<div class="sv-empty"><p>No schedules match these filters.</p></div>';return}
-  w.innerHTML='<div class="sv-list">'+list.map(e=>{
+  const r=keepCardOrder(svOrder,JSON.stringify([fp,fl,fa]),list,svSort,e=>e.status!=='Delivered'&&e.status!=='Cancelled');
+  svOrder=r.state;
+  const top=r.top.filter(x=>cardMatches(x.e,fq)),main=r.main.filter(x=>cardMatches(x.e,fq));
+  $('siteCountNum').textContent=top.length+main.length;
+  if(!top.length&&!main.length){w.innerHTML='<div class="sv-empty"><p>No schedules match these filters.</p></div>';return}
+  const anchor=r.kept?cardAnchor(w):null;
+  w.innerHTML=cardListsHtml(top,main,siteCardHtml,'site');
+  restoreCardAnchor(w,anchor)}
+function siteCardHtml({e,isNew}){
     const mp=e.markup_plans?JSON.parse(e.markup_plans):[];
-    const cls=e.status==='Delivered'?' delivered':e.status==='Cancelled'?' cancelled':'';
+    const cls=(e.status==='Delivered'?' delivered':e.status==='Cancelled'?' cancelled':'')+(isNew?' is-new':'');
     const statusPill=`<span class="pill ${ST_CLS[e.status]||'pill-notordered'}">${esc(e.status)}</span>`;
     // Files section
     let filesHtml='';
     if(e.file_url){filesHtml+=`<a class="sv-file-link" ${fileLinkAttrs(e.file_url)}><span class="sv-file-icon">📄</span><span class="sv-file-name">${esc(e.file_name||'Schedule')}</span></a>`}
     mp.forEach(m=>{filesHtml+=`<a class="sv-file-link markup" ${fileLinkAttrs(m.url)}><span class="sv-file-icon">📐</span><span class="sv-file-name">${esc(m.name||'Markup plan')}</span></a>`});
     if(!filesHtml)filesHtml='<div class="sv-no-files">No files attached yet</div>';
-    return `<div class="sv-card${cls}">
+    return `<div class="sv-card${cls}" data-card-id="${e.id}">
       <div class="sv-card-head">
         <div style="flex:1;min-width:0">
           <div class="sv-proj">${esc(e.project)}</div>
           <div class="sv-loc">${esc(e.level||'—')} / ${esc(e.area||'—')}${e.split_reference?' ('+esc(e.split_reference)+')':''}</div>
         </div>
+        ${isNew?'<span class="pill pill-new" title="Added since you opened this list">New</span>':''}
         ${e.schedule?`<span class="sv-sched">${esc(e.schedule)}</span>`:''}
       </div>
       <div class="sv-date">📅 DBCC Requested Delivery: <b>${fmtDate(e.our_delivery_date)||'Not set'}</b> · ${statusPill}</div>
       <div class="sv-files">${filesHtml}</div>
-    </div>`}).join('')+'</div>'}
+    </div>`}
 
 // When the project changes in Site View, narrow the Level/Area dropdowns to that project's lists.
 function refreshSiteLevelAreaOptions(){
@@ -3672,8 +3726,10 @@ async function foremanAudit(o){
 }
 function populateForemanDropdowns(){
   const ps=$('fmProj');if(!ps)return;
+  const keep=ps.value;   // b5.14: a projects refresh keeps the picked project (it used to reset the cards to "Select a project")
   ps.innerHTML='<option value="">All Projects</option>';
   projects.forEach(p=>ps.appendChild(new Option(p.name,p.name)));
+  if(keep&&projects.some(p=>p.name===keep))ps.value=keep;
   refreshForemanLevelAreaOptions();
 }
 function refreshForemanLevelAreaOptions(){
@@ -3700,27 +3756,36 @@ const INSTALL_DETAILS=[
 ];
 function installDetailLabel(v){const o=INSTALL_DETAILS.find(x=>x.v===(v||''));return o?o.label:'Legacy – tonnage (standard)'}
 function installDetailShort(v){return v==='legacy_day_labour'?'Legacy day labour':v==='dbcc_starter_only'?'DBCC starter only':v==='dbcc_full'?'DBCC full schedule':'—'}
+let fmOrder=null;   // b5.14: the card order taken when this project / level / area was picked (keepCardOrder)
+// Fresh order: not delivered first by DBCC requested date (soonest first), then delivered.
+function fmSort(a,b){const da=a.status==='Delivered'?1:0,db=b.status==='Delivered'?1:0;if(da!==db)return da-db;
+  return new Date(a.our_delivery_date||'2099-01-01')-new Date(b.our_delivery_date||'2099-01-01')}
+function resortForeman(){fmOrder=null;renderForeman()}
 function renderForeman(){
+  // Narrow the Level/Area dropdowns to the project's own lists first, so the filters read below are the ones on screen.
+  refreshForemanLevelAreaOptions();
   const fp=$('fmProj').value,fl=$('fmLevel').value,fa=$('fmArea').value,fq=($('fmSearch').value||'').toLowerCase().trim();
   const w=$('foremanList');
-  refreshForemanLevelAreaOptions();
   if(!fp){
+    fmOrder=null;
     $('fmCountNum').textContent=0;
     w.innerHTML='<div class="sv-empty" style="padding:80px 20px"><div style="font-size:40px;margin-bottom:10px">📁</div><p style="font-size:14px;font-weight:600;color:var(--gray-dk);margin-bottom:4px">Select a project to begin</p><p>Pick a project from the dropdown above to see deliveries.</p></div>';
     return}
   let list=entries.filter(e=>e.project===fp&&e.status!=='Cancelled');
   if(fl)list=list.filter(e=>e.level===fl);
   if(fa)list=list.filter(e=>e.area===fa);
-  if(fq)list=list.filter(e=>[e.schedule,e.project,e.level,e.area].some(f=>(f||'').toLowerCase().includes(fq)));
-  // Sort: not-delivered first by delivery date, then delivered
-  list.sort((a,b)=>{
-    const da=a.status==='Delivered'?1:0,db=b.status==='Delivered'?1:0;if(da!==db)return da-db;
-    const x=new Date(a.our_delivery_date||'2099-01-01'),y=new Date(b.our_delivery_date||'2099-01-01');return x-y});
-  $('fmCountNum').textContent=list.length;
-  if(!list.length){w.innerHTML='<div class="sv-empty"><p>No deliveries match these filters.</p></div>';return}
-  w.innerHTML='<div class="sv-list">'+list.map(e=>{
+  // b5.14: the order is taken once and then kept — a card marked delivered or edited stays where it is.
+  const r=keepCardOrder(fmOrder,JSON.stringify([fp,fl,fa]),list,fmSort,e=>e.status!=='Delivered');
+  fmOrder=r.state;
+  const top=r.top.filter(x=>cardMatches(x.e,fq)),main=r.main.filter(x=>cardMatches(x.e,fq));
+  $('fmCountNum').textContent=top.length+main.length;
+  if(!top.length&&!main.length){w.innerHTML='<div class="sv-empty"><p>No deliveries match these filters.</p></div>';return}
+  const anchor=r.kept?cardAnchor(w):null;
+  w.innerHTML=cardListsHtml(top,main,foremanCardHtml,'foreman');
+  restoreCardAnchor(w,anchor)}
+function foremanCardHtml({e,isNew}){
     const delivered=e.status==='Delivered';
-    const cls=delivered?' delivered':'';
+    const cls=(delivered?' delivered':'')+(isNew?' is-new':'');
     const statusPill=`<span class="pill ${ST_CLS[e.status]||'pill-notordered'}">${esc(e.status)}</span>`;
     let filesHtml='';
     if(e.file_url){filesHtml+=`<a class="sv-file-link" ${fileLinkAttrs(e.file_url)}><span class="sv-file-icon">📄</span><span class="sv-file-name">${esc(e.file_name||'Schedule')}</span></a>`}
@@ -3745,12 +3810,13 @@ function renderForeman(){
     // Foreman notes (who did what) — attributed chunks.
     const fnotes=parseChunks(e.foreman_notes);
     const notesHtml=`<div class="fm-notes">${fnotes.length?fnotes.map(c=>`<div class="fm-note">📝 ${esc(c.text)} <span class="fm-note-meta">— ${esc((c.authors||[]).join(', '))}${c.created_at?' · '+esc(fmtDate(String(c.created_at).slice(0,10))):''}</span></div>`).join(''):'<div class="fm-note-empty">No notes yet</div>'}<button class="fm-mini-btn" onclick="foremanAddNote(${e.id})">+ Note</button></div>`;
-    return `<div class="sv-card${cls}">
+    return `<div class="sv-card${cls}" data-card-id="${e.id}">
       <div class="sv-card-head">
         <div style="flex:1;min-width:0">
           <div class="sv-proj">${esc(e.project)}</div>
           <div class="sv-loc">${esc(e.level||'—')} / ${esc(e.area||'—')}${e.split_reference?' ('+esc(e.split_reference)+')':''}</div>
         </div>
+        ${isNew?'<span class="pill pill-new" title="Added since you opened this list">New</span>':''}
         ${e.schedule?`<span class="sv-sched">${esc(e.schedule)}</span>`:''}
       </div>
       <div class="sv-date">📅 DBCC Requested Delivery: <b>${fmtDate(e.our_delivery_date)||'Not set'}</b> · ${statusPill}</div>
@@ -3759,7 +3825,7 @@ function renderForeman(){
       ${installDetailHtml}
       ${progressHtml}
       ${notesHtml}
-    </div>`}).join('')+'</div>'}
+    </div>`}
 
 async function foremanMarkDelivered(id){
   const e=entries.find(x=>x.id===id);if(!e)return;

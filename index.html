@@ -318,6 +318,7 @@
       <select id="svArea" onchange="renderSite()"><option value="">All Areas</option></select>
       <input type="text" id="svSearch" placeholder="Search schedule..." oninput="renderSite()">
       <button class="btn btn-ghost btn-sm" onclick="refreshAll()">Refresh</button>
+      <button class="btn btn-ghost btn-sm" onclick="resortSite()" title="Cards stay where they are while you work. Re-sort puts them back in order: not delivered first, by DBCC requested delivery date.">↕ Re-sort</button>
     </div>
     <div id="siteList"></div>
   </div>
@@ -348,6 +349,7 @@
       <select id="fmArea" onchange="renderForeman()"><option value="">All Areas</option></select>
       <input type="text" id="fmSearch" placeholder="Search schedule..." oninput="renderForeman()">
       <button class="btn btn-ghost btn-sm" onclick="refreshAll()">Refresh</button>
+      <button class="btn btn-ghost btn-sm" onclick="resortForeman()" title="Cards stay where they are while you work. Re-sort puts them back in order: not delivered first, by DBCC requested delivery date.">↕ Re-sort</button>
       <button class="btn btn-sec btn-sm" onclick="openReportPage()" style="width:auto">📊 Report</button>
     </div>
     <div id="foremanList"></div>
