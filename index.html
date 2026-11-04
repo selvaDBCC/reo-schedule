@@ -389,6 +389,9 @@
 </div>
 
 <!-- MODALS -->
+<!-- b5.14: the delivery grid's cell card (DBCC, pairs live). First of the overlays on purpose: the dialogs it opens (cancel,
+     attach a schedule, markup plans, comments, edit / move, email, confirm) come later in the page, so they show on top of it. -->
+<div class="overlay" id="cellCardOv" onclick="if(event.target===this)ccClose()"><div class="modal modal-xl" id="cellCardModal"></div></div>
 <div class="overlay" id="successOv">
   <div class="modal" style="text-align:center;padding:40px 32px;max-width:420px">
     <div style="width:54px;height:54px;background:var(--success-lt);border-radius:50%;display:inline-flex;align-items:center;justify-content:center;margin-bottom:14px">

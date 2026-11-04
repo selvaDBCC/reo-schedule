@@ -379,3 +379,270 @@ test('a ticked cell whose pair Master-OPS removed drops out of the selection on 
   a.refreshProgramViews();
   assert.ok(!r('dpPick.ticks.has(cellKey("GRD","COLUMNS"))'));assert.ok(r('dpPick.ticks.has(cellKey("GRD","SLAB"))'));
 });
+
+// ── The cell card ──
+const FILE_URL='https://oekgtocjtloptrjacmcu.supabase.co/storage/v1/object/public/project-files/Barwon/1_mp.pdf';
+const CARD_ENTRIES=[
+  E(21,'GRD','SLAB',{schedule:'U9AV',split_reference:'Part 1',our_delivery_date:'2026-11-05',status:'Scheduled',supplier_delivery_date:'2026-11-05'}),
+  E(22,'GRD','SLAB',{schedule:null,split_reference:'Part 2',our_delivery_date:null,status:'Not Ordered'}),
+  E(23,'L1','WALLS',{schedule:'UT2X',status:'Ordered',our_delivery_date:'2026-11-10'}),
+];
+// A fresh app copy with a page whose elements are made as they are asked for; emailModal and loadEntries recorded.
+function cardApp({role='dbcc',answer}={}){
+  const a=loadApp(),r=src=>vm.runInContext(src,a);
+  a.__p={pairs:PAIRS,projects:PROJECTS,entries:CARD_ENTRIES,role};
+  r(`pairsLive=true;authRole=__p.role;userName='Chris';adminUnlocked=true;
+     projectPairs=JSON.parse(JSON.stringify(__p.pairs));projects=JSON.parse(JSON.stringify(__p.projects));entries=JSON.parse(JSON.stringify(__p.entries));
+     projectFiles=[{id:31,project_name:'Barwon Reservoir',scope:'level_area',level:'GRD',area:'SLAB',label:'GRD slab marking plan',file_url:${JSON.stringify(FILE_URL)},superseded:false,category:'marking_plan'},
+                   {id:32,project_name:'Barwon Reservoir',scope:'project',level:null,area:null,label:'Sequence "A"',file_url:'javascript:alert(1)',superseded:false,category:'other'}];
+     emailContacts=[{id:1,label:'Aus Reo scheduler',email:'sched@ausreo.example',supplier:'Aus Reo'}];projectSchedulers=[{project_name:'Barwon Reservoir',contact_id:1}];
+     __mail=[];emailModal=(subject,body,id,ctx,pn,opts)=>__mail.push({subject,body,id,ctx,pn,opts});
+     __loads=0;loadEntries=async()=>{__loads++};renderDash=()=>{};confirmDialog=(t,m,ok,c,fn)=>{__confirm={t,m,fn}};`);
+  const els={};
+  a.document.getElementById=id=>els[id]||(els[id]={id,value:'',innerHTML:'',textContent:'',disabled:false,style:{},scrollTop:0,
+    classList:{_s:new Set(),add(c){this._s.add(c)},remove(c){this._s.delete(c)},toggle(){},contains(c){return this._s.has(c)}},contains:()=>false,addEventListener(){},removeEventListener(){}});
+  els.dpProj=a.document.getElementById('dpProj');els.dpProj.value='Barwon Reservoir';
+  const sb=fakeSb(answer||(()=>({data:null,error:null})));a.__sb=sb;r('sb=__sb');
+  return{a,r,els,sb};
+}
+test('the card opens for DBCC only, keeps its own job, and lays its cells out in grid order', ()=>{
+  for(const role of ['supplier','crew',null]){const{a,r}=cardApp({role});a.openCellCard([{level:'GRD',area:'SLAB'}]);assert.equal(r('cellCard'),null,`never for ${role}`)}
+  const{a,r,els}=cardApp();
+  a.openCellCard([{level:'L1',area:'WALLS'},{level:'GRD',area:'WALLS'},{level:'GRD',area:'COLUMNS'},{level:'GRD',area:'SLAB'},{level:'GRD',area:'SLAB'}]);
+  const cc=plain(r('({project:cellCard.project,supplier:cellCard.supplier,cells:cellCard.cells,orders:cellCard.orders})'));
+  assert.equal(cc.project,'Barwon Reservoir');assert.equal(cc.supplier,'Aus Reo');
+  assert.deepEqual(cc.cells.map(c=>c.level+' / '+c.area),['GRD / SLAB','GRD / COLUMNS','L1 / WALLS'],'grid order; the grey cell and the repeat dropped');
+  assert.deepEqual(Object.keys(cc.orders).map(k=>JSON.parse(k).join(' / ')),['GRD / COLUMNS'],'an empty green cell gets one placeholder ready; a cell with orders and an amber cell none');
+  assert.ok(els.cellCardOv.classList.contains('show'));
+  // the page's project select changing (a realtime refresh resetting it) doesn't move the card
+  els.dpProj.value='';assert.equal(r('cellCard.project'),'Barwon Reservoir');
+});
+
+test('the card shows each entry with its split, status, dates, files, comments and actions — names escaped, never in handlers', ()=>{
+  const{a,r,els}=cardApp();
+  r(`entries.push({id:24,project:'Barwon Reservoir',level:'GRD',area:'SLAB',schedule:'<img src=x onerror=alert(1)>',split_reference:'Top "reo"',status:'Ordered',entry_type:'scheduled',our_delivery_date:'2026-11-12',
+     dbcc_comment:JSON.stringify([{text:'pour moved',authors:['Chris']}])})`);
+  a.openCellCard([{level:'GRD',area:'SLAB'},{level:'L1',area:'WALLS'}]);
+  const h=els.cellCardModal.innerHTML;
+  assert.ok(!/<img src=x/.test(h),'a schedule name never reaches the page raw');
+  assert.match(h,/<span class="cc-split">\(Top &quot;reo&quot;\)<\/span>/,'the split reference, orange');
+  assert.match(h,/<span class="cc-split">\(Part 1\)<\/span>/);
+  assert.match(h,/id="ccDate_21" value="2026-11-05" oninput="ccDateDraft\(21,this\.value\)"><button class="action-btn cc-save" id="ccDateBtn_21" onclick="ccSaveDate\(21\)" disabled>Save date<\/button>/);
+  assert.match(h,/onclick="cancelEntry\(22,true\)"/,'cancel goes through the dashboard\'s dialog, with a reason');
+  assert.match(h,/onclick="uploadScheduleFile\(22\)"/,'attach a schedule where there is none');
+  assert.match(h,/onclick="uploadMarkup\(21\)"/);assert.match(h,/onclick="editChunkComment\(24,'dbcc'\)"/);
+  assert.match(h,/DBCC: pour moved/);
+  assert.match(h,/L1 \/ WALLS is no longer on this job in Master-OPS — move these entries to a level \/ area that is \(Move…\)\. Nothing new can be ordered here\./);
+  assert.match(h,/onclick="openEditEntry\(23\)"[^>]*>Move…/,'an entry on an amber cell can be moved');
+  assert.ok(!/openEditEntry\(21\)/.test(h),'a green cell\'s entries don\'t need moving');
+  assert.match(h,/<a href="https:\/\/oekgtocjtloptrjacmcu[^"]*1_mp\.pdf" target="_blank" rel="noopener noreferrer">GRD slab marking plan<\/a>/,'the cell\'s own reference file, to tick for the email');
+  assert.match(h,/One email to Aus Reo/);assert.match(h,/sched@ausreo\.example/);
+  assert.match(h,/Hold, reinstate and date mismatches stay on the Dashboard\./);
+  assert.match(h,/>Email the changes<\/button>/);assert.match(h,/id="ccSendBtn" onclick="ccCreateAndEmail\(\)" style="width:auto;margin:0" disabled>/,'nothing to send yet');
+});
+
+test('ccPlanRows: the b5.13 split-label rule, one date for all or one each; a cell that left the job is refused', ()=>{
+  const cellOf=k=>{const[l,a]=JSON.parse(k);return{level:l,area:a,state:l==='L1'?'retired':'active'}};
+  const K=(l,a)=>app.cellKey(l,a);
+  const orders={[K('GRD','SLAB')]:[{label:'',date:'2026-11-20'}],[K('GRD','COLUMNS')]:[{label:' Top ',date:''},{label:'',date:'2026-11-21'}],[K('L1','WALLS')]:[{label:'x',date:''}]};
+  const keys=[K('GRD','SLAB'),K('GRD','COLUMNS'),K('L1','WALLS'),K('B1','PILES')];
+  let p=app.ccPlanRows(keys,orders,cellOf,'all','2026-11-18');
+  assert.deepEqual(plain(p.groups).map(g=>g.rows.map(r=>[r.level,r.area,r.split_reference,r.our_delivery_date,r.status])),[
+    [['GRD','SLAB',null,'2026-11-18','Ordered']],
+    [['GRD','COLUMNS','Top','2026-11-18','Ordered'],['GRD','COLUMNS','Part 2','2026-11-18','Ordered']]]);
+  assert.deepEqual(plain(p.groups[0].rows[0]),{level:'GRD',area:'SLAB',schedule:null,status:'Ordered',entry_type:'scheduled',our_delivery_date:'2026-11-18',split_reference:null});
+  assert.deepEqual(plain(p.refused),[{key:K('L1','WALLS'),level:'L1',area:'WALLS',n:1,words:'L1 / WALLS is no longer on this job in Master-OPS — nothing was created there.'}]);
+  p=app.ccPlanRows(keys,orders,cellOf,'each','2026-11-18');
+  assert.deepEqual(plain(p.groups).flatMap(g=>g.rows.map(r=>[r.our_delivery_date,r.status])),[['2026-11-20','Ordered'],[null,'Not Ordered'],['2026-11-21','Ordered']]);
+  p=app.ccPlanRows(keys,orders,cellOf,'all','');
+  assert.deepEqual(plain(p.groups).flatMap(g=>g.rows.map(r=>r.status)),['Not Ordered','Not Ordered','Not Ordered'],'no date → Not Ordered, as before');
+});
+
+test('the card\'s log: what goes in the one email', ()=>{
+  const log={created:[],dates:[],cancels:[]};
+  const e=(id,o={})=>({id,level:'GRD',area:'SLAB',split_reference:null,schedule:null,...o});
+  app.ccLogDate(log,e(1,{schedule:'U9AV',split_reference:'Part 1'}),'2026-11-05','2026-11-12');
+  app.ccLogDate(log,e(1,{schedule:'U9AV',split_reference:'Part 1'}),'2026-11-12','2026-11-14');
+  assert.deepEqual(plain(log.dates).map(r=>[r.old,r.new]),[['2026-11-05','2026-11-14']],'changed twice: first old, last new');
+  app.ccLogDate(log,e(1),'2026-11-14','2026-11-05');assert.equal(log.dates.length,0,'changed back: nothing to tell');
+  log.created.push({id:9,level:'GRD',area:'COLUMNS',split:null,date:null});
+  app.ccLogDate(log,e(9,{area:'COLUMNS'}),'','2026-11-20');
+  assert.deepEqual(plain(log.created),[{id:9,level:'GRD',area:'COLUMNS',split:null,date:'2026-11-20'}],'a placeholder made here just gets its date — a new order, not a change');
+  assert.equal(log.dates.length,0);
+  app.ccLogDate(log,e(2,{schedule:'UT2X'}),'2026-11-10','');
+  app.ccLogCancel(log,e(2,{schedule:'UT2X'}),'pour cancelled');
+  assert.deepEqual(plain(log.dates),[],'a cancellation replaces the date change');
+  assert.deepEqual(plain(log.cancels).map(r=>[r.id,r.reason]),[[2,'pour cancelled']]);
+  app.ccLogCancel(log,e(9,{area:'COLUMNS'}),'not needed');
+  assert.deepEqual(plain(log.created),[],'made here and cancelled before the email: the supplier never hears of it');
+  assert.equal(log.cancels.length,1);
+});
+
+test('cellCardEmail: one email from everything saved — new orders, date changes, cancellations, ticked files', ()=>{
+  const log={created:[{id:9,level:'GRD',area:'COLUMNS',split:'Part 1',date:'2026-11-20'},{id:10,level:'GRD',area:'COLUMNS',split:'Part 2',date:null}],
+    dates:[{id:1,level:'GRD',area:'SLAB',split:'Part 1',schedule:'U9AV',old:'2026-11-05',new:'2026-11-12'},{id:3,level:'B1',area:'PILES',split:null,schedule:null,old:'',new:'2026-11-30'}],
+    cancels:[{id:2,level:'L1',area:'WALLS',split:null,schedule:'UT2X',reason:'wall redesigned — see "RFI 12"'}]};
+  const m=app.cellCardEmail({project:'Barwon Reservoir',supplier:'Aus Reo',log,sender:'Chris',
+    files:[{label:'GRD slab marking plan',url:FILE_URL},{label:'Sequence',url:'javascript:alert(1)'}]});
+  assert.equal(m.subject,'REO orders — Barwon Reservoir (1 new, 2 date changes, 1 cancelled)');
+  assert.equal(m.body,
+`Hi Aus Reo,
+
+The following changes have been made to our REO orders for Barwon Reservoir:
+
+NEW ORDERS — DBCC requested delivery date
+• GRD / COLUMNS (Part 1) — 20/11/2026
+
+DBCC REQUESTED DELIVERY DATE CHANGED
+• GRD / SLAB (Part 1) · U9AV — 05/11/2026 → 12/11/2026
+• B1 / PILES — not set → 30/11/2026
+
+CANCELLED
+• L1 / WALLS · UT2X — reason: wall redesigned — see "RFI 12"
+
+─── Reference documents ───
+• GRD slab marking plan: ${FILE_URL}
+
+Please confirm receipt and your production delivery dates.
+
+If these changes are not acceptable, please contact a DBCC representative immediately to resolve the matter.
+
+Regards,
+Chris
+Debono Bros Concreting`);
+  assert.ok(!/javascript:/.test(m.body),'a link that isn\'t on the REO file store is left out');
+  const c=app.cellCardEmail({project:'P',supplier:'ARC',log:{created:[],dates:[],cancels:[{id:1,level:'A',area:'B',reason:'r'}]},files:[],sender:'S'});
+  assert.equal(c.subject,'REO orders — P (1 cancelled)');assert.match(c.body,/^Hi ARC,/);assert.match(c.body,/Please confirm receipt\./,'nothing dated: no dates asked for');
+  assert.equal(app.cellCardEmail({project:'P',supplier:'ARC',log:{created:[{id:1,date:null}],dates:[],cancels:[]},files:[{label:'x',url:FILE_URL}],sender:'S'}),null,'nothing to tell the supplier: no email');
+});
+
+test('a date changed in the card: saved only while it is what the card showed; history after the write; it goes in the email', async()=>{
+  const{a,r,els,sb}=cardApp({answer:q=>q.table==='entries'&&q.op==='update'?{data:[{id:22}],error:null}:{data:null,error:null}});
+  a.openCellCard([{level:'GRD',area:'SLAB'}]);
+  els.ccDate_22=a.document.getElementById('ccDate_22');els.ccDate_22.value='2026-11-19';
+  await a.ccSaveDate(22);
+  const[upd,...hist]=sb.calls;
+  assert.equal(upd.op,'update');assert.deepEqual({...upd.payload},{our_delivery_date:'2026-11-19',status:'Ordered'},'Not Ordered → Ordered, today\'s rule');
+  assert.deepEqual(upd.filters.map(f=>[...f]),[['eq','id',22],['is','our_delivery_date',null],['eq','status','Not Ordered']]);
+  assert.ok(upd.returning);
+  assert.deepEqual(hist.map(h=>[h.table,h.payload.field_changed,h.payload.old_value,h.payload.new_value,h.payload.user_identifier]),
+    [['audit_log','our_delivery_date','','2026-11-19','Chris'],['audit_log','status','Not Ordered','Ordered','Chris']]);
+  assert.deepEqual(plain(r('cellCard.log.dates')),[{id:22,level:'GRD',area:'SLAB',split:'Part 2',schedule:null,old:'',new:'2026-11-19'}]);
+  assert.match(els.cellCardModal.innerHTML,/Saved — it goes in the email\./);
+  assert.match(els.cellCardModal.innerHTML,/Date: GRD \/ SLAB \(Part 2\) — not set → 19\/11\/2026/);
+  // the mismatch rule: a production date on file that now differs flags it again
+  const t=cardApp({answer:q=>q.table==='entries'?{data:[{id:21}],error:null}:{data:null,error:null}});
+  t.a.openCellCard([{level:'GRD',area:'SLAB'}]);t.a.document.getElementById('ccDate_21').value='2026-11-07';
+  await t.a.ccSaveDate(21);
+  assert.deepEqual({...t.sb.calls[0].payload},{our_delivery_date:'2026-11-07',mismatch_resolved:false});
+});
+
+test('a date that changed meanwhile, or a refusal: nothing written to history, said where it happened, listed as not saved', async()=>{
+  for(const [answer,words] of [[{data:[],error:null},/the entry changed meanwhile/],[{data:null,error:{message:'Suppliers cannot change the ordered (DBCC) delivery date'}},/the database refused it: Suppliers cannot/]]){
+    const{a,r,els,sb}=cardApp({answer:q=>q.table==='entries'?answer:{data:null,error:null}});
+    a.openCellCard([{level:'GRD',area:'SLAB'}]);a.document.getElementById('ccDate_22').value='2026-11-19';
+    await a.ccSaveDate(22);
+    assert.deepEqual(sb.calls.map(c=>c.table+':'+c.op),['entries:update'],'no history line');
+    assert.equal(r('cellCard.log.dates.length'),0,'not in the email');
+    assert.match(r('cellCard.notes[22]'),words);
+    assert.match(els.cellCardModal.innerHTML,/Not saved — left out of the email:/);
+  }
+});
+
+test('Create + email: one insert per cell; a refused cell is left out and listed; ONE email from everything saved', async()=>{
+  const{a,r,els,sb}=cardApp({answer:q=>{
+    if(q.table!=='entries'||q.op!=='insert')return{data:null,error:null};
+    if(q.payload[0].area==='COLUMNS'&&q.payload[0].level==='GRD-L1')return{data:null,error:{message:"GRD-L1 / COLUMNS isn't a level/area on this job — refresh, or send it as Ad hoc."}};
+    return{data:q.payload.map((p,i)=>({id:100+i+(p.level==='B1'?10:0),...p})),error:null}}});
+  a.openCellCard([{level:'GRD',area:'SLAB'},{level:'GRD-L1',area:'COLUMNS'},{level:'B1',area:'PILES'}]);
+  // saved earlier in the card: a cancellation (through the dashboard's dialog)
+  r(`ccAfterCancel(entries.find(e=>e.id===21),'redesign')`);
+  r(`cellCard.allDate='2026-11-25';ccAddOrder(cellKey('GRD','SLAB'))`);   // one more on the cell that has orders
+  await a.ccCreateAndEmail();
+  const ins=sb.calls.filter(c=>c.op==='insert'&&c.table==='entries');
+  assert.deepEqual(plain(ins.map(c=>c.payload.map(p=>[p.project,p.level,p.area,p.our_delivery_date,p.status,p.entry_type]))),[
+    [['Barwon Reservoir','GRD','SLAB','2026-11-25','Ordered','scheduled']],
+    [['Barwon Reservoir','GRD-L1','COLUMNS','2026-11-25','Ordered','scheduled']],
+    [['Barwon Reservoir','B1','PILES','2026-11-25','Ordered','scheduled']]],'the card\'s own job on every row, one insert per cell');
+  assert.ok(ins.every(c=>c.payload[0].order_batch_id===ins[0].payload[0].order_batch_id),'one batch');
+  const audit=sb.calls.filter(c=>c.table==='audit_log');
+  assert.deepEqual(audit.map(c=>[c.payload.action,c.payload.new_value]),[['BULK_CREATE','2 placeholders for Barwon Reservoir']],'history counts only what was made');
+  const mail=plain(r('__mail'));assert.equal(mail.length,1,'ONE email');
+  assert.equal(mail[0].pn,'Barwon Reservoir');assert.equal(mail[0].ctx,'cell_card');assert.deepEqual(mail[0].opts.files,[]);
+  assert.equal(mail[0].subject,'REO orders — Barwon Reservoir (2 new, 1 cancelled)');
+  assert.match(mail[0].body,/• GRD \/ SLAB — 25\/11\/2026\n• B1 \/ PILES — 25\/11\/2026/);
+  assert.ok(!/GRD-L1/.test(mail[0].body),'the refused cell is not in the email');
+  assert.match(mail[0].body,/CANCELLED\n• GRD \/ SLAB \(Part 1\) · U9AV — reason: redesign/);
+  const h=els.cellCardModal.innerHTML;
+  assert.match(h,/Not saved — left out of the email:<\/b><ul><li>1 new placeholder at GRD-L1 \/ COLUMNS — the database refused it: GRD-L1 \/ COLUMNS isn&#39;t a level\/area on this job — refresh, or send it as Ad hoc\.<\/li>/);
+  assert.match(h,/Created 2 placeholders\. One cell was not saved — left out of the email \(listed above\)\./);
+  assert.deepEqual(Object.keys(plain(r('cellCard.orders'))).map(k=>JSON.parse(k).join(' / ')),['GRD-L1 / COLUMNS'],'the refused cell keeps its placeholder to try again');
+  // the email dialog says it was opened → what it carried is done
+  r('__mail[0].opts.onSent()');
+  assert.deepEqual(plain(r('cellCard.log')),{created:[],dates:[],cancels:[]});
+  assert.match(els.cellCardModal.innerHTML,/The email \(3 items\) is open in your email app — check it there and press Send\./);
+});
+
+test('the card refuses an empty job, and a job that is gone — nothing is sent', async()=>{
+  const{a,r,els,sb}=cardApp();
+  a.openCellCard([{level:'GRD',area:'COLUMNS'}]);
+  r("cellCard.project=''");await a.ccCreateAndEmail();
+  assert.match(els.cellCardModal.innerHTML,/This card has no job — close it and open the cell again\. Nothing was saved\./);
+  r("cellCard.project='Gone Job'");await a.ccCreateAndEmail();
+  assert.match(els.cellCardModal.innerHTML,/This job is no longer in the list — close the card and refresh\. Nothing was saved\./);
+  assert.equal(sb.calls.length,0);assert.equal(r('__mail.length'),0);
+});
+
+test('only undated placeholders: created, said, and no email', async()=>{
+  const{a,r,els,sb}=cardApp({answer:q=>q.op==='insert'&&q.table==='entries'?{data:q.payload.map((p,i)=>({id:200+i,...p})),error:null}:{data:null,error:null}});
+  a.openCellCard([{level:'GRD',area:'COLUMNS'}]);
+  await a.ccCreateAndEmail();
+  assert.equal(sb.calls.filter(c=>c.op==='insert'&&c.table==='entries').length,1);
+  assert.equal(r('__mail.length'),0);
+  assert.match(els.cellCardModal.innerHTML,/Created 1 placeholder \(1 with no DBCC requested date — Not Ordered, not in the email\)\. Nothing to email/);
+  // given a date later in the card, it goes in the next email as a NEW order
+  r(`entries.push({id:200,project:'Barwon Reservoir',level:'GRD',area:'COLUMNS',status:'Not Ordered',entry_type:'scheduled',our_delivery_date:null})`);
+  a.document.getElementById('ccDate_200').value='2026-12-01';
+  a.__sb2=fakeSb(()=>({data:[{id:200}],error:null}));r('sb=__sb2');
+  await a.ccSaveDate(200);
+  assert.deepEqual(plain(r('cellCard.log.created')),[{id:200,level:'GRD',area:'COLUMNS',split:null,date:'2026-12-01'}]);
+  assert.equal(r('cellCard.log.dates.length'),0);
+});
+
+test('a cancel from the card lands in its email; a refused cancel is listed as not saved', async()=>{
+  const{a,r,els}=cardApp({answer:q=>q.table==='entries'?{data:[{id:22}],error:null}:{data:null,error:null}});
+  a.openCellCard([{level:'GRD',area:'SLAB'}]);
+  a.cancelEntry(22,true);
+  assert.match(els.cancelModal.innerHTML,/onclick="doCancel\(22,true\)"/);
+  a.document.getElementById('cancelR').value='not needed';
+  await a.doCancel(22,true);
+  assert.deepEqual(plain(r('cellCard.log.cancels')).map(c=>[c.id,c.reason]),[[22,'not needed']]);
+  const t=cardApp({answer:q=>q.table==='entries'?{data:null,error:{message:'new row violates row-level security policy'}}:{data:null,error:null}});
+  t.a.openCellCard([{level:'GRD',area:'SLAB'}]);t.a.cancelEntry(22,true);t.a.document.getElementById('cancelR').value='x';
+  await t.a.doCancel(22,true);
+  assert.equal(t.r('cellCard.log.cancels.length'),0);
+  assert.match(t.a.document.getElementById('ccSend').innerHTML,/Not saved — left out of the email:<\/b><ul><li>Cancelling GRD \/ SLAB \(Part 2\) — the database refused it: new row violates/);
+  // the dashboard's own cancel (no card) is exactly as before
+  const d=cardApp({answer:q=>q.table==='entries'?{data:[{id:22}],error:null}:{data:null,error:null}});
+  d.a.cancelEntry(22);assert.match(d.a.document.getElementById('cancelModal').innerHTML,/onclick="doCancel\(22,false\)"/);
+});
+
+test('closing the card with saved changes not emailed asks first; an untouched card just closes', ()=>{
+  const{a,r,els}=cardApp();
+  a.openCellCard([{level:'GRD',area:'COLUMNS'}]);a.ccClose();
+  assert.equal(r('cellCard'),null);assert.ok(!els.cellCardOv.classList.contains('show'));
+  a.openCellCard([{level:'GRD',area:'SLAB'}]);r(`ccAfterCancel(entries.find(e=>e.id===21),'x')`);a.ccClose();
+  assert.notEqual(r('cellCard'),null,'not closed yet');
+  assert.match(r('__confirm.m'),/1 change saved in this card hasn&#39;t been emailed — it stays saved, only the email is left out\./);
+  r('__confirm.fn()');assert.equal(r('cellCard'),null);
+});
+
+test('the email dialog without the card is unchanged: no file list taken over, no callback carried', ()=>{
+  const a=loadApp(),r=src=>vm.runInContext(src,a);
+  r(`emailContacts=[];projectSchedulers=[];projectFiles=[];entries=[];__got=0;`);
+  const els={};a.document.getElementById=id=>els[id]||(els[id]={id,innerHTML:'',value:'',classList:{add(){},remove(){}}});
+  a.emailModal('S','B',null,'cell_card','Barwon Reservoir',{files:[],onSent:()=>{}});
+  assert.equal(typeof r('emailAfterSend'),'function');
+  a.emailModal('S','B',null,'order_created','Barwon Reservoir');
+  assert.equal(r('emailAfterSend'),null,'a later email never fires the card\'s callback');
+});

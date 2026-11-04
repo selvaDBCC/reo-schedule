@@ -448,10 +448,13 @@ function onProjectsChanged(){
   if(modeChanged){redrawForPairsMode();return}
   if(!pairsLive)return;
   refreshEntryForm();refreshProgramViews()}
-// The delivery grid follows the entries / pairs on screen (pairs live), keeping its job and the ticked cells.
-function refreshProgramViews(){if(!pairsLive)return;if($('dpGridWrap')&&dpProject())renderPairGrid()}
+// The delivery grid and an open cell card follow the entries / pairs on screen (pairs live), keeping the grid's job,
+// the ticked cells and everything the card holds.
+function refreshProgramViews(){if(!pairsLive)return;if($('dpGridWrap')&&dpProject())renderPairGrid();if(cellCard)ccRenderSoft()}
 function afterEntriesLoaded(){try{refreshProgramViews()}catch(e){console.warn('[REO] delivery grid refresh failed:',e&&e.message)}}
-function redrawForPairsMode(){renderAdminProj();renderAdminProgram();onProjChange();refreshLaHint();renderDash();if(pairsLive)subscribePairs()}
+function redrawForPairsMode(){
+  if(!pairsLive&&cellCard){cellCard=null;closeOv('cellCardOv')}   // the card is a pairs-live screen
+  renderAdminProj();renderAdminProgram();onProjChange();refreshLaHint();renderDash();if(pairsLive)subscribePairs()}
 // Many pairs rows change in one Master-OPS push: one reload for the burst.
 function reloadProjectsSoon(){clearTimeout(projectsReloadTimer);projectsReloadTimer=setTimeout(()=>{loadProjects().then(onProjectsChanged).catch(e=>console.warn('[REO] projects / pairs refresh failed:',e&&e.message))},250)}
 function subscribePairs(){if(!pairsLive||pairsChannel||!sb)return;pairsChannel=sb.channel('pp').on('postgres_changes',{event:'*',schema:'public',table:'project_pairs'},()=>reloadProjectsSoon()).subscribe()}
@@ -1728,11 +1731,15 @@ function uploadScheduleFile(id){
 // lost connection) comes back as an error; a row this login may not change, or one deleted meanwhile, comes back as
 // "no rows" — not an error. Returns null when it saved, otherwise words a person can act on. History lines are
 // written only after null (they used to be written even when the database had refused the change).
-async function writeEntry(id,patch){
+// b5.14 (the cell card): `guard` = {column: value the person saw} — the update lands only while those still hold, so a
+// change made meanwhile (someone else, another tab) is never written over.
+async function writeEntry(id,patch,guard){
   try{
-    const{data,error}=await sb.from('entries').update(patch).eq('id',id).select('id');
+    let q=sb.from('entries').update(patch).eq('id',id);
+    for(const[k,v]of Object.entries(guard||{}))q=v==null?q.is(k,null):q.eq(k,v);
+    const{data,error}=await q.select('id');
     if(error)return refusalWords(error);
-    if(!data||!data.length)return "the entry wasn't changed — it may have been deleted, or this login can't change it. Refresh and try again.";
+    if(!data||!data.length)return guard?"the entry changed meanwhile (or was deleted) — it now shows as it is; check it and try again.":"the entry wasn't changed — it may have been deleted, or this login can't change it. Refresh and try again.";
     return null}
   catch(e){return refusalWords(e)}}
 async function markDelivered(id){const e=entries.find(x=>x.id===id);if(!e)return;
@@ -1742,10 +1749,12 @@ async function markDelivered(id){const e=entries.find(x=>x.id===id);if(!e)return
     await auditLog({entry_id:id,action:'UPDATE',field_changed:'status',old_value:e.status,new_value:'Delivered'});
     await loadEntries();renderDash()})}
 
-function cancelEntry(id){const e=entries.find(x=>x.id===id);if(!e)return;
-  $('cancelModal').innerHTML=`<h3>Cancel Entry<button class="modal-close" onclick="closeOv('cancelOv')">&times;</button></h3><p style="font-size:13px;color:var(--mid);margin-bottom:14px">Cancel "${esc(e.schedule||e.project)}"?</p><div class="fg"><label>Reason <span class="req">*</span></label><textarea id="cancelR"></textarea></div><div id="cancelErr"></div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn btn-sec btn-sm" onclick="closeOv('cancelOv')">Keep</button><button class="btn btn-err btn-sm" id="cancelBtn" onclick="doCancel(${id})">Cancel Entry</button></div>`;
+// b5.14: fromCard = cancelled from the delivery grid's cell card — the same dialog, reason and comment column; the card
+// is told when it landed (its one email lists the cancellation with the reason) or why it didn't.
+function cancelEntry(id,fromCard){const e=entries.find(x=>x.id===id);if(!e)return;
+  $('cancelModal').innerHTML=`<h3>Cancel Entry<button class="modal-close" onclick="closeOv('cancelOv')">&times;</button></h3><p style="font-size:13px;color:var(--mid);margin-bottom:14px">Cancel "${esc(e.schedule||e.project)}"?</p><div class="fg"><label>Reason <span class="req">*</span></label><textarea id="cancelR"></textarea></div><div id="cancelErr"></div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn btn-sec btn-sm" onclick="closeOv('cancelOv')">Keep</button><button class="btn btn-err btn-sm" id="cancelBtn" onclick="doCancel(${id},${jsArg(!!fromCard)})">Cancel Entry</button></div>`;
   $('cancelOv').classList.add('show')}
-async function doCancel(id){const r=$('cancelR').value.trim();if(!r)return $('cancelErr').innerHTML='<div class="error-msg">Reason required</div>';
+async function doCancel(id,fromCard){const r=$('cancelR').value.trim();if(!r)return $('cancelErr').innerHTML='<div class="error-msg">Reason required</div>';
   const e=entries.find(x=>x.id===id);
   if(!e){$('cancelErr').innerHTML='<div class="error-msg">This entry is no longer in the list — it may have been deleted. Close this and refresh.</div>';return}
   // Record the cancellation reason as a comment chunk in the actor's own column (DBCC vs Supplier),
@@ -1756,8 +1765,10 @@ async function doCancel(id){const r=$('cancelR').value.trim();if(!r)return $('ca
   const btn=$('cancelBtn');if(btn)btn.disabled=true;
   const no=await writeEntry(id,{status:'Cancelled',cancel_reason:r,on_hold:false,[col]:chunksToJson(chunks)});
   if(btn)btn.disabled=false;
-  if(no){$('cancelErr').innerHTML='<div class="error-msg">Not cancelled — '+esc(no)+'</div>';return}
-  await auditLog({entry_id:id,action:'CANCEL',field_changed:'status',old_value:e.status,new_value:'Cancelled: '+r});closeOv('cancelOv');await loadEntries();renderDash()}
+  if(no){$('cancelErr').innerHTML='<div class="error-msg">Not cancelled — '+esc(no)+'</div>';if(fromCard)ccNoteFailure(`Cancelling ${ccLoc({level:e.level,area:e.area,split:e.split_reference})}${e.schedule?' · '+e.schedule:''}`,no);return}
+  await auditLog({entry_id:id,action:'CANCEL',field_changed:'status',old_value:e.status,new_value:'Cancelled: '+r});
+  if(fromCard)ccAfterCancel(e,r);
+  closeOv('cancelOv');await loadEntries();renderDash()}
 
 function reinstateEntry(id){const e=entries.find(x=>x.id===id);if(!e)return;
   confirmDialog('Reinstate Entry?','Reinstate this cancelled entry?','Reinstate','',async()=>{
@@ -2164,7 +2175,11 @@ async function deleteEntry(id){
     closeOv('detailOv');await loadEntries();renderDash()})}
 
 /* ═══ EMAIL DRAFTS ═══ */
-function emailModal(subject,body,entryId,auditContext,projectName){
+// b5.14 — opts (the cell card only; every other caller passes none and nothing changes): files = the reference files to
+// offer (the card puts the ticked ones in the body itself, so it passes []), onSent = told once "Open in Email" opened it.
+let emailAfterSend=null;
+function emailModal(subject,body,entryId,auditContext,projectName,opts){
+  emailAfterSend=opts&&typeof opts.onSent==='function'?opts.onSent:null;
   // Resolve the project so the To field can default to that project's scheduler(s).
   let pname=projectName;
   if(!pname&&entryId){const e=entries.find(x=>x.id===entryId);if(e)pname=e.project;}
@@ -2185,7 +2200,8 @@ function emailModal(subject,body,entryId,auditContext,projectName){
   // Both paths render the same "📎 Reference Documents" checkbox list.
   let filesHtml='';
   let files=[],preTick=true;
-  if(entryId){
+  if(opts&&Array.isArray(opts.files)){files=opts.files;preTick=false}
+  else if(entryId){
     const e=entries.find(x=>x.id===entryId);
     if(e)files=projectFilesFor(e.project,e.level,e.area,{scope:'row'});
   }else if(projectName){
@@ -2287,7 +2303,9 @@ async function sendEmail(id,context){
   let url=`mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(sub)}&body=${encodeURIComponent(body)}`;
   if(cc)url+=`&cc=${encodeURIComponent(cc)}`;
   window.open(url,'_blank');
-  closeOv('emailOv')}
+  closeOv('emailOv');
+  const after=emailAfterSend;emailAfterSend=null;   // b5.14: the cell card hears that its one email was opened
+  if(after)try{after()}catch(e){console.warn('[REO] after-email step failed:',e&&e.message)}}
 
 /* ═══ EXPORT ═══ */
 function exportCSV(){const d=getFiltered();if(!d.length)return alert('No data');
@@ -3146,6 +3164,247 @@ function dpToggleMulti(){dpPick.multi=!dpPick.multi;if(!dpPick.multi)dpPick.tick
 function dpSelectAllGreen(){const proj=dpProject();if(!proj)return;dpPick.multi=true;for(const c of dpModel(proj).cells)if(c.state==='active')dpPick.ticks.add(c.key);renderPairGrid()}
 function dpClearTicks(){dpPick.ticks.clear();renderPairGrid()}
 function dpOpenTicked(){const cells=[...dpPick.ticks].map(k=>{const[level,area]=JSON.parse(k);return{level,area}});if(cells.length)openCellCard(cells)}
+
+/* ═══ THE CELL CARD (b5.14 — pairs live, DBCC only: never for a supplier or crew login) ═══
+   One card for the cells clicked or ticked. A section per cell: its entries — schedule, the orange split reference,
+   status, DBCC requested date, production date, files, comments — with, on each: change the DBCC requested date,
+   attach a schedule / markup, add a comment, cancel (a reason is needed: the dashboard's cancel dialog and comment
+   column). Each of those saves on its own press; a refused one says why where it happened and is listed in the card.
+   Order: new placeholders per green cell (split labels; one DBCC requested date for all, or one each).
+   "Create + email" makes the placeholders, then opens ONE email (the existing email dialog, to the job's schedulers)
+   built from everything saved in the card: new orders with a date, DBCC requested dates changed (old → new),
+   cancellations with their reasons, and the reference files ticked. Anything that failed to save is left out and
+   listed. The card keeps its own job — it never reads the page's project select again, and refuses an empty one.
+   Hold, reinstate and date mismatches stay on the Dashboard. */
+let cellCard=null;
+function openCellCard(cells){
+  if(!pairsLive||!isDbcc())return;
+  const proj=dpProject();if(!proj)return;
+  const m=dpModel(proj),seen=new Set(),list=[];
+  for(const c of cells||[]){const x=m.cell(c.level,c.area);if(x.state==='none'||seen.has(x.key))continue;seen.add(x.key);list.push(x)}
+  if(!list.length)return;
+  const li=new Map(m.levels.map((l,i)=>[l,i])),ai=new Map(m.areas.map((a,i)=>[a,i]));
+  list.sort((x,y)=>(li.get(x.level)-li.get(y.level))||(ai.get(x.area)-ai.get(y.area)));
+  const orders={};for(const x of list)if(x.state==='active'&&!x.count)orders[x.key]=[{label:'',date:''}];   // an empty green cell: one placeholder ready
+  cellCard={project:proj.name,supplier:proj.supplier||'Aus Reo',cells:list.map(x=>({level:x.level,area:x.area,key:x.key})),orders,dateMode:'all',allDate:'',
+    log:{created:[],dates:[],cancels:[]},failed:[],files:new Set(),dateDraft:{},notes:{},open:new Set(list.length<=4?list.map(x=>x.key):[]),msg:'',stale:false};
+  renderCellCard();$('cellCardOv').classList.add('show')}
+function ccModel(){const cc=cellCard,proj=cc&&cc.project?projects.find(p=>p.name===cc.project):null;return proj?dpModel(proj):null}
+function ccLoc(r){return `${r.level||'—'} / ${r.area||'—'}${r.split?' ('+r.split+')':''}`}
+function renderCellCard(){
+  const cc=cellCard,box=$('cellCardModal');if(!cc||!box)return;
+  cc.stale=false;
+  const n=cc.cells.length;
+  box.innerHTML=`<h3><span>${esc(cc.project)} <span class="cc-sub">${n} level / area cell${n===1?'':'s'} · ${esc(cc.supplier)}</span></span><button class="modal-close" onclick="ccClose()">&times;</button></h3><div id="ccCells">${ccCellsHtml()}</div><div id="ccOrder">${ccOrderHtml()}</div><div id="ccSend">${ccSendHtml()}</div>`}
+function ccRefresh(){const box=$('cellCardModal'),s=box?box.scrollTop:0;renderCellCard();if(box)box.scrollTop=s}
+// Entries changed elsewhere (realtime): redraw — but never under someone working in the card; then once they leave it.
+function ccRenderSoft(){
+  const cc=cellCard,box=$('cellCardModal');if(!cc||!box)return;
+  const a=document.activeElement;
+  if(a&&a!==box&&box.contains&&box.contains(a)){
+    if(!cc.stale){cc.stale=true;
+      const later=ev=>{if(box.contains(ev.relatedTarget))return;box.removeEventListener('focusout',later);setTimeout(()=>{if(cellCard&&cellCard.stale)ccRenderSoft()},0)};
+      box.addEventListener('focusout',later)}
+    return}
+  ccRefresh()}
+function ccCellsHtml(){
+  const cc=cellCard,m=ccModel();
+  if(!m)return '<div class="error-msg">This job is no longer in the list — close the card and refresh. Nothing can be saved from it.</div>';
+  return cc.cells.map(c=>{
+    const x=m.cell(c.level,c.area),where=`${esc(c.level)} / ${esc(c.area)}`;
+    const badge=x.state==='active'?'<span class="cc-badge ok">On this job</span>':x.state==='none'?'<span class="cc-badge off">Not on this job in Master-OPS</span>':'<span class="cc-badge warn">No longer on this job in Master-OPS</span>';
+    const warn=x.state==='retired'||x.state==='orphan'?`<div class="warn-msg cc-warn">${where} is no longer on this job in Master-OPS — move these entries to a level / area that is (Move…). Nothing new can be ordered here.</div>`
+      :x.state==='none'?`<div class="warn-msg cc-warn">${where} isn't on this job in Master-OPS any more — nothing can be ordered here.</div>`:'';
+    const es=x.entries.slice().sort(svSort);
+    const rows=es.length?`<div class="cc-scroll"><table class="cc-table"><thead><tr><th>Schedule</th><th>Status</th><th>DBCC requested delivery</th><th>Production delivery</th><th>Files</th><th>Comments</th><th></th></tr></thead><tbody>${es.map(e=>ccEntryRowHtml(e,x.state)).join('')}</tbody></table></div>`:'<p class="cc-none">No entries here yet.</p>';
+    const files=projectFilesFor(cc.project,c.level,c.area,{scope:'row'}).filter(f=>f.scope==='level_area');
+    const fh=files.length?`<div class="cc-files"><span>Reference files for this level / area — tick to put the link in the email:</span>${files.map(ccFileTickHtml).join('')}</div>`:'';
+    return `<details class="cc-cell"${cc.open.has(c.key)?' open':''} data-key="${esc(c.key)}" ontoggle="ccToggleOpen(this)"><summary><span class="cc-where">${where}</span>${badge}<span class="cc-count">${es.length} entr${es.length===1?'y':'ies'}</span></summary>${warn}${rows}${fh}</details>`}).join('')}
+function ccToggleOpen(el){const cc=cellCard;if(!cc||!el)return;const k=el.getAttribute('data-key');if(el.open)cc.open.add(k);else cc.open.delete(k)}
+function ccFileTickHtml(f){return `<label class="cc-file"><input type="checkbox" onchange="ccTickFile(${f.id},this.checked)"${cellCard&&cellCard.files.has(f.id)?' checked':''}> <a ${fileLinkAttrs(f.file_url)}>${esc(f.label)}</a></label>`}
+function ccEntryRowHtml(e,state){
+  const cc=cellCard,done=e.status==='Cancelled',mm=hasMismatch(e);
+  let mp=[];try{mp=e.markup_plans?JSON.parse(e.markup_plans)||[]:[]}catch(_){mp=[]}
+  const own=e.our_delivery_date||'',draft=Object.prototype.hasOwnProperty.call(cc.dateDraft,e.id)?cc.dateDraft[e.id]:own;
+  const canDate=!done&&e.status!=='Delivered';
+  const sched=`<span class="cc-sched">${e.schedule?esc(e.schedule):'—'}</span>${e.split_reference?` <span class="cc-split">(${esc(e.split_reference)})</span>`:''}`;
+  const date=canDate?`<div class="cc-daterow"><input type="date" class="cc-date" id="ccDate_${e.id}" value="${esc(draft)}" oninput="ccDateDraft(${e.id},this.value)"><button class="action-btn cc-save" id="ccDateBtn_${e.id}" onclick="ccSaveDate(${e.id})"${draft===own?' disabled':''}>Save date</button></div>`:`<span>${fmtDate(own)||'—'}</span>`;
+  const note=cc.notes[e.id]?`<div class="cc-msg">${cc.notes[e.id]}</div>`:'';
+  const prod=`${fmtDate(e.supplier_delivery_date)||'—'}${mm?' <span class="mismatch-icon" title="The two dates differ — handled on the Dashboard">⚠️</span>':''}`;
+  const sfile=e.file_url?`<a class="att-link" ${fileLinkAttrs(e.file_url)}>📄 ${esc((e.file_name||'Schedule').slice(0,18))}</a>`:(done?'':`<button class="action-btn" onclick="uploadScheduleFile(${e.id})" title="Attach the schedule">+ Schedule</button>`);
+  const mk=(mp.length?`<button class="att-link markup-link" onclick="viewMarkups(${e.id})" title="Markup plans">📐 ${mp.length}</button>`:'')+(done?'':`<button class="action-btn" onclick="uploadMarkup(${e.id})" title="Attach a markup plan" style="color:var(--info)">+📐</button>`);
+  const cmts=parseChunks(e.dbcc_comment),scmts=parseChunks(e.aus_reo_comment);
+  const cm=`<div class="cc-cmt" title="${esc(chunksToPlain(cmts))}">DBCC: ${chunksToCell(cmts)}</div><div class="cc-cmt" title="${esc(chunksToPlain(scmts))}">${esc(projectSupplier(e.project))}: ${chunksToCell(scmts)}</div><button class="action-btn" onclick="editChunkComment(${e.id},'dbcc')">+ Comment</button>`;
+  const act=(done?`<span class="cc-reason">${esc(e.cancel_reason?'Cancelled: '+e.cancel_reason:'Cancelled')}</span>`:e.status!=='Delivered'?`<button class="action-btn cancel" onclick="cancelEntry(${e.id},true)" title="Cancel this order — a reason is needed">✗ Cancel</button>`:'')
+    +(state!=='active'?` <button class="action-btn" onclick="openEditEntry(${e.id})" title="Move it to a level / area that is on this job">Move…</button>`:'');
+  return `<tr class="${done?'cc-done':''}"><td>${sched}</td><td>${getStatusPill(e.status,e.entry_type,e.on_hold,isUnplaced(e))}</td><td>${date}${note}</td><td>${prod}</td><td>${sfile} ${mk}</td><td>${cm}</td><td>${act}</td></tr>`}
+function ccOrderHtml(){
+  const cc=cellCard,m=ccModel();if(!m)return '';
+  const act=cc.cells.map(c=>m.cell(c.level,c.area)).filter(x=>x.state==='active');
+  if(!act.length)return '<div class="cc-order"><h4>Order</h4><p class="cc-none">Nothing can be ordered here — no longer on this job in Master-OPS.</p></div>';
+  let h=`<div class="cc-order"><h4>Order — new placeholders</h4><div class="cc-datemode"><label><input type="radio" name="ccDateMode"${cc.dateMode==='all'?' checked':''} onchange="ccSetDateMode('all')"> One DBCC requested delivery date for all:</label><input type="date" id="ccAllDate" value="${esc(cc.allDate)}" oninput="ccSetAllDate(this.value)"${cc.dateMode==='all'?'':' disabled'}><label><input type="radio" name="ccDateMode"${cc.dateMode==='each'?' checked':''} onchange="ccSetDateMode('each')"> A date for each placeholder</label></div>`;
+  for(const x of act){
+    const list=cc.orders[x.key]||[];
+    h+=`<div class="sel-item"><div class="sel-item-header"><div class="sel-item-title">${esc(x.level)} / ${esc(x.area)}${x.count?` <span style="font-size:11px;color:var(--accent-dk);font-weight:600">(adding to ${x.count} existing)</span>`:''}</div><div class="sel-item-controls"><button onclick="ccAddOrder(${jsArg(x.key)})" title="Add a placeholder">+</button></div></div>`;
+    list.forEach((sp,i)=>{
+      const ph=x.count>0?'Part '+(x.count+i+1)+' (recommended)':(list.length>1?'Part '+(i+1):'No split');
+      const d=cc.dateMode==='each'?`<input type="date" value="${esc(sp.date)}" oninput="ccSetOrder(${jsArg(x.key)},${i},'date',this.value)">`:`<span class="cc-alldate">${cc.allDate?fmtDate(cc.allDate):'no date'}</span>`;
+      h+=`<div class="split-row"><input type="text" value="${esc(sp.label)}" placeholder="${esc(ph)}" oninput="ccSetOrder(${jsArg(x.key)},${i},'label',this.value)">${d}<button class="remove-split" onclick="ccRemoveOrder(${jsArg(x.key)},${i})" title="Remove this placeholder">×</button></div>`});
+    if(!list.length)h+='<div class="cc-none">No new placeholder — press + to order one here.</div>';
+    h+='</div>'}
+  return h+'</div>'}
+function ccSendHtml(){
+  const cc=cellCard,m=ccModel();
+  const plan=m?ccPlanRows(cc.cells.map(c=>c.key),cc.orders,k=>{const[l,a]=JSON.parse(k);return m.cell(l,a)},cc.dateMode,cc.allDate):{groups:[],refused:[]};
+  const rows=plan.groups.flatMap(g=>g.rows),dated=rows.filter(r=>r.our_delivery_date).length;
+  const L=cellCardLines(cc.log),saved=L.created.length+L.dates.length+L.cancels.length;
+  const to=defaultRecipientsFor(cc.project);
+  const pf=projectFilesFor(cc.project,null,null,{scope:'project'});
+  const li=a=>a.map(s=>`<li>${esc(s)}</li>`).join('');
+  let h=`<div class="cc-send"><h4>One email to ${esc(cc.supplier)}</h4><p class="cc-to">To the job's scheduler${to.includes(',')?'s':''}: <b>${to?esc(to):'— none set (Admin → Projects → Schedulers)'}</b></p>`;
+  if(pf.length)h+=`<div class="cc-files"><span>Project-wide reference files — tick to put the link in the email:</span>${pf.map(ccFileTickHtml).join('')}</div>`;
+  h+='<ul class="cc-sum">';
+  h+=rows.length?`<li><b>${rows.length}</b> new placeholder${rows.length===1?'':'s'} to create — ${dated} with a DBCC requested date go in the email${rows.length-dated?`, ${rows.length-dated} without one don't (Not Ordered)`:''}</li>`:'<li>No new placeholders to create</li>';
+  if(saved)h+=`<li>Saved in this card — goes in the email:<ul>${li(L.created.map(s=>'New: '+s))}${li(L.dates.map(s=>'Date: '+s))}${li(L.cancels.map(s=>'Cancelled: '+s))}</ul></li>`;
+  const nf=ccTickedFiles().length;if(nf)h+=`<li><b>${nf}</b> reference file${nf===1?'':'s'} ticked</li>`;
+  h+='</ul>';
+  if(cc.failed.length)h+=`<div class="error-msg cc-failed"><b>Not saved — left out of the email:</b><ul>${cc.failed.map(f=>`<li>${esc(f.what)} — ${esc(f.words)}</li>`).join('')}</ul></div>`;
+  if(cc.msg)h+=cc.msg;
+  const label=rows.length?`Create ${rows.length} + email`:'Email the changes',can=rows.length>0||saved>0;
+  h+=`<p class="cc-note">Hold, reinstate and date mismatches stay on the Dashboard.</p><div class="cc-actions"><button class="btn btn-sec btn-sm" onclick="ccClose()" style="width:auto;margin:0">Close</button><button class="btn btn-sm" id="ccSendBtn" onclick="ccCreateAndEmail()" style="width:auto;margin:0"${can?'':' disabled'}>${esc(label)}</button></div></div>`;
+  return h}
+function ccRefreshOrder(){const o=$('ccOrder');if(o)o.innerHTML=ccOrderHtml();ccRefreshSend()}
+function ccRefreshSend(){const s=$('ccSend');if(s)s.innerHTML=ccSendHtml()}
+function ccAddOrder(key){const cc=cellCard;if(!cc)return;const list=cc.orders[key]||(cc.orders[key]=[]),n=list.length;
+  if(n===1&&!list[0].label)list[0].label='Part 1';   // as the b5.13 grid: a second one turns the pair into Part 1, Part 2
+  list.push({label:n?'Part '+(n+1):'',date:cc.dateMode==='each'?cc.allDate:''});ccRefreshOrder()}
+function ccRemoveOrder(key,i){const cc=cellCard;if(!cc||!cc.orders[key])return;cc.orders[key].splice(i,1);if(!cc.orders[key].length)delete cc.orders[key];ccRefreshOrder()}
+function ccSetOrder(key,i,field,v){const s=cellCard&&cellCard.orders[key]&&cellCard.orders[key][i];if(s&&(field==='label'||field==='date')){s[field]=v;ccRefreshSend()}}
+function ccSetDateMode(mode){const cc=cellCard;if(!cc||(mode!=='all'&&mode!=='each'))return;
+  if(mode==='each'&&cc.dateMode!=='each')for(const l of Object.values(cc.orders))for(const s of l)if(!s.date)s.date=cc.allDate;
+  cc.dateMode=mode;ccRefreshOrder()}
+function ccSetAllDate(v){const cc=cellCard;if(!cc)return;cc.allDate=v;document.querySelectorAll('#ccOrder .cc-alldate').forEach(x=>{x.textContent=v?fmtDate(v):'no date'});ccRefreshSend()}
+function ccTickFile(id,on){const cc=cellCard;if(!cc)return;if(on)cc.files.add(id);else cc.files.delete(id);ccRefreshSend()}
+function ccTickedFiles(){const cc=cellCard;if(!cc)return[];return projectFiles.filter(f=>cc.files.has(f.id)&&f.project_name===cc.project).map(f=>({id:f.id,label:f.label,url:f.file_url}))}
+function ccNoteFailure(what,words){const cc=cellCard;if(!cc)return;cc.failed.push({what,words});ccRefreshSend()}
+// The rows the Order section will insert (pure): per green cell, one row per placeholder — the b5.13 grid's rule for
+// split labels (one placeholder: its label or none; several: their labels, else Part 1, Part 2 …) and the date mode.
+// A cell that is no longer an active pair is refused, never moved somewhere else.
+function ccPlanRows(keys,orders,cellOf,dateMode,allDate){
+  const groups=[],refused=[];
+  for(const key of keys){
+    const list=orders[key];if(!list||!list.length)continue;
+    const x=cellOf(key),[lv,ar]=JSON.parse(key);
+    if(!x||x.state!=='active'){refused.push({key,level:lv,area:ar,n:list.length,words:`${lv} / ${ar} is no longer on this job in Master-OPS — nothing was created there.`});continue}
+    groups.push({key,level:x.level,area:x.area,rows:list.map((sp,i)=>{
+      const date=(dateMode==='all'?allDate:sp.date)||null,label=String(sp.label||'').trim();
+      return{level:x.level,area:x.area,schedule:null,status:date?'Ordered':'Not Ordered',entry_type:'scheduled',our_delivery_date:date,
+        split_reference:list.length>1?(label||'Part '+(i+1)):(label||null)}})})}
+  return{groups,refused}}
+// What the card has saved and not emailed yet (pure, on the card's log). A requested-date change on a placeholder this
+// card made (not emailed yet) just moves its date; one made twice keeps its first "old"; a change back to where it
+// started drops out. A cancellation replaces any date change of the same entry, and cancelling a placeholder this card
+// made before its email went means the supplier never hears of it.
+function ccLogDate(log,e,oldD,newD){
+  const c=log.created.find(r=>r.id===e.id);if(c){c.date=newD||null;return}
+  const i=log.dates.findIndex(r=>r.id===e.id);
+  if(i>=0){const r=log.dates[i];r.new=newD||'';if((r.old||'')===r.new)log.dates.splice(i,1);return}
+  log.dates.push({id:e.id,level:e.level,area:e.area,split:e.split_reference||null,schedule:e.schedule||null,old:oldD||'',new:newD||''})}
+function ccLogCancel(log,e,reason){
+  const i=log.created.findIndex(r=>r.id===e.id);if(i>=0){log.created.splice(i,1);return}
+  log.dates=log.dates.filter(r=>r.id!==e.id);
+  log.cancels.push({id:e.id,level:e.level,area:e.area,split:e.split_reference||null,schedule:e.schedule||null,reason})}
+function ccAfterCancel(e,reason){const cc=cellCard;if(!cc||e.project!==cc.project)return;ccLogCancel(cc.log,e,reason)}
+// The email's lines (pure) — the same lines the card shows under "Saved in this card".
+function cellCardLines(log){
+  const sch=r=>r.schedule?' · '+r.schedule:'';
+  return{created:(log.created||[]).filter(r=>r.date).map(r=>`${ccLoc(r)} — ${fmtDate(r.date)}`),
+    dates:(log.dates||[]).map(r=>`${ccLoc(r)}${sch(r)} — ${fmtDate(r.old)||'not set'} → ${fmtDate(r.new)||'not set'}`),
+    cancels:(log.cancels||[]).map(r=>`${ccLoc(r)}${sch(r)} — reason: ${r.reason}`)}}
+// The card's one email (pure): to the job's supplier, from everything saved in the card; the ticked reference files as
+// links (only links on the REO file store). null when there is nothing to tell the supplier.
+function cellCardEmail({project,supplier,log,files,sender}){
+  const L=cellCardLines(log);
+  if(!L.created.length&&!L.dates.length&&!L.cancels.length)return null;
+  const parts=[],bul=a=>a.map(s=>'• '+s).join('\n');
+  if(L.created.length)parts.push('NEW ORDERS — DBCC requested delivery date\n'+bul(L.created));
+  if(L.dates.length)parts.push('DBCC REQUESTED DELIVERY DATE CHANGED\n'+bul(L.dates));
+  if(L.cancels.length)parts.push('CANCELLED\n'+bul(L.cancels));
+  const links=(files||[]).map(f=>({label:f.label,url:safeUrl(f.url)})).filter(f=>f.url);
+  const count=[L.created.length&&`${L.created.length} new`,L.dates.length&&`${L.dates.length} date change${L.dates.length===1?'':'s'}`,L.cancels.length&&`${L.cancels.length} cancelled`].filter(Boolean).join(', ');
+  let body=`Hi ${supplier||'team'},\n\nThe following changes have been made to our REO orders for ${project}:\n\n${parts.join('\n\n')}`;
+  if(links.length)body+='\n\n─── Reference documents ───\n'+links.map(f=>`• ${f.label}: ${f.url}`).join('\n');
+  body+=`\n\nPlease confirm receipt${L.created.length||L.dates.length?' and your production delivery dates':''}.${EMAIL_FOOTER_TEXT}\n\nRegards,\n${sender}\nDebono Bros Concreting`;
+  return{subject:`REO orders — ${project} (${count})`,body}}
+function ccDateDraft(id,v){const cc=cellCard;if(!cc)return;cc.dateDraft[id]=v;const e=entries.find(x=>x.id===id),b=$('ccDateBtn_'+id);if(b)b.disabled=!e||v===(e.our_delivery_date||'')}
+// A DBCC requested date changed in the card: today's rules (Not Ordered → Ordered; a differing production date flags the
+// mismatch again), saved only while the date and status are still what the card showed; history after the write.
+async function ccSaveDate(id){
+  const cc=cellCard;if(!cc||!isDbcc())return;
+  const e=entries.find(x=>x.id===id);
+  if(!e||e.project!==cc.project){cc.notes[id]='<span class="cc-err">This entry is no longer on this job — refresh.</span>';ccRefresh();return}
+  const inp=$('ccDate_'+id),v=inp?inp.value:(cc.dateDraft[id]??''),old=e.our_delivery_date||'';
+  if(v===old){delete cc.dateDraft[id];ccRefresh();return}
+  const{patch}=editPatch(e,{our_delivery_date:old},{our_delivery_date:v},false);
+  const btn=$('ccDateBtn_'+id);if(btn){btn.disabled=true;btn.textContent='Saving…'}
+  const no=await writeEntry(id,patch,{our_delivery_date:e.our_delivery_date??null,status:e.status??null});
+  if(no){
+    cc.notes[id]=`<span class="cc-err">Not saved — ${esc(no)}</span>`;
+    cc.failed.push({what:`DBCC requested date for ${ccLoc({level:e.level,area:e.area,split:e.split_reference})}${e.schedule?' · '+e.schedule:''}`,words:no});
+    await loadEntries();renderDash();ccRefresh();return}
+  await auditLog({entry_id:id,action:'UPDATE',field_changed:'our_delivery_date',old_value:old,new_value:v});
+  if(patch.status)await auditLog({entry_id:id,action:'UPDATE',field_changed:'status',old_value:e.status,new_value:patch.status});
+  ccLogDate(cc.log,e,old,v);
+  delete cc.dateDraft[id];cc.notes[id]='<span class="cc-ok">Saved — it goes in the email.</span>';
+  await loadEntries();renderDash();ccRefresh()}
+async function ccCreateAndEmail(){
+  const cc=cellCard;if(!cc||!isDbcc())return;
+  if(!cc.project){cc.msg='<div class="error-msg">This card has no job — close it and open the cell again. Nothing was saved.</div>';ccRefresh();return}
+  const proj=projects.find(p=>p.name===cc.project);
+  if(!proj){cc.msg='<div class="error-msg">This job is no longer in the list — close the card and refresh. Nothing was saved.</div>';ccRefresh();return}
+  const m=dpModel(proj);
+  const plan=ccPlanRows(cc.cells.map(c=>c.key),cc.orders,k=>{const[l,a]=JSON.parse(k);return m.cell(l,a)},cc.dateMode,cc.allDate);
+  const btn=$('ccSendBtn');if(btn){btn.disabled=true;btn.textContent='Saving…'}
+  const bid='b_'+Date.now(),made=[],failed=plan.refused.slice();
+  for(const g of plan.groups){   // one insert per cell: a refused cell never takes the others with it
+    const rows=g.rows.map(r=>({...r,project:cc.project,order_batch_id:bid}));
+    let no=null,data=null;
+    try{const res=await sb.from('entries').insert(rows).select('id,level,area,split_reference,our_delivery_date,status');
+      if(res.error)no=refusalWords(res.error);
+      else if(!res.data||res.data.length!==rows.length)no="the database didn't confirm them — refresh and check before trying again.";
+      else data=res.data}
+    catch(err){no=refusalWords(err)}
+    if(no){failed.push({key:g.key,level:g.level,area:g.area,n:rows.length,words:no});continue}
+    made.push(...data);delete cc.orders[g.key]}
+  for(const f of plan.refused)delete cc.orders[f.key];
+  if(made.length)await auditLog({action:'BULK_CREATE',new_value:`${made.length} placeholders for ${cc.project}`});
+  for(const r of made)cc.log.created.push({id:r.id,level:r.level,area:r.area,split:r.split_reference||null,date:r.our_delivery_date||null});
+  for(const f of failed)cc.failed.push({what:`${f.n} new placeholder${f.n===1?'':'s'} at ${f.level} / ${f.area}`,words:f.words});
+  const ticked=ccTickedFiles(),unsafe=ticked.filter(f=>!safeUrl(f.url)).length;
+  const mail=cellCardEmail({project:cc.project,supplier:cc.supplier,log:cc.log,files:ticked,sender:userName});
+  const undated=made.filter(r=>!r.our_delivery_date).length,said=[];
+  if(made.length)said.push(`Created ${made.length} placeholder${made.length===1?'':'s'}${undated?` (${undated} with no DBCC requested date — Not Ordered, not in the email)`:''}.`);
+  if(failed.length)said.push(`${failed.length===1?'One cell was':failed.length+' cells were'} not saved — left out of the email (listed above).`);
+  if(unsafe)said.push(`${unsafe} reference file link${unsafe===1?" isn't":"s aren't"} on the REO file store — left out of the email.`);
+  if(!mail)said.push('Nothing to email — nothing new with a date, no date changes, no cancellations.');
+  cc.msg=said.length?`<div class="${failed.length?'warn-msg':'info-msg'}">${esc(said.join(' '))}</div>`:'';
+  await loadEntries();renderDash();ccRefresh();
+  if(mail)emailModal(mail.subject,mail.body,null,'cell_card',cc.project,{files:[],onSent:ccAfterEmail})}
+// "Open in Email" pressed: what it carried is done. A placeholder made here with no date stays listed — when it gets a
+// date in this card it goes in the next email as a new order.
+function ccAfterEmail(){const cc=cellCard;if(!cc)return;
+  const L=cellCardLines(cc.log),n=L.created.length+L.dates.length+L.cancels.length;
+  cc.log={created:cc.log.created.filter(r=>!r.date),dates:[],cancels:[]};cc.files=new Set();
+  cc.msg=`<div class="success-msg">The email (${n} item${n===1?'':'s'}) is open in your email app — check it there and press Send.</div>`;ccRefresh()}
+function ccClose(){
+  const cc=cellCard;if(!cc){closeOv('cellCardOv');return}
+  const L=cellCardLines(cc.log),n=L.created.length+L.dates.length+L.cancels.length;
+  const typed=Object.values(cc.orders).flat().filter(s=>(s.label||'').trim()||s.date).length+(cc.allDate&&Object.keys(cc.orders).length?1:0);
+  if(!n&&!typed)return ccCloseNow();
+  const why=[n?`${n} change${n===1?'':'s'} saved in this card ${n===1?"hasn't":"haven't"} been emailed — ${n===1?'it stays':'they stay'} saved, only the email is left out`:'',
+    typed?'the new placeholders you filled in are not created yet and will be dropped':''].filter(Boolean).join('; ');
+  confirmDialog('Close the card?',esc(why.charAt(0).toUpperCase()+why.slice(1))+'.','Close the card','',ccCloseNow)}
+function ccCloseNow(){cellCard=null;closeOv('cellCardOv');renderPairGrid()}
 
 /* ═══ ADMIN: STEEL FIXERS ═══ */
 let sfSort={col:'our_delivery_date',asc:true};
