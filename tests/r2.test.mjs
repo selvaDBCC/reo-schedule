@@ -659,6 +659,9 @@ function adminApp({live=true,answer}={}){
   const sb=fakeSb(answer||(()=>({data:null,error:null})));a.__sb=sb;r('sb=__sb');
   return{a,r,els,sb};
 }
+// What the app says about a linked job — and REO 0012's refusal says the same: Master-OPS sets its levels and areas, not its
+// name or supplier (nothing there can change those).
+const LINKED_WORDS="A linked job's levels and areas come from Master-OPS (Project Setup). Its name and supplier are fixed once it is linked. Changing either is a planned database step: ask Selva.";
 test('project editor (pairs live): a linked job is read-only — its lists come from Master-OPS; a new job has no Levels / Areas boxes', ()=>{
   const{a,els}=adminApp();
   a.renderAdminProj();
@@ -667,17 +670,19 @@ test('project editor (pairs live): a linked job is read-only — its lists come 
   a.editProj(6);
   assert.equal(els.newProjName.disabled,true);assert.equal(els.newProjSupplier.disabled,true);
   assert.equal(els.saveProjBtn.style.display,'none');assert.equal(els.cancelPE.textContent,'Close');
-  assert.match(els.projPairsBox.innerHTML,/Linked to Master-OPS \(BAR\)\.<\/b> Its name, supplier and levels and areas come from Master-OPS — change them in Project Setup there\./);
+  assert.match(els.projPairsBox.innerHTML,/Linked to Master-OPS \(BAR\)\.<\/b> A linked job's levels and areas come from Master-OPS \(Project Setup\)\. Its name and supplier are fixed once it is linked\. Changing either is a planned database step: ask Selva\./);
+  assert.equal(els.newProjName.title,LINKED_WORDS);assert.equal(els.newProjSupplier.title,LINKED_WORDS,'the locked name and supplier say why when pointed at');
   assert.match(els.projPairsBox.innerHTML,/<li><b>GRD<\/b> — SLAB · COLUMNS<\/li>/);
   assert.match(els.projPairsBox.innerHTML,/No longer on this job in Master-OPS: L1 \/ WALLS/);
   // an unlinked job with entries filed under its name: the name stays, the supplier can change
   a.editProj(7);
-  assert.equal(els.newProjName.disabled,true);assert.equal(els.newProjSupplier.disabled,false);assert.equal(els.saveProjBtn.style.display,'');
+  assert.equal(els.newProjName.disabled,true);assert.equal(els.newProjSupplier.disabled,false);assert.equal(els.saveProjBtn.style.display,'');assert.equal(els.newProjSupplier.title,'');
   assert.match(els.projPairsBox.innerHTML,/Not linked to Master-OPS\.<\/b> Its level \/ area pair is REO-only \(set by a migration\):/);
   assert.match(els.projPairsBox.innerHTML,/The name stays as it is: entries and pairs are filed under it\./);
   a.editProj(8);
   assert.equal(els.newProjName.disabled,false);assert.match(els.projPairsBox.innerHTML,/Not linked to Master-OPS yet — nothing can be ordered\./);
   a.cancelPE();assert.equal(els.newProjName.disabled,false);assert.equal(els.aFormTitle.textContent,'Add New Project');
+  assert.equal(els.newProjSupplier.value,'','back on "Choose supplier…"');assert.equal(els.newProjSupplier.disabled,false);
 });
 
 test('project editor (pairs live): a new job is a name and a supplier; a linked job is never sent; the list shows each job\'s link', async()=>{
@@ -687,7 +692,7 @@ test('project editor (pairs live): a new job is a name and a supplier; a linked 
   assert.deepEqual(t.sb.calls.map(c=>[c.table,c.op]),[['projects','insert'],['audit_log','insert']]);
   assert.deepEqual({...t.sb.calls[0].payload},{name:'Stead Park',supplier:'ARC',levels:'',areas:''});
   t=adminApp();t.a.renderAdminProj();t.a.editProj(6);el('saveProjBtn').style.display='';await t.a.saveProject();
-  assert.equal(t.sb.calls.length,0);assert.match(el('projErr').innerHTML,/This job is linked to Master-OPS — its name, supplier and levels \/ areas come from Master-OPS and can&#39;t be changed here\./);
+  assert.equal(t.sb.calls.length,0);assert.equal(el('projErr').innerHTML,'<div class="error-msg">A linked job&#39;s levels and areas come from Master-OPS (Project Setup). Its name and supplier are fixed once it is linked. Changing either is a planned database step: ask Selva.</div>');
   t=adminApp();t.a.renderAdminProj();t.a.editProj(7);el('newProjSupplier').value='ARC';await t.a.saveProject();
   assert.deepEqual({...t.sb.calls[0].payload},{supplier:'ARC'},'only what changed; the filed name is never sent');
   assert.equal(t.sb.calls[0].op,'update');
@@ -697,6 +702,37 @@ test('project editor (pairs live): a new job is a name and a supplier; a linked 
   assert.match(list,/<b>5<\/b> level \/ area pairs · 1 no longer on the job/);
   assert.ok(!/deleteProj\(6\)|deleteProj\(7\)/.test(list),'a job with pairs or a link has no Delete');assert.match(list,/deleteProj\(8\)/);
   assert.match(list,/onclick="editProj\(6\)">View</);
+});
+
+test('adding a job: the supplier is chosen on purpose — the list starts on "Choose supplier…" and a blank choice is refused, pairs live or not', async()=>{
+  for(const live of [true,false]){
+    const t=adminApp({live}),el=id=>t.a.document.getElementById(id),tag=`pairs ${live?'on':'off'}`;
+    t.a.renderAdminProj();
+    const sel=t.els.adminProj.innerHTML.match(/<select id="newProjSupplier">.*?<\/select>/);
+    assert.ok(sel,tag);assert.deepEqual(opts(sel[0]),['Choose supplier…','Aus Reo','ARC'],`${tag}: nothing chosen until someone chooses`);
+    assert.match(sel[0],/^<select id="newProjSupplier"><option value="">Choose supplier…<\/option>/);
+    el('newProjName').value='Stead Park';el('newProjSupplier').value='';
+    await t.a.saveProject();
+    assert.equal(t.sb.calls.length,0,`${tag}: nothing sent`);
+    assert.equal(el('projErr').innerHTML,'<div class="error-msg">Choose the supplier — it decides which supplier can see this job.</div>',tag);
+    el('newProjSupplier').value='ARC';await t.a.saveProject();
+    assert.equal(t.sb.calls[0].op,'insert',tag);assert.equal(t.sb.calls[0].payload.supplier,'ARC',tag);
+    assert.equal(el('newProjSupplier').value,'',`${tag}: after an add the list is back on "Choose supplier…"`);
+  }
+  // an unlinked job's supplier can still change — never to blank
+  const t=adminApp(),el=id=>t.a.document.getElementById(id);
+  t.a.renderAdminProj();t.a.editProj(7);assert.equal(el('newProjSupplier').value,'Aus Reo','an existing job shows its own supplier');
+  el('newProjSupplier').value='';await t.a.saveProject();
+  assert.equal(t.sb.calls.length,0);assert.match(el('projErr').innerHTML,/Choose the supplier — it decides which supplier can see this job\./);
+  // the new-job box says why it matters
+  t.a.cancelPE();assert.match(el('projPairsBox').innerHTML,/Choose the supplier with care: it decides which supplier can see the job, and it is fixed once the job is linked\./);
+});
+
+test('the app never says a linked job\'s name or supplier comes from Master-OPS — its words are the ones REO 0012 refuses with', ()=>{
+  const a=loadApp();
+  assert.equal(vm.runInContext('LINKED_JOB_WORDS',a),LINKED_WORDS,'the same words as 0012\'s refusal: change both together');
+  for(const re of [/Comes from Master-OPS/,/name, supplier and levels/,/change them in Project Setup there/,/supplier and levels \/ areas come from Master-OPS/])
+    assert.ok(!re.test(SRC),`app.js still says ${re}`);
 });
 
 test('deleting a job writes its history only after the database removed it, and says why not', async()=>{

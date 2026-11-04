@@ -2625,9 +2625,16 @@ function doUnlock(company){
 }
 
 /* ═══ ADMIN: PROJECTS ═══ */
+// b5.14 — a job's supplier decides which supplier login can see it (its entries, files and pairs), and once the job is
+// linked to Master-OPS the REO database (0012) refuses any change to its name or supplier from a login here. So the
+// supplier is an explicit choice when a job is added (it used to start on Aus Reo), and the words say what is true:
+// Master-OPS sets a linked job's levels and areas, not its name or supplier. 0012's refusal says the same words.
+const LINKED_JOB_WORDS="A linked job's levels and areas come from Master-OPS (Project Setup). Its name and supplier are fixed once it is linked. Changing either is a planned database step: ask Selva.";
+const SUPPLIER_NEEDED='Choose the supplier — it decides which supplier can see this job.';
+const SUPPLIER_SELECT_HTML='<select id="newProjSupplier"><option value="">Choose supplier…</option><option value="Aus Reo">Aus Reo</option><option value="ARC">ARC</option></select>';
 function renderAdminProj(){
   if(pairsLive)return renderAdminProjPairs();   // b5.14 (below)
-  $('adminProj').innerHTML=`<div class="card" style="margin-bottom:18px"><h3 style="font-size:15px;font-weight:700;margin-bottom:14px;color:var(--gray-dk)" id="aFormTitle">Add New Project</h3><div class="row2"><div class="fg"><label>Project Name</label><input type="text" id="newProjName" placeholder="e.g. New School Stage 2"></div><div class="fg"><label>Supplier</label><select id="newProjSupplier"><option value="Aus Reo">Aus Reo</option><option value="ARC">ARC</option></select></div></div><div class="row2"><div class="fg"><label>Levels <span style="font-weight:400;color:var(--muted);font-size:11px">(one per line)</span></label><textarea id="newLevels" rows="6" style="font-family:'JetBrains Mono',monospace;font-size:12px"></textarea></div><div class="fg"><label>Areas <span style="font-weight:400;color:var(--muted);font-size:11px">(one per line)</span></label><textarea id="newAreas" rows="6" style="font-family:'JetBrains Mono',monospace;font-size:12px"></textarea></div></div><div style="display:flex;gap:10px;margin-top:14px"><button class="btn btn-sm" onclick="saveProject()" id="saveProjBtn" style="width:auto">Add Project</button><button class="btn btn-sec btn-sm" onclick="cancelPE()" id="cancelPE" style="display:none;width:auto">Cancel</button></div><div id="projErr"></div></div><div class="card"><h3 style="font-size:15px;font-weight:700;margin-bottom:12px;color:var(--gray-dk)">Projects (<span id="projCount">${projects.length}</span>)</h3><div class="proj-list" id="projList"></div></div>`;renderProjList()}
+  $('adminProj').innerHTML=`<div class="card" style="margin-bottom:18px"><h3 style="font-size:15px;font-weight:700;margin-bottom:14px;color:var(--gray-dk)" id="aFormTitle">Add New Project</h3><div class="row2"><div class="fg"><label>Project Name</label><input type="text" id="newProjName" placeholder="e.g. New School Stage 2"></div><div class="fg"><label>Supplier</label>${SUPPLIER_SELECT_HTML}</div></div><div class="row2"><div class="fg"><label>Levels <span style="font-weight:400;color:var(--muted);font-size:11px">(one per line)</span></label><textarea id="newLevels" rows="6" style="font-family:'JetBrains Mono',monospace;font-size:12px"></textarea></div><div class="fg"><label>Areas <span style="font-weight:400;color:var(--muted);font-size:11px">(one per line)</span></label><textarea id="newAreas" rows="6" style="font-family:'JetBrains Mono',monospace;font-size:12px"></textarea></div></div><div style="display:flex;gap:10px;margin-top:14px"><button class="btn btn-sm" onclick="saveProject()" id="saveProjBtn" style="width:auto">Add Project</button><button class="btn btn-sec btn-sm" onclick="cancelPE()" id="cancelPE" style="display:none;width:auto">Cancel</button></div><div id="projErr"></div></div><div class="card"><h3 style="font-size:15px;font-weight:700;margin-bottom:12px;color:var(--gray-dk)">Projects (<span id="projCount">${projects.length}</span>)</h3><div class="proj-list" id="projList"></div></div>`;renderProjList()}
 
 function renderProjList(){$('projCount').textContent=projects.length;
   $('projList').innerHTML=projects.length?projects.map(p=>{
@@ -2664,12 +2671,13 @@ async function saveSchedulers(projectId){
 }
 
 function editProj(id){if(pairsLive)return editProjPairs(id);const p=projects.find(pr=>pr.id===id);if(!p)return;editingId=id;$('aFormTitle').textContent='Edit Project';$('newProjName').value=p.name;if($('newProjSupplier'))$('newProjSupplier').value=p.supplier||'Aus Reo';$('newLevels').value=p.levels.join('\n');$('newAreas').value=p.areas.join('\n');$('saveProjBtn').textContent='Save';$('cancelPE').style.display='inline-block'}
-function cancelPE(){if(pairsLive)return cancelPEPairs();editingId=null;$('aFormTitle').textContent='Add New Project';$('newProjName').value='';if($('newProjSupplier'))$('newProjSupplier').value='Aus Reo';$('newLevels').value='';$('newAreas').value='';$('saveProjBtn').textContent='Add Project';$('cancelPE').style.display='none';$('projErr').innerHTML=''}
+function cancelPE(){if(pairsLive)return cancelPEPairs();editingId=null;$('aFormTitle').textContent='Add New Project';$('newProjName').value='';if($('newProjSupplier'))$('newProjSupplier').value='';$('newLevels').value='';$('newAreas').value='';$('saveProjBtn').textContent='Add Project';$('cancelPE').style.display='none';$('projErr').innerHTML=''}
 
 async function saveProject(){if(pairsLive)return saveProjectPairs();const err=$('projErr');err.innerHTML='';
   const name=$('newProjName').value.trim(),levels=$('newLevels').value.split('\n').map(s=>s.trim()).filter(Boolean),areas=$('newAreas').value.split('\n').map(s=>s.trim()).filter(Boolean);
   if(!name)return err.innerHTML='<div class="error-msg">Name required</div>';
-  const supplier=($('newProjSupplier')&&$('newProjSupplier').value)||'Aus Reo';
+  const supplier=($('newProjSupplier')&&$('newProjSupplier').value)||'';
+  if(!supplier)return err.innerHTML='<div class="error-msg">'+esc(SUPPLIER_NEEDED)+'</div>';
   const data={name,supplier,levels:levels.join('||'),areas:areas.join('||')};
   if(editingId){const old=projects.find(p=>p.id===editingId);const{error}=await sb.from('projects').update(data).eq('id',editingId);if(error)return err.innerHTML='<div class="error-msg">'+esc(error.message)+'</div>';
     await auditLog({action:'PROJECT_EDIT',field_changed:name,old_value:`${old.name} (${old.levels.length}L)`,new_value:`${name} (${levels.length}L)`});
@@ -2698,20 +2706,22 @@ function projectRefusal(e){
   return refusalWords(e)}
 
 /* b5.14 — the project editor with pairs live. A job linked to Master-OPS shows its name and lists read-only: its levels
-   and areas come from Master-OPS ("change them in Project Setup there") — the REO database refuses the change anyway
-   (0012's projects lock). A new job is just a name and a supplier: no Levels / Areas boxes — its pairs arrive once it
-   is linked (the new-job checklist's "REO add + link" step). An unlinked job keeps its supplier editable, and its name
-   while nothing is filed under it (entries and pairs find their job by it). */
+   and areas come from Master-OPS Project Setup; its name and supplier are fixed once it is linked — nothing in
+   Master-OPS sets them, and the REO database (0012's projects lock) refuses a change from any login here, so changing
+   either is a planned database step (LINKED_JOB_WORDS). A new job is just a name and a supplier, the supplier chosen
+   on purpose: no Levels / Areas boxes — its pairs arrive once it is linked (the new-job checklist's "REO add + link"
+   step). An unlinked job keeps its supplier editable, and its name while nothing is filed under it (entries and pairs
+   find their job by it). */
 function renderAdminProjPairs(){
-  $('adminProj').innerHTML=`<div class="card" style="margin-bottom:18px"><h3 style="font-size:15px;font-weight:700;margin-bottom:14px;color:var(--gray-dk)" id="aFormTitle">Add New Project</h3><div class="row2"><div class="fg"><label>Project Name</label><input type="text" id="newProjName" placeholder="e.g. New School Stage 2"></div><div class="fg"><label>Supplier</label><select id="newProjSupplier"><option value="Aus Reo">Aus Reo</option><option value="ARC">ARC</option></select></div></div><div id="projPairsBox">${projPairsBoxHtml(null)}</div><div style="display:flex;gap:10px;margin-top:14px"><button class="btn btn-sm" onclick="saveProject()" id="saveProjBtn" style="width:auto">Add Project</button><button class="btn btn-sec btn-sm" onclick="cancelPE()" id="cancelPE" style="display:none;width:auto">Cancel</button></div><div id="projErr"></div></div><div class="card"><h3 style="font-size:15px;font-weight:700;margin-bottom:12px;color:var(--gray-dk)">Projects (<span id="projCount">${projects.length}</span>)</h3><div class="proj-list" id="projList"></div></div>`;renderProjList()}
+  $('adminProj').innerHTML=`<div class="card" style="margin-bottom:18px"><h3 style="font-size:15px;font-weight:700;margin-bottom:14px;color:var(--gray-dk)" id="aFormTitle">Add New Project</h3><div class="row2"><div class="fg"><label>Project Name</label><input type="text" id="newProjName" placeholder="e.g. New School Stage 2"></div><div class="fg"><label>Supplier</label>${SUPPLIER_SELECT_HTML}</div></div><div id="projPairsBox">${projPairsBoxHtml(null)}</div><div style="display:flex;gap:10px;margin-top:14px"><button class="btn btn-sm" onclick="saveProject()" id="saveProjBtn" style="width:auto">Add Project</button><button class="btn btn-sec btn-sm" onclick="cancelPE()" id="cancelPE" style="display:none;width:auto">Cancel</button></div><div id="projErr"></div></div><div class="card"><h3 style="font-size:15px;font-weight:700;margin-bottom:12px;color:var(--gray-dk)">Projects (<span id="projCount">${projects.length}</span>)</h3><div class="proj-list" id="projList"></div></div>`;renderProjList()}
 // What a job's levels / areas are and where they come from (null = a new job).
 function projPairsBoxHtml(p){
-  if(!p)return '<div class="info-msg" style="margin-top:2px">Levels and areas come from Master-OPS once the job is linked to it (the new-job checklist\'s “REO add + link” step). Until then nothing can be ordered on it.</div>';
+  if(!p)return '<div class="info-msg" style="margin-top:2px">Levels and areas come from Master-OPS once the job is linked to it (the new-job checklist\'s “REO add + link” step). Until then nothing can be ordered on it. Choose the supplier with care: it decides which supplier can see the job, and it is fixed once the job is linked.</div>';
   const pairs=pairsOf(p.id),act=activeOf(pairs),ret=pairs.filter(x=>x.status==='retired');
   const lv=orderNames(act,'level');
   const list=lv.length?`<ul class="proj-pairs">${lv.map(l=>`<li><b>${esc(l)}</b> — ${areasForLevel(act,l).map(esc).join(' · ')}</li>`).join('')}</ul>`:'';
   const retired=ret.length?`<div class="proj-pairs-ret">No longer on this job in Master-OPS: ${ret.map(x=>esc(x.level+' / '+x.area)).join(' · ')}</div>`:'';
-  if(p.hubProjectId)return `<div class="info-msg" style="margin-top:2px"><b>Linked to Master-OPS${p.hubShortCode?' ('+esc(p.hubShortCode)+')':''}.</b> Its name, supplier and levels and areas come from Master-OPS — change them in Project Setup there.${act.length?'':' No level / area pairs have arrived yet — nothing can be ordered.'}${list}${retired}</div>`;
+  if(p.hubProjectId)return `<div class="info-msg" style="margin-top:2px"><b>Linked to Master-OPS${p.hubShortCode?' ('+esc(p.hubShortCode)+')':''}.</b> ${LINKED_JOB_WORDS}${act.length?'':' No level / area pairs have arrived yet — nothing can be ordered.'}${list}${retired}</div>`;
   if(act.length)return `<div class="info-msg" style="margin-top:2px"><b>Not linked to Master-OPS.</b> Its level / area ${act.length===1?'pair is':'pairs are'} REO-only (set by a migration):${list}${retired}</div>`;
   return '<div class="warn-msg" style="margin-top:2px"><b>Not linked to Master-OPS yet — nothing can be ordered.</b> Its levels and areas come from Master-OPS once it is linked (the new-job checklist\'s “REO add + link” step).</div>'}
 function projItemPairsHtml(p,supBadge,schedTxt){
@@ -2725,27 +2735,28 @@ function editProjPairs(id){
   const linked=!!p.hubProjectId,filed=entries.some(e=>e.project===p.name)||pairsOf(p.id).length>0;
   const nm=$('newProjName'),sup=$('newProjSupplier');
   $('aFormTitle').textContent=linked?'Project — linked to Master-OPS':'Edit Project';
-  nm.value=p.name;nm.disabled=linked||filed;nm.title=linked?'Comes from Master-OPS':filed?'Entries or pairs are filed under this name, so it stays as it is':'';
-  sup.value=p.supplier||'Aus Reo';sup.disabled=linked;
+  nm.value=p.name;nm.disabled=linked||filed;nm.title=linked?LINKED_JOB_WORDS:filed?'Entries or pairs are filed under this name, so it stays as it is':'';
+  sup.value=p.supplier||'Aus Reo';sup.disabled=linked;sup.title=linked?LINKED_JOB_WORDS:'';
   $('projPairsBox').innerHTML=projPairsBoxHtml(p)+(!linked&&filed?'<div class="hint">The name stays as it is: entries and pairs are filed under it.</div>':'');
   const save=$('saveProjBtn');save.textContent='Save';save.style.display=linked?'none':'';
   const c=$('cancelPE');c.style.display='inline-block';c.textContent=linked?'Close':'Cancel';
   $('projErr').innerHTML=''}
 function cancelPEPairs(){
   editingId=null;$('aFormTitle').textContent='Add New Project';
-  const nm=$('newProjName'),sup=$('newProjSupplier');nm.value='';nm.disabled=false;nm.title='';sup.value='Aus Reo';sup.disabled=false;
+  const nm=$('newProjName'),sup=$('newProjSupplier');nm.value='';nm.disabled=false;nm.title='';sup.value='';sup.disabled=false;sup.title='';
   $('projPairsBox').innerHTML=projPairsBoxHtml(null);
   const save=$('saveProjBtn');save.textContent='Add Project';save.style.display='';
   const c=$('cancelPE');c.style.display='none';c.textContent='Cancel';
   $('projErr').innerHTML=''}
 async function saveProjectPairs(){
   const err=$('projErr');err.innerHTML='';
-  const name=$('newProjName').value.trim(),supplier=($('newProjSupplier')&&$('newProjSupplier').value)||'Aus Reo';
+  const name=$('newProjName').value.trim(),supplier=($('newProjSupplier')&&$('newProjSupplier').value)||'';
   const say=w=>{err.innerHTML='<div class="error-msg">'+esc(w)+'</div>'};
   if(editingId){
     const old=projects.find(p=>p.id===editingId);
     if(!old)return say('This job is no longer in the list — refresh.');
-    if(old.hubProjectId)return say("This job is linked to Master-OPS — its name, supplier and levels / areas come from Master-OPS and can't be changed here.");
+    if(old.hubProjectId)return say(LINKED_JOB_WORDS);
+    if(!supplier)return say(SUPPLIER_NEEDED);
     const data={};
     if(!$('newProjName').disabled&&name!==old.name){
       if(!name)return say('Name required');
@@ -2761,6 +2772,7 @@ async function saveProjectPairs(){
     await auditLog({action:'PROJECT_EDIT',field_changed:data.name||old.name,old_value:`${old.name} · ${old.supplier}`,new_value:`${data.name||old.name} · ${data.supplier||old.supplier}`});
   }else{
     if(!name)return say('Name required');
+    if(!supplier)return say(SUPPLIER_NEEDED);
     if(projects.find(p=>p.name.toLowerCase()===name.toLowerCase()))return say('Already exists');
     let no=null;
     try{const{error}=await sb.from('projects').insert({name,supplier,levels:'',areas:''});if(error)no=projectRefusal(error)}
