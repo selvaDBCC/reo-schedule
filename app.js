@@ -2061,8 +2061,9 @@ function openEditEntry(id){const e=entries.find(x=>x.id===id);if(!e)return;
     dangerSection+='</div>';
   }
   const la=editLevelAreaHtml(e.project,true);
-  // b5.14 (pairs live): once an entry is made only DBCC changes its job, level or area (REO 0012, the protect rules).
-  const laLock=pairsLive&&isSupplier()?' disabled':'';
+  // b5.14: once an entry is made only DBCC changes its job, level or area (Selva Q2). REO 0012's protect rules refuse a
+  // supplier's change from the day 0012 is applied — before pairs_live is on — so the dialog never offers it to them.
+  const laLock=isSupplier()?' disabled':'';
   $('editModal').innerHTML=`<h3>Edit Entry<button class="modal-close" onclick="closeOv('editOv')">&times;</button></h3>
 <div class="fg"><label>Project</label><select id="ed_proj"${laLock}>${editOptions(projects.map(p=>p.name),e.project,e.project?null:'— no project —','not in the project list')}</select></div>
 <div class="row2"><div class="fg"><label>Level</label><select id="ed_level"${laLock}>${la.level}</select></div><div class="fg"><label>Area</label><select id="ed_area"${laLock}>${la.area}</select></div></div>

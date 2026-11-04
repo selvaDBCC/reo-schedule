@@ -747,3 +747,15 @@ test('the email dialog without the card is unchanged: no file list taken over, n
   a.emailModal('S','B',null,'order_created','Barwon Reservoir');
   assert.equal(r('emailAfterSend'),null,'a later email never fires the card\'s callback');
 });
+
+// ── Stage 3 review fixes ──
+test('Edit: a supplier can\'t change an entry\'s job, level or area — REO 0012 refuses it whether pairs are live or not', ()=>{
+  for(const live of [false,true])for(const role of ['supplier','dbcc']){
+    const{a,r,els}=cardApp({role});r(`pairsLive=${live}`);
+    a.openEditEntry(21);
+    const h=els.editModal.innerHTML,locked=role==='supplier',tag=`${role}, pairs ${live?'on':'off'}`;
+    for(const id of ['ed_proj','ed_level','ed_area'])assert.equal(new RegExp(`<select id="${id}" disabled>`).test(h),locked,`${tag}: ${id}`);
+    assert.equal(/Only DBCC can change the job, level or area once an entry is made — ask DBCC\./.test(h),locked,tag);
+    assert.equal(/id="ed_ourD" value="2026-11-05" disabled/.test(h),locked,`${tag}: DBCC's requested date, as before`);
+  }
+});
