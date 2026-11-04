@@ -833,3 +833,96 @@ test('the card: a date someone else saved while this one was typed is never writ
   a.ccDateDraft(21,'2026-11-08');r("entries.find(e=>e.id===21).our_delivery_date='2026-11-08'");
   await a.ccSaveDate(21);assert.equal(sb.calls.length,2,'no second write');
 });
+
+// ── Fix round (4 Nov evening): one save at a time in the card ──
+const tick=()=>new Promise(s=>setTimeout(s,1));
+const SEND_BTN=/<button class="btn btn-sm" id="ccSendBtn" onclick="ccCreateAndEmail\(\)" style="width:auto;margin:0"( disabled)?>([^<]*)<\/button>/;
+
+test('Create + email runs once at a time: a redraw mid-run never brings the button back, and nothing typed meanwhile is lost', async()=>{
+  const held=[];let inserts=0;
+  const{a,r,els,sb}=cardApp({answer:q=>{
+    if(q.table!=='entries'||q.op!=='insert')return{data:null,error:null};
+    const n=++inserts;return new Promise(ok=>held.push(()=>ok({data:q.payload.map((p,i)=>({id:400+n*10+i,...p})),error:null})))}});
+  a.openCellCard([{level:'GRD',area:'COLUMNS'},{level:'B1',area:'PILES'},{level:'GRD-L1',area:'COLUMNS'}]);   // three empty green cells
+  r("cellCard.allDate='2026-11-20'");
+  const first=a.ccCreateAndEmail();
+  await tick();
+  assert.deepEqual([...els.ccSend.innerHTML.match(SEND_BTN)].slice(1),[' disabled','Saving…'],'pressed: "Saving…" before the first insert answers');
+  // while the first insert is held: a label typed, a placeholder added / removed, the dates, a file ticked, a realtime refresh
+  r("ccSetOrder(cellKey('B1','PILES'),0,'label','Top');ccAddOrder(cellKey('B1','PILES'));ccRemoveOrder(cellKey('GRD-L1','COLUMNS'),0);ccSetAllDate('2026-12-01');ccSetDateMode('each')");
+  r('ccTickFile(31,true)');a.afterEntriesLoaded();
+  const h=els.cellCardModal.innerHTML;
+  assert.deepEqual([...h.match(SEND_BTN)].slice(1),[' disabled','Saving…'],'every redraw draws the button "Saving…", disabled');
+  assert.equal((h.match(/<input type="text" value="" placeholder="No split" oninput="ccSetOrder\([^"]*\)" readonly>/g)||[]).length,3,'the placeholders are read-only');
+  assert.match(h,/onclick="ccAddOrder\([^"]*\)" title="Add a placeholder" disabled>\+<\/button>/);
+  assert.match(h,/id="ccAllDate" value="2026-11-20" oninput="ccSetAllDate\(this\.value\)" disabled>/);
+  assert.deepEqual(plain(r('Object.values(cellCard.orders)')),[[{label:'',date:''}],[{label:'',date:''}],[{label:'',date:''}]],'nothing typed while it ran is taken in and then dropped');
+  assert.equal(r("cellCard.allDate+'|'+cellCard.dateMode"),'2026-11-20|all');
+  const second=a.ccCreateAndEmail();   // pressed again
+  for(let i=0;i<20;i++){await tick();while(held.length)held.shift()()}
+  await first;await second;
+  assert.equal(inserts,3,'one insert per cell — never a second set');
+  assert.equal(r('__mail.length'),1,'one email');
+  assert.deepEqual(plain(r('cellCard.log.created.map(x=>x.level+" / "+x.area)')),['GRD / COLUMNS','GRD-L1 / COLUMNS','B1 / PILES'],'grid order, each once');
+  assert.deepEqual(plain(r('cellCard.orders')),{},'made: the placeholders leave the card');
+  assert.equal(r('cellCard.busy'),false);
+  assert.deepEqual([...els.cellCardModal.innerHTML.match(SEND_BTN)].slice(1),[undefined,'Email the changes'],'done: the button is back');
+  assert.equal(sb.calls.filter(c=>c.table==='audit_log'&&c.payload.action==='BULK_CREATE').length,1);
+});
+
+test('a run takes only its own placeholders off the card; a cell it refused keeps them to try again', async()=>{
+  const{a,r}=cardApp({answer:q=>q.table==='entries'&&q.op==='insert'?(q.payload[0].level==='B1'?{data:null,error:{message:'new row violates row-level security policy'}}:{data:q.payload.map((p,i)=>({id:500+i,...p})),error:null}):{data:null,error:null}});
+  a.openCellCard([{level:'GRD',area:'COLUMNS'},{level:'B1',area:'PILES'}]);
+  r("cellCard.allDate='2026-11-20'");
+  // a placeholder added to a cell after its run planned it (the screen can't, it is read-only then): it stays
+  r("__extra={label:'Later',date:''};__run=ccCreateAndEmail();cellCard.orders[cellKey('GRD','COLUMNS')].push(__extra)");
+  await r('__run');
+  assert.deepEqual(plain(r("cellCard.orders[cellKey('GRD','COLUMNS')]")),[{label:'Later',date:''}],'not dropped unseen');
+  assert.deepEqual(plain(r("cellCard.orders[cellKey('B1','PILES')]")),[{label:'',date:''}],'refused: still waiting');
+});
+
+test('a date save runs once at a time; the card waits for it before emailing or closing', async()=>{
+  const held=[];
+  const{a,r,els,sb}=cardApp({answer:q=>q.table==='entries'&&q.op==='update'?new Promise(ok=>held.push(()=>ok({data:[{id:22}],error:null}))):{data:null,error:null}});
+  a.openCellCard([{level:'GRD',area:'SLAB'},{level:'GRD',area:'COLUMNS'}]);
+  a.ccDateDraft(22,'2026-11-19');a.document.getElementById('ccDate_22').value='2026-11-19';
+  const p1=a.ccSaveDate(22);await tick();
+  assert.equal(els.ccDate_22.readOnly,true,'the box being saved is read-only at once');
+  a.afterEntriesLoaded();   // a realtime refresh redraws the card mid-save
+  const h=els.cellCardModal.innerHTML;
+  assert.match(h,/id="ccDate_22" value="2026-11-19" oninput="ccDateDraft\(22,this\.value\)" readonly><button class="action-btn cc-save" id="ccDateBtn_22" onclick="ccSaveDate\(22\)" disabled>Saving…<\/button>/);
+  assert.deepEqual([...h.match(SEND_BTN)].slice(1),[' disabled','Saving…'],'the email waits for the date');
+  a.ccDateDraft(22,'2026-11-21');   // typed while it saves: refused, so it can't be dropped when the save lands
+  const p2=a.ccSaveDate(22);         // pressed again
+  await a.ccCreateAndEmail();assert.equal(r('__mail.length'),0,'no email mid-save');
+  a.ccClose();assert.notEqual(r('cellCard'),null,'not closed mid-save');
+  assert.match(els.ccSend.innerHTML,/Still saving — close the card once it has finished\./);
+  while(held.length)held.shift()();await p1;await p2;
+  assert.deepEqual(sb.calls.map(c=>c.table+':'+c.op),['entries:update','audit_log:insert','audit_log:insert'],'one write, its history once');
+  assert.deepEqual(plain(r('cellCard.log.dates')).map(d=>[d.id,d.new]),[[22,'2026-11-19']]);
+  assert.equal(r('cellCard.dateDraft[22]'),undefined);
+  assert.ok(!/Still saving/.test(els.cellCardModal.innerHTML),'done: the "still saving" words go');
+  assert.match(els.cellCardModal.innerHTML,/Saved — it goes in the email\./);
+  a.ccClose();assert.match(r('__confirm.m'),/1 change saved in this card hasn&#39;t been emailed/,'now it can be closed (it asks first: not emailed yet)');
+});
+
+test('a save whose reload fails part-way still finishes: the button comes back and the words are shown', async()=>{
+  const{a,r,els}=cardApp({answer:q=>q.table==='entries'&&q.op==='update'?{data:[{id:22}],error:null}:{data:null,error:null}});
+  r("loadEntries=async()=>{throw new Error('TypeError: Failed to fetch')}");
+  a.openCellCard([{level:'GRD',area:'SLAB'}]);a.ccDateDraft(22,'2026-11-19');a.document.getElementById('ccDate_22').value='2026-11-19';
+  await a.ccSaveDate(22);
+  assert.equal(r('cellCard.saving.size'),0);
+  assert.match(els.cellCardModal.innerHTML,/Saved — it goes in the email\./);
+  r(`cellCard.allDate='2026-11-25';ccAddOrder(cellKey('GRD','SLAB'))`);
+  a.__sb=fakeSb(q=>q.table==='entries'&&q.op==='insert'?{data:q.payload.map((p,i)=>({id:600+i,...p})),error:null}:{data:null,error:null});r('sb=__sb');
+  await a.ccCreateAndEmail();
+  assert.equal(r('cellCard.busy'),false);assert.equal(r('__mail.length'),1);
+  // and a run that stops part-way (here: the history write throws) says so, keeps what it made, and frees the button
+  const t=cardApp({answer:q=>{if(q.table==='audit_log')throw new Error('boom');return q.table==='entries'&&q.op==='insert'?{data:q.payload.map((p,i)=>({id:700+i,...p})),error:null}:{data:null,error:null}}});
+  t.a.openCellCard([{level:'GRD',area:'COLUMNS'}]);t.r("cellCard.allDate='2026-11-25'");
+  await t.a.ccCreateAndEmail();
+  assert.equal(t.r('cellCard.busy'),false);
+  assert.match(t.els.cellCardModal.innerHTML,/<div class="error-msg">Stopped part-way \(boom\)\. What was made is under "Saved in this card" — check the cells before pressing again\.<\/div>/);
+  assert.deepEqual(plain(t.r('cellCard.log.created')).map(x=>x.id),[700],'the cell made before it stopped is in the card\'s log');
+  assert.deepEqual([...t.els.cellCardModal.innerHTML.match(SEND_BTN)].slice(1),[undefined,'Email the changes']);
+});

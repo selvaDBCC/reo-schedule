@@ -3298,7 +3298,8 @@ function openCellCard(cells){
   list.sort((x,y)=>(li.get(x.level)-li.get(y.level))||(ai.get(x.area)-ai.get(y.area)));
   const orders={};for(const x of list)if(x.state==='active'&&!x.count)orders[x.key]=[{label:'',date:''}];   // an empty green cell: one placeholder ready
   cellCard={project:proj.name,supplier:proj.supplier||'Aus Reo',cells:list.map(x=>({level:x.level,area:x.area,key:x.key})),orders,dateMode:'all',allDate:'',
-    log:{created:[],dates:[],cancels:[]},failed:[],files:new Set(),dateDraft:{},dateBase:{},notes:{},open:new Set(list.length<=4?list.map(x=>x.key):[]),msg:'',stale:false};
+    log:{created:[],dates:[],cancels:[]},failed:[],files:new Set(),dateDraft:{},dateBase:{},notes:{},open:new Set(list.length<=4?list.map(x=>x.key):[]),msg:'',stale:false,
+    busy:false,saving:new Set()};   // busy: "Create + email" is running; saving: the entries whose date is being saved
   renderCellCard();$('cellCardOv').classList.add('show')}
 function ccModel(){const cc=cellCard,proj=cc&&cc.project?projects.find(p=>p.name===cc.project):null;return proj?dpModel(proj):null}
 function ccLoc(r){return `${r.level||'—'} / ${r.area||'—'}${r.split?' ('+r.split+')':''}`}
@@ -3337,9 +3338,9 @@ function ccEntryRowHtml(e,state){
   const cc=cellCard,done=e.status==='Cancelled',mm=hasMismatch(e);
   let mp=[];try{mp=e.markup_plans?JSON.parse(e.markup_plans)||[]:[]}catch(_){mp=[]}
   const own=e.our_delivery_date||'',draft=Object.prototype.hasOwnProperty.call(cc.dateDraft,e.id)?cc.dateDraft[e.id]:own;
-  const canDate=!done&&e.status!=='Delivered';
+  const canDate=!done&&e.status!=='Delivered',saving=cc.saving.has(e.id);   // saving: read-only, "Saving…", whatever redraws the card
   const sched=`<span class="cc-sched">${e.schedule?esc(e.schedule):'—'}</span>${e.split_reference?` <span class="cc-split">(${esc(e.split_reference)})</span>`:''}`;
-  const date=canDate?`<div class="cc-daterow"><input type="date" class="cc-date" id="ccDate_${e.id}" value="${esc(draft)}" oninput="ccDateDraft(${e.id},this.value)"><button class="action-btn cc-save" id="ccDateBtn_${e.id}" onclick="ccSaveDate(${e.id})"${draft===own?' disabled':''}>Save date</button></div>`:`<span>${fmtDate(own)||'—'}</span>`;
+  const date=canDate?`<div class="cc-daterow"><input type="date" class="cc-date" id="ccDate_${e.id}" value="${esc(draft)}" oninput="ccDateDraft(${e.id},this.value)"${saving?' readonly':''}><button class="action-btn cc-save" id="ccDateBtn_${e.id}" onclick="ccSaveDate(${e.id})"${saving||draft===own?' disabled':''}>${saving?'Saving…':'Save date'}</button></div>`:`<span>${fmtDate(own)||'—'}</span>`;
   const note=cc.notes[e.id]?`<div class="cc-msg">${cc.notes[e.id]}</div>`:'';
   const prod=`${fmtDate(e.supplier_delivery_date)||'—'}${mm?' <span class="mismatch-icon" title="The two dates differ — handled on the Dashboard">⚠️</span>':''}`;
   const sfile=e.file_url?`<a class="att-link" ${fileLinkAttrs(e.file_url)}>📄 ${esc((e.file_name||'Schedule').slice(0,18))}</a>`:(done?'':`<button class="action-btn" onclick="uploadScheduleFile(${e.id})" title="Attach the schedule">+ Schedule</button>`);
@@ -3353,14 +3354,16 @@ function ccOrderHtml(){
   const cc=cellCard,m=ccModel();if(!m)return '';
   const act=cc.cells.map(c=>m.cell(c.level,c.area)).filter(x=>x.state==='active');
   if(!act.length)return '<div class="cc-order"><h4>Order</h4><p class="cc-none">Nothing can be ordered here — no longer on this job in Master-OPS.</p></div>';
-  let h=`<div class="cc-order"><h4>Order — new placeholders</h4><div class="cc-datemode"><label><input type="radio" name="ccDateMode"${cc.dateMode==='all'?' checked':''} onchange="ccSetDateMode('all')"> One DBCC requested delivery date for all:</label><input type="date" id="ccAllDate" value="${esc(cc.allDate)}" oninput="ccSetAllDate(this.value)"${cc.dateMode==='all'?'':' disabled'}><label><input type="radio" name="ccDateMode"${cc.dateMode==='each'?' checked':''} onchange="ccSetDateMode('each')"> A date for each placeholder</label></div>`;
+  // While "Create + email" runs nothing here can change: a label typed into a placeholder being made would be lost.
+  const run=cc.busy?' disabled':'';
+  let h=`<div class="cc-order"><h4>Order — new placeholders</h4><div class="cc-datemode"><label><input type="radio" name="ccDateMode"${cc.dateMode==='all'?' checked':''} onchange="ccSetDateMode('all')"${run}> One DBCC requested delivery date for all:</label><input type="date" id="ccAllDate" value="${esc(cc.allDate)}" oninput="ccSetAllDate(this.value)"${cc.dateMode==='all'&&!cc.busy?'':' disabled'}><label><input type="radio" name="ccDateMode"${cc.dateMode==='each'?' checked':''} onchange="ccSetDateMode('each')"${run}> A date for each placeholder</label></div>`;
   for(const x of act){
-    const list=cc.orders[x.key]||[];
-    h+=`<div class="sel-item"><div class="sel-item-header"><div class="sel-item-title">${esc(x.level)} / ${esc(x.area)}${x.count?` <span style="font-size:11px;color:var(--accent-dk);font-weight:600">(adding to ${x.count} existing)</span>`:''}</div><div class="sel-item-controls"><button onclick="ccAddOrder(${jsArg(x.key)})" title="Add a placeholder">+</button></div></div>`;
+    const list=cc.orders[x.key]||[],lock=ccOrdersLocked(cc,x.key),ro=lock?' readonly':'',off=lock?' disabled':'';
+    h+=`<div class="sel-item"><div class="sel-item-header"><div class="sel-item-title">${esc(x.level)} / ${esc(x.area)}${x.count?` <span style="font-size:11px;color:var(--accent-dk);font-weight:600">(adding to ${x.count} existing)</span>`:''}</div><div class="sel-item-controls"><button onclick="ccAddOrder(${jsArg(x.key)})" title="Add a placeholder"${off}>+</button></div></div>`;
     list.forEach((sp,i)=>{
       const ph=x.count>0?'Part '+(x.count+i+1)+' (recommended)':(list.length>1?'Part '+(i+1):'No split');
-      const d=cc.dateMode==='each'?`<input type="date" value="${esc(sp.date)}" oninput="ccSetOrder(${jsArg(x.key)},${i},'date',this.value)">`:`<span class="cc-alldate">${cc.allDate?fmtDate(cc.allDate):'no date'}</span>`;
-      h+=`<div class="split-row"><input type="text" value="${esc(sp.label)}" placeholder="${esc(ph)}" oninput="ccSetOrder(${jsArg(x.key)},${i},'label',this.value)">${d}<button class="remove-split" onclick="ccRemoveOrder(${jsArg(x.key)},${i})" title="Remove this placeholder">×</button></div>`});
+      const d=cc.dateMode==='each'?`<input type="date" value="${esc(sp.date)}" oninput="ccSetOrder(${jsArg(x.key)},${i},'date',this.value)"${ro}>`:`<span class="cc-alldate">${cc.allDate?fmtDate(cc.allDate):'no date'}</span>`;
+      h+=`<div class="split-row"><input type="text" value="${esc(sp.label)}" placeholder="${esc(ph)}" oninput="ccSetOrder(${jsArg(x.key)},${i},'label',this.value)"${ro}>${d}<button class="remove-split" onclick="ccRemoveOrder(${jsArg(x.key)},${i})" title="Remove this placeholder"${off}>×</button></div>`});
     if(!list.length)h+='<div class="cc-none">No new placeholder — press + to order one here.</div>';
     h+='</div>'}
   return h+'</div>'}
@@ -3381,20 +3384,24 @@ function ccSendHtml(){
   h+='</ul>';
   if(cc.failed.length)h+=`<div class="error-msg cc-failed"><b>Not saved — left out of the email:</b><ul>${cc.failed.map(f=>`<li>${esc(f.what)} — ${esc(f.words)}</li>`).join('')}</ul></div>`;
   if(cc.msg)h+=cc.msg;
-  const label=rows.length?`Create ${rows.length} + email`:'Email the changes',can=rows.length>0||saved>0;
+  // While anything in the card is saving the button reads "Saving…" — whatever redraws the card meanwhile (a typed
+  // label, a ticked file, a realtime refresh) — so it can't run twice, and the email waits for a date being saved.
+  const busy=ccSaving(cc),label=busy?'Saving…':rows.length?`Create ${rows.length} + email`:'Email the changes',can=!busy&&(rows.length>0||saved>0);
   h+=`<p class="cc-note">Hold, reinstate and date mismatches stay on the Dashboard.</p><div class="cc-actions"><button class="btn btn-sec btn-sm" onclick="ccClose()" style="width:auto;margin:0">Close</button><button class="btn btn-sm" id="ccSendBtn" onclick="ccCreateAndEmail()" style="width:auto;margin:0"${can?'':' disabled'}>${esc(label)}</button></div></div>`;
   return h}
 function ccRefreshOrder(){const o=$('ccOrder');if(o)o.innerHTML=ccOrderHtml();ccRefreshSend()}
 function ccRefreshSend(){const s=$('ccSend');if(s)s.innerHTML=ccSendHtml()}
-function ccAddOrder(key){const cc=cellCard;if(!cc)return;const list=cc.orders[key]||(cc.orders[key]=[]),n=list.length;
+// The Order section can't change while "Create + email" runs (its boxes are drawn read-only, and these refuse too).
+function ccOrdersLocked(cc,key){return !!(cc&&cc.busy)}
+function ccAddOrder(key){const cc=cellCard;if(!cc||ccOrdersLocked(cc,key))return;const list=cc.orders[key]||(cc.orders[key]=[]),n=list.length;
   if(n===1&&!list[0].label)list[0].label='Part 1';   // as the b5.13 grid: a second one turns the pair into Part 1, Part 2
   list.push({label:n?'Part '+(n+1):'',date:cc.dateMode==='each'?cc.allDate:''});ccRefreshOrder()}
-function ccRemoveOrder(key,i){const cc=cellCard;if(!cc||!cc.orders[key])return;cc.orders[key].splice(i,1);if(!cc.orders[key].length)delete cc.orders[key];ccRefreshOrder()}
-function ccSetOrder(key,i,field,v){const s=cellCard&&cellCard.orders[key]&&cellCard.orders[key][i];if(s&&(field==='label'||field==='date')){s[field]=v;ccRefreshSend()}}
-function ccSetDateMode(mode){const cc=cellCard;if(!cc||(mode!=='all'&&mode!=='each'))return;
+function ccRemoveOrder(key,i){const cc=cellCard;if(!cc||!cc.orders[key]||ccOrdersLocked(cc,key))return;cc.orders[key].splice(i,1);if(!cc.orders[key].length)delete cc.orders[key];ccRefreshOrder()}
+function ccSetOrder(key,i,field,v){const cc=cellCard,s=cc&&cc.orders[key]&&cc.orders[key][i];if(s&&(field==='label'||field==='date')&&!ccOrdersLocked(cc,key)){s[field]=v;ccRefreshSend()}}
+function ccSetDateMode(mode){const cc=cellCard;if(!cc||cc.busy||(mode!=='all'&&mode!=='each'))return;
   if(mode==='each'&&cc.dateMode!=='each')for(const l of Object.values(cc.orders))for(const s of l)if(!s.date)s.date=cc.allDate;
   cc.dateMode=mode;ccRefreshOrder()}
-function ccSetAllDate(v){const cc=cellCard;if(!cc)return;cc.allDate=v;document.querySelectorAll('#ccOrder .cc-alldate').forEach(x=>{x.textContent=v?fmtDate(v):'no date'});ccRefreshSend()}
+function ccSetAllDate(v){const cc=cellCard;if(!cc||cc.busy)return;cc.allDate=v;document.querySelectorAll('#ccOrder .cc-alldate').forEach(x=>{x.textContent=v?fmtDate(v):'no date'});ccRefreshSend()}
 function ccTickFile(id,on){const cc=cellCard;if(!cc)return;if(on)cc.files.add(id);else cc.files.delete(id);ccRefreshSend()}
 function ccTickedFiles(){const cc=cellCard;if(!cc)return[];return projectFiles.filter(f=>cc.files.has(f.id)&&f.project_name===cc.project).map(f=>({id:f.id,label:f.label,url:f.file_url}))}
 // A save in the card that didn't land is listed under "Not saved — left out of the email", one line per thing — `key`
@@ -3403,6 +3410,15 @@ function ccTickedFiles(){const cc=cellCard;if(!cc)return[];return projectFiles.f
 function ccNoteFailure(what,words,key){const cc=cellCard;if(!cc)return;ccAddFailure(cc,what,words,key);ccRefreshSend()}
 function ccAddFailure(cc,what,words,key){const k=key==null?what:key;cc.failed=cc.failed.filter(f=>f.key!==k);cc.failed.push({what,words,key:k})}
 function ccClearFailure(cc,key){cc.failed=cc.failed.filter(f=>f.key!==key)}
+// Something in the card is being saved: "Create + email" running, or an entry's date.
+function ccSaving(cc){return !!(cc&&(cc.busy||(cc.saving&&cc.saving.size)))}
+const CC_STILL_SAVING='<div class="warn-msg">Still saving — close the card once it has finished.</div>';
+// After a save: the page's entries again. A lost connection here leaves the list as it was (the save itself has
+// already said what happened) instead of stopping the card part-way.
+async function ccReload(){try{await loadEntries()}catch(e){console.warn('[REO] entries reload failed:',e&&e.message)}renderDash()}
+// A run's own placeholders leave the card once made (or refused for good); anything else on the cell stays.
+function ccTakeOrders(cc,key,mine){const left=(cc.orders[key]||[]).filter(sp=>!(mine||[]).includes(sp));if(left.length)cc.orders[key]=left;else delete cc.orders[key]}
+function ccLogMade(cc,rows){for(const r of rows)cc.log.created.push({id:r.id,level:r.level,area:r.area,split:r.split_reference||null,date:r.our_delivery_date||null})}
 // The rows the Order section will insert (pure): per green cell, one row per placeholder — the b5.13 grid's rule for
 // split labels (one placeholder: its label or none; several: their labels, else Part 1, Part 2 …) and the date mode.
 // A cell that is no longer an active pair is refused, never moved somewhere else.
@@ -3455,15 +3471,16 @@ function cellCardEmail({project,supplier,log,files,sender}){
   body+=`\n\nPlease confirm receipt${L.created.length||L.dates.length?' and your production delivery dates':''}.${EMAIL_FOOTER_TEXT}\n\nRegards,\n${sender}\nDebono Bros Concreting`;
   return{subject:`REO orders — ${project} (${count})`,body}}
 // The first keystroke in a date box also notes the date the person started from (dateBase): Save checks it still holds.
-function ccDateDraft(id,v){const cc=cellCard;if(!cc)return;const e=entries.find(x=>x.id===id),b=$('ccDateBtn_'+id);
+function ccDateDraft(id,v){const cc=cellCard;if(!cc||cc.saving.has(id))return;const e=entries.find(x=>x.id===id),b=$('ccDateBtn_'+id);
   const base=cc.dateBase||(cc.dateBase={});if(!Object.prototype.hasOwnProperty.call(base,id))base[id]=e?(e.our_delivery_date||''):'';
   cc.dateDraft[id]=v;if(b)b.disabled=!e||v===(e.our_delivery_date||'')}
 // A DBCC requested date changed in the card: today's rules (Not Ordered → Ordered; a differing production date flags the
 // mismatch again), saved only while the date and status are still what the card showed; history after the write. A date
 // someone else saved while this one was being typed (the row keeps showing the typed date, so the change can't be seen)
-// is never written over: Save says what it is now and saves nothing; the next press saves.
+// is never written over: Save says what it is now and saves nothing; the next press saves. One save of an entry's date
+// at a time: while it runs the box is read-only and its button reads "Saving…", whatever redraws the card.
 async function ccSaveDate(id){
-  const cc=cellCard;if(!cc||!isDbcc())return;
+  const cc=cellCard;if(!cc||!isDbcc()||cc.saving.has(id))return;
   const e=entries.find(x=>x.id===id);
   if(!e||e.project!==cc.project){cc.notes[id]='<span class="cc-err">This entry is no longer on this job — refresh.</span>';ccRefresh();return}
   const inp=$('ccDate_'+id),v=inp?inp.value:(cc.dateDraft[id]??''),old=e.our_delivery_date||'';
@@ -3475,25 +3492,41 @@ async function ccSaveDate(id){
     const words=`the DBCC requested date changed meanwhile — it is now ${fmtDate(old)||'not set'}. Check it and press Save date again.`;
     cc.notes[id]=`<span class="cc-err">Not saved — ${esc(words)}</span>`;ccAddFailure(cc,what,words,'date:'+id);ccRefresh();return}
   const{patch}=editPatch(e,{our_delivery_date:old},{our_delivery_date:v},false);
+  cc.saving.add(id);if(inp)inp.readOnly=true;
   const btn=$('ccDateBtn_'+id);if(btn){btn.disabled=true;btn.textContent='Saving…'}
-  const no=await writeEntry(id,patch,{our_delivery_date:e.our_delivery_date??null,status:e.status??null});
-  if(no){
-    cc.notes[id]=`<span class="cc-err">Not saved — ${esc(no)}</span>`;
-    ccAddFailure(cc,what,no,'date:'+id);
-    await loadEntries();renderDash();ccRefresh();return}
-  await auditLog({entry_id:id,action:'UPDATE',field_changed:'our_delivery_date',old_value:old,new_value:v});
-  if(patch.status)await auditLog({entry_id:id,action:'UPDATE',field_changed:'status',old_value:e.status,new_value:patch.status});
-  ccLogDate(cc.log,e,old,v);ccClearFailure(cc,'date:'+id);
-  delete cc.dateDraft[id];delete base[id];cc.notes[id]='<span class="cc-ok">Saved — it goes in the email.</span>';
-  await loadEntries();renderDash();ccRefresh()}
+  ccRefreshSend();   // the email waits for it
+  try{
+    const no=await writeEntry(id,patch,{our_delivery_date:e.our_delivery_date??null,status:e.status??null});
+    if(no){
+      cc.notes[id]=`<span class="cc-err">Not saved — ${esc(no)}</span>`;
+      ccAddFailure(cc,what,no,'date:'+id)}
+    else{
+      await auditLog({entry_id:id,action:'UPDATE',field_changed:'our_delivery_date',old_value:old,new_value:v});
+      if(patch.status)await auditLog({entry_id:id,action:'UPDATE',field_changed:'status',old_value:e.status,new_value:patch.status});
+      ccLogDate(cc.log,e,old,v);ccClearFailure(cc,'date:'+id);
+      delete cc.dateDraft[id];delete base[id];cc.notes[id]='<span class="cc-ok">Saved — it goes in the email.</span>'}
+    await ccReload()}
+  finally{cc.saving.delete(id);if(cc.msg===CC_STILL_SAVING&&!ccSaving(cc))cc.msg=''}
+  ccRefresh()}
+// One run at a time (cc.busy): a second press, or a redraw that would bring the button back, does nothing until it is
+// done; nothing in the Order section can change meanwhile, and only the placeholders this run planned leave the card.
 async function ccCreateAndEmail(){
-  const cc=cellCard;if(!cc||!isDbcc())return;
+  const cc=cellCard;if(!cc||!isDbcc()||ccSaving(cc))return;
   if(!cc.project){cc.msg='<div class="error-msg">This card has no job — close it and open the cell again. Nothing was saved.</div>';ccRefresh();return}
   const proj=projects.find(p=>p.name===cc.project);
   if(!proj){cc.msg='<div class="error-msg">This job is no longer in the list — close the card and refresh. Nothing was saved.</div>';ccRefresh();return}
+  cc.busy=true;cc.msg='';ccRefreshOrder();   // set before the first wait: "Saving…", the placeholders read-only
+  let mail=null;
+  try{mail=await ccCreateRun(cc,proj)}
+  catch(err){console.warn('[REO] cell card: create + email stopped:',err&&err.message);
+    cc.msg=`<div class="error-msg">Stopped part-way (${esc(String((err&&err.message)||err))}). What was made is under "Saved in this card" — check the cells before pressing again.</div>`}
+  finally{cc.busy=false}
+  if(cellCard===cc)ccRefresh();
+  if(mail)emailModal(mail.subject,mail.body,null,'cell_card',cc.project,{files:[],onSent:ccAfterEmail})}
+async function ccCreateRun(cc,proj){
   const m=dpModel(proj);
   const plan=ccPlanRows(cc.cells.map(c=>c.key),cc.orders,k=>{const[l,a]=JSON.parse(k);return m.cell(l,a)},cc.dateMode,cc.allDate);
-  const btn=$('ccSendBtn');if(btn){btn.disabled=true;btn.textContent='Saving…'}
+  const mine={};for(const g of [...plan.groups,...plan.refused])mine[g.key]=(cc.orders[g.key]||[]).slice();   // this run's placeholders
   const bid='b_'+Date.now(),made=[],failed=plan.refused.slice();
   for(const g of plan.groups){   // one insert per cell: a refused cell never takes the others with it
     const rows=g.rows.map(r=>({...r,project:cc.project,order_batch_id:bid}));
@@ -3504,10 +3537,10 @@ async function ccCreateAndEmail(){
       else data=res.data}
     catch(err){no=refusalWords(err)}
     if(no){failed.push({key:g.key,level:g.level,area:g.area,n:rows.length,words:no});continue}
-    made.push(...data);delete cc.orders[g.key];ccClearFailure(cc,'cell:'+g.key)}   // made now: an earlier refusal there is gone
-  for(const f of plan.refused)delete cc.orders[f.key];
+    ccTakeOrders(cc,g.key,mine[g.key]);ccClearFailure(cc,'cell:'+g.key);   // made now: an earlier refusal there is gone
+    ccLogMade(cc,data);made.push(...data)}   // in the card's log as soon as the cell's insert answers
+  for(const f of plan.refused)ccTakeOrders(cc,f.key,mine[f.key]);
   if(made.length)await auditLog({action:'BULK_CREATE',new_value:`${made.length} placeholders for ${cc.project}`});
-  for(const r of made)cc.log.created.push({id:r.id,level:r.level,area:r.area,split:r.split_reference||null,date:r.our_delivery_date||null});
   for(const f of failed)ccAddFailure(cc,`${f.n} new placeholder${f.n===1?'':'s'} at ${f.level} / ${f.area}`,f.words,'cell:'+f.key);
   const ticked=ccTickedFiles(),unsafe=ticked.filter(f=>!safeUrl(f.url)).length;
   const mail=cellCardEmail({project:cc.project,supplier:cc.supplier,log:cc.log,files:ticked,sender:userName});
@@ -3517,8 +3550,8 @@ async function ccCreateAndEmail(){
   if(unsafe)said.push(`${unsafe} reference file link${unsafe===1?" isn't":"s aren't"} on the REO file store — left out of the email.`);
   if(!mail)said.push('Nothing to email — nothing new with a date, no date changes, no cancellations.');
   cc.msg=said.length?`<div class="${failed.length?'warn-msg':'info-msg'}">${esc(said.join(' '))}</div>`:'';
-  await loadEntries();renderDash();ccRefresh();
-  if(mail)emailModal(mail.subject,mail.body,null,'cell_card',cc.project,{files:[],onSent:ccAfterEmail})}
+  await ccReload();
+  return mail}
 // "Open in Email" pressed: what it carried is done. A placeholder made here with no date stays listed — when it gets a
 // date in this card it goes in the next email as a new order.
 function ccAfterEmail(){const cc=cellCard;if(!cc)return;
@@ -3527,6 +3560,7 @@ function ccAfterEmail(){const cc=cellCard;if(!cc)return;
   cc.msg=`<div class="success-msg">The email (${n} item${n===1?'':'s'}) is open in your email app — check it there and press Send.</div>`;ccRefresh()}
 function ccClose(){
   const cc=cellCard;if(!cc){closeOv('cellCardOv');return}
+  if(ccSaving(cc)){cc.msg=CC_STILL_SAVING;ccRefreshSend();return}   // closing mid-save would lose what it is about to tell
   const L=cellCardLines(cc.log),n=L.created.length+L.dates.length+L.cancels.length;
   const typed=Object.values(cc.orders).flat().filter(s=>(s.label||'').trim()||s.date).length+(cc.allDate&&Object.keys(cc.orders).length?1:0);
   if(!n&&!typed)return ccCloseNow();
