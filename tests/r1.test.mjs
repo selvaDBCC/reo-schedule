@@ -350,6 +350,25 @@ test('deleteEntry writes its history line only after the database removed the ro
   }
 });
 
+test('the foreman view writes its history line only after the database changed the row', async()=>{
+  for(const [k,expect] of [['ok',['entries:update','audit_log:insert']],['refused',['entries:update']],['zero',['entries:update']]]){
+    const sb=runWith(WRITE[k]);fakePage({});
+    await app.foremanMarkDelivered(5);
+    assert.deepEqual(ops(sb),expect,k);
+    if(k==='ok')assert.equal(sb.calls[1].payload.user_identifier,'Fiona','signed with the foreman name');
+    else assert.match(alerts[0]||'',/^Not marked delivered — /);
+  }
+});
+
+test('every change to an entries row goes through writeEntry (or the guarded Edit save / delete) and its answer is used', ()=>{
+  const fnAt=i=>{const head=SRC.slice(0,i);const m=[...head.matchAll(/\n(?:async )?function ([A-Za-z0-9_$]+)\(/g)].pop();return m&&m[1]};
+  const direct=[...SRC.matchAll(/sb\.from\('entries'\)\.(update|delete)\(/g)].map(m=>fnAt(m.index));
+  assert.deepEqual([...new Set(direct)].sort(),['deleteEntry','saveEdit','writeEntry'],'a direct entries update / delete outside the three checked paths');
+  const unchecked=[...SRC.matchAll(/(.{0,12})\bwriteEntry\(/g)].filter(m=>!/function $/.test(m[1])&&!/=\s*await $/.test(m[1]));
+  assert.deepEqual(unchecked.map(m=>'app.js:'+SRC.slice(0,m.index).split('\n').length),[],'a writeEntry() whose answer is thrown away');
+  assert.ok([...SRC.matchAll(/=\s*await writeEntry\(/g)].length>=25,'the entry writes use writeEntry');
+});
+
 // ── Static sweep: pins that no data string is ever written into handler code or a link again ──
 
 // Every on<event>="…" attribute value written in app.js, with the ${…} / '+…+' expressions inside it.

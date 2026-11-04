@@ -719,7 +719,7 @@ async function submitMultiUpload(){
         const ph=emptyPlaceholders[placeholderIdx];placeholderIdx++;
         const up={schedule:item.schedule.trim(),entry_date:ed,supplier_delivery_date:supD,file_url:furl,file_name:fname,status:'Scheduled',total_weight:wt,drawing_reference:item.drawing.trim()||null,split_reference:splitRef||ph.split_reference,...breakdown};
         if(ph.our_delivery_date&&supD&&ph.our_delivery_date!==supD)up.mismatch_resolved=false;
-        const{error}=await sb.from('entries').update(up).eq('id',ph.id);if(error)throw error;
+        const no=await writeEntry(ph.id,up);if(no)throw new Error('Not saved — '+no);
         await auditLog({entry_id:ph.id,action:'UPDATE',field_changed:'schedule_attached',new_value:`${item.schedule.trim()} (${fname}) [split upload]`});
       }else{
         // Create a new unmatched row.
@@ -1378,7 +1378,7 @@ async function submitEntry(){
         const up={schedule,entry_date:ed,supplier_delivery_date:supD,file_url:furl,file_name:fname,status:'Scheduled',total_weight:weight?parseFloat(weight):null,drawing_reference:drawing,comments:comments||entry.comments,...breakdown};
         if(combined.length)up.markup_plans=JSON.stringify(combined);
         if(entry.our_delivery_date&&supD&&entry.our_delivery_date!==supD)up.mismatch_resolved=false;
-        const{error}=await sb.from('entries').update(up).eq('id',selectedOrderId);if(error)throw error;
+        const no=await writeEntry(selectedOrderId,up);if(no)throw new Error('Not saved — '+no);
         await auditLog({entry_id:selectedOrderId,action:'UPDATE',field_changed:'schedule_attached',new_value:`${schedule} (${fname||'no file'})`});
       }else{
         // For unmatched entries, capture the user's split_reference choice. Read the dropdown /
@@ -1494,13 +1494,15 @@ async function toggleHold(id){
   const e=entries.find(x=>x.id===id);if(!e)return;
   if(e.on_hold){
     // Turning OFF — no prompt
-    await sb.from('entries').update({on_hold:false}).eq('id',id);
+    const no=await writeEntry(id,{on_hold:false});
+    if(no){alert('Hold not released — '+no);await loadEntries();renderDash();return}
     await auditLog({entry_id:id,action:'ON_HOLD',field_changed:'on_hold',old_value:'true',new_value:'false'});
     await loadEntries();renderDash();
   }else{
     // Turning ON — ask about notification
     confirmDialog('Put on Hold?',`Put <b>${esc(e.project)}</b> / ${esc(e.level||'—')} / ${esc(e.area||'—')}${e.schedule?' ('+esc(e.schedule)+')':''} on hold?<br><br>You'll be asked if you want to send a notification email.`,'Put On Hold','btn-dark',async()=>{
-      await sb.from('entries').update({on_hold:true,previous_status:e.status}).eq('id',id);
+      const no=await writeEntry(id,{on_hold:true,previous_status:e.status});
+      if(no){alert('Not put on hold — '+no);await loadEntries();renderDash();return}
       await auditLog({entry_id:id,action:'ON_HOLD',field_changed:'on_hold',old_value:'false',new_value:'true'});
       await loadEntries();renderDash();
       // Then prompt for email
@@ -1569,7 +1571,7 @@ async function confirmAttach(id){
     const furl=await uploadFile(file,e.project,e.level,e.area);
     const up={schedule:s,entry_date:sub,supplier_delivery_date:sd,file_url:furl,file_name:file.name,status:'Scheduled',total_weight:wt?parseFloat(wt):null,drawing_reference:dr||null,...extractionBreakdown(ex)};
     if(e.our_delivery_date&&sd!==e.our_delivery_date)up.mismatch_resolved=false;
-    const{error}=await sb.from('entries').update(up).eq('id',id);if(error)throw error;
+    const no=await writeEntry(id,up);if(no)throw new Error('Not attached — '+no);
     await auditLog({entry_id:id,action:'UPDATE',field_changed:'schedule_attached',new_value:s});
     closeOv('detailOv');await loadEntries();renderDash();
   }catch(e){err.innerHTML='<div class="error-msg">'+esc(e.message)+'</div>'}btn.disabled=false;btn.textContent='Attach'}
@@ -1617,13 +1619,15 @@ async function doCancel(id){const r=$('cancelR').value.trim();if(!r)return $('ca
 function reinstateEntry(id){const e=entries.find(x=>x.id===id);if(!e)return;
   confirmDialog('Reinstate Entry?','Reinstate this cancelled entry?','Reinstate','',async()=>{
     let ns='Not Ordered';if(e.file_url||e.schedule)ns='Scheduled';else if(e.our_delivery_date)ns='Ordered';
-    await sb.from('entries').update({status:ns,cancel_reason:null}).eq('id',id);
+    const no=await writeEntry(id,{status:ns,cancel_reason:null});
+    if(no){alert('Not reinstated — '+no);await loadEntries();renderDash();return}
     await auditLog({entry_id:id,action:'REINSTATE',field_changed:'status',old_value:'Cancelled',new_value:ns});
     await loadEntries();renderDash()})}
 
 function resolveMismatch(id){
   confirmDialog('Resolve Mismatch?','Mark the date mismatch as resolved? The two dates remain different, but will no longer be flagged.','Resolve','',async()=>{
-    await sb.from('entries').update({mismatch_resolved:true,mismatch_resolved_by:userName,mismatch_resolved_at:new Date().toISOString()}).eq('id',id);
+    const no=await writeEntry(id,{mismatch_resolved:true,mismatch_resolved_by:userName,mismatch_resolved_at:new Date().toISOString()});
+    if(no){alert('Mismatch not marked resolved — '+no);await loadEntries();renderDash();return}
     await auditLog({entry_id:id,action:'MISMATCH_RESOLVED',field_changed:'mismatch_resolved',new_value:'true'});
     await loadEntries();renderDash()})}
 
@@ -1631,15 +1635,17 @@ function resolveMismatch(id){
 function editWeight(id){const e=entries.find(x=>x.id===id);if(!e)return;
   $('weightModal').innerHTML=`<h3>Weight<button class="modal-close" onclick="closeOv('weightOv')">&times;</button></h3><div class="fg"><label>Tonnes</label><input type="number" step="0.001" id="wInp" value="${esc(e.total_weight||'')}" style="font-family:'JetBrains Mono',monospace"></div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn btn-sec btn-sm" onclick="closeOv('weightOv')">Cancel</button><button class="btn btn-sm" onclick="saveWeight(${id})" style="width:auto">Save</button></div>`;$('weightOv').classList.add('show')}
 async function saveWeight(id){const v=$('wInp').value;const e=entries.find(x=>x.id===id);
-  await sb.from('entries').update({total_weight:v?parseFloat(v):null}).eq('id',id);
-  await auditLog({entry_id:id,action:'UPDATE',field_changed:'total_weight',old_value:String(e.total_weight||''),new_value:v||''});
+  const no=await writeEntry(id,{total_weight:v?parseFloat(v):null});
+  if(no){alert('Weight not saved — '+no);return}
+  await auditLog({entry_id:id,action:'UPDATE',field_changed:'total_weight',old_value:String((e&&e.total_weight)||''),new_value:v||''});
   closeOv('weightOv');await loadEntries();renderDash()}
 
 function editComment(id){const e=entries.find(x=>x.id===id);if(!e)return;
   $('commentModal').innerHTML=`<h3>Comment<button class="modal-close" onclick="closeOv('commentOv')">&times;</button></h3><div class="fg"><textarea id="cmtInp" rows="4">${esc(e.comments||'')}</textarea></div><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px"><button class="btn btn-sec btn-sm" onclick="closeOv('commentOv')">Cancel</button><button class="btn btn-sm" onclick="saveCmt(${id})" style="width:auto">Save</button></div>`;$('commentOv').classList.add('show')}
 async function saveCmt(id){const v=$('cmtInp').value.trim();const e=entries.find(x=>x.id===id);
-  await sb.from('entries').update({comments:v||null}).eq('id',id);
-  await auditLog({entry_id:id,action:'UPDATE',field_changed:'comments',old_value:e.comments||'',new_value:v||''});
+  const no=await writeEntry(id,{comments:v||null});
+  if(no){alert('Comment not saved — '+no);return}
+  await auditLog({entry_id:id,action:'UPDATE',field_changed:'comments',old_value:(e&&e.comments)||'',new_value:v||''});
   closeOv('commentOv');await loadEntries();renderDash()}
 
 /* ═══ b5.1 — chunked comment editor ═══
@@ -1703,7 +1709,8 @@ async function saveChunkComment(id,col){
   if(newText){updated.push({text:newText,authors:[userName],created_at:new Date().toISOString()})}
   // 3. Persist.
   const newJson=chunksToJson(updated);
-  await sb.from('entries').update({[colName]:newJson}).eq('id',id);
+  const no=await writeEntry(id,{[colName]:newJson});
+  if(no){alert('Comment not saved — '+no);return}
   await auditLog({entry_id:id,action:'UPDATE',field_changed:colName,old_value:chunksToPlain(old).slice(0,200),new_value:chunksToPlain(updated).slice(0,200)});
   closeOv('commentOv');await loadEntries();renderDash();}
 
@@ -1714,7 +1721,8 @@ function clearChunkComment(id,col){
   confirmDialog(`Clear all ${colLabel}?`,'This will remove every line in this column. Audit log captures who cleared it. This cannot be undone.','Clear All','btn-err',async()=>{
     const e=entries.find(x=>x.id===id);if(!e)return;
     const old=parseChunks(e[colName]);
-    await sb.from('entries').update({[colName]:null}).eq('id',id);
+    const no=await writeEntry(id,{[colName]:null});
+    if(no){alert('Comments not cleared — '+no);return}
     await auditLog({entry_id:id,action:'UPDATE',field_changed:colName+'_cleared',old_value:chunksToPlain(old).slice(0,200),new_value:'(cleared)'});
     closeOv('commentOv');await loadEntries();renderDash();
   });
@@ -1724,7 +1732,8 @@ function uploadMarkup(id){const inp=document.createElement('input');inp.type='fi
   inp.onchange=async()=>{if(!inp.files.length)return;try{const e=entries.find(x=>x.id===id);
     const mp=e.markup_plans?JSON.parse(e.markup_plans):[];
     for(const file of inp.files){const furl=await uploadFile(file,e.project+'/_markups',e.level,e.area);mp.push({url:furl,name:file.name,uploaded_by:userName,date:today()})}
-    await sb.from('entries').update({markup_plans:JSON.stringify(mp)}).eq('id',id);
+    const no=await writeEntry(id,{markup_plans:JSON.stringify(mp)});
+    if(no){alert("The file uploaded, but it wasn't added to the entry — "+no);await loadEntries();renderDash();return}
     await auditLog({entry_id:id,action:'UPDATE',field_changed:'markup_plans',new_value:'Added '+inp.files.length+' file(s)'});
     await loadEntries();renderDash();}catch(e){alert('Failed: '+e.message)}};inp.click()}
 
@@ -1733,7 +1742,8 @@ function viewMarkups(id){const e=entries.find(x=>x.id===id);if(!e)return;const m
 async function removeMarkup(id,idx){
   confirmDialog('Remove Markup?','Remove this markup plan?','Remove','btn-err',async()=>{
     const e=entries.find(x=>x.id===id);const mp=JSON.parse(e.markup_plans||'[]');mp.splice(idx,1);
-    await sb.from('entries').update({markup_plans:mp.length?JSON.stringify(mp):null}).eq('id',id);
+    const no=await writeEntry(id,{markup_plans:mp.length?JSON.stringify(mp):null});
+    if(no){alert('Markup plan not removed — '+no);await loadEntries();renderDash();return}
     await auditLog({entry_id:id,action:'UPDATE',field_changed:'markup_plans',old_value:'Removed'});
     await loadEntries();renderDash();closeOv('markupOv')})}
 
@@ -1890,15 +1900,15 @@ function removeScheduleFromEntry(id){
       // Clear schedule fields and the extraction breakdown. Explicitly DO NOT clear:
       //   markup_plans, sf_comment, sf_dispute, installed_date — those survive a re-upload.
       // Also clear extraction_method so the 🔍 OCR badge disappears with the old data.
-      const{error}=await sb.from('entries').update({
+      const no=await writeEntry(id,{
         schedule:null,file_url:null,file_name:null,
         supplier_delivery_date:null,drawing_reference:null,total_weight:null,
         bar_weight:null,mesh_sqm:null,trench_mesh_lm:null,
         starter_weight:null,recon_status:null,recon_diff:null,recon_reason:null,recon_reviewed:false,recon_reviewed_by:null,
         extraction_method:null,
         status:newStatus,mismatch_resolved:true
-      }).eq('id',id);
-      if(error){alert('Error: '+error.message);return}
+      });
+      if(no){alert('Schedule not removed — '+no);return}
       await auditLog({entry_id:id,action:'UPDATE',field_changed:'schedule_removed',old_value:e.schedule||e.file_name||'',new_value:'cleared'});
       closeOv('editOv');await loadEntries();renderDash()})}
 
@@ -1916,8 +1926,8 @@ async function removeMarkupFromEdit(id,idx){
     'btn-err',
     async()=>{
       mp.splice(idx,1);
-      const{error}=await sb.from('entries').update({markup_plans:mp.length?JSON.stringify(mp):null}).eq('id',id);
-      if(error){alert('Error: '+error.message);return}
+      const no=await writeEntry(id,{markup_plans:mp.length?JSON.stringify(mp):null});
+      if(no){alert('Markup plan not removed — '+no);return}
       await auditLog({entry_id:id,action:'UPDATE',field_changed:'markup_plans',old_value:'Removed: '+fileName,new_value:mp.length+' remaining'});
       await loadEntries();renderDash();
       // Re-open the edit modal so further markups can be removed in one go
@@ -3028,8 +3038,8 @@ async function recalcApply(){
       if(r.oldValues.recon_status!==r.newValues.recon_status){
         update.recon_reviewed=false;update.recon_reviewed_by=null;
       }
-      const{error}=await sb.from('entries').update(update).eq('id',r.entry.id);
-      if(error)throw error;
+      const no=await writeEntry(r.entry.id,update);
+      if(no)throw new Error(no);
       // Audit log — record the change with old→new for the key fields
       const summary=['bar_weight','starter_weight','mesh_sqm','trench_mesh_lm','recon_status'].filter(k=>{
         const a=r.oldValues[k],b=r.newValues[k];
@@ -3161,7 +3171,8 @@ function sfReconCell(e){
 async function sfMarkReviewed(id){
   const e=entries.find(x=>x.id===id);if(!e)return;
   const by=userName||foremanName||'Unknown';
-  await sb.from('entries').update({recon_reviewed:true,recon_reviewed_by:by}).eq('id',id);
+  const no=await writeEntry(id,{recon_reviewed:true,recon_reviewed_by:by});
+  if(no){alert('Not marked reviewed — '+no);await loadEntries();renderSfTable();return}
   await auditLog({entry_id:id,action:'UPDATE',field_changed:'recon_reviewed',old_value:'false',new_value:'true ('+by+')'});
   await loadEntries();renderSfTable();
 }
@@ -3176,8 +3187,9 @@ function sfEdit(field,id){
 async function sfSave(field,id){
   const v=$('sfInp').value,nv=v===''?null:parseFloat(v);
   const e=entries.find(x=>x.id===id);
-  await sb.from('entries').update({[field]:nv,extraction_method:'manual'}).eq('id',id);
-  await auditLog({entry_id:id,action:'UPDATE',field_changed:field,old_value:String(e[field]||''),new_value:String(nv==null?'':nv)+' (manual)'});
+  const no=await writeEntry(id,{[field]:nv,extraction_method:'manual'});
+  if(no){alert('Not saved — '+no);return}
+  await auditLog({entry_id:id,action:'UPDATE',field_changed:field,old_value:String((e&&e[field])||''),new_value:String(nv==null?'':nv)+' (manual)'});
   closeOv('weightOv');await loadEntries();renderAdminFixers()}
 
 function sfEditInstalled(id){
@@ -3188,14 +3200,16 @@ function sfEditInstalled(id){
 async function sfSaveInstalled(id){
   const v=$('sfDateInp').value,nv=v||null;
   const e=entries.find(x=>x.id===id);
-  await sb.from('entries').update({installed_date:nv}).eq('id',id);
-  await auditLog({entry_id:id,action:'UPDATE',field_changed:'installed_date',old_value:String(e.installed_date||''),new_value:String(nv||'')});
+  const no=await writeEntry(id,{installed_date:nv});
+  if(no){alert('Install date not saved — '+no);return}
+  await auditLog({entry_id:id,action:'UPDATE',field_changed:'installed_date',old_value:String((e&&e.installed_date)||''),new_value:String(nv||'')});
   closeOv('weightOv');await loadEntries();renderAdminFixers()}
 
 async function sfClearInstalled(id){
   const e=entries.find(x=>x.id===id);
-  await sb.from('entries').update({installed_date:null}).eq('id',id);
-  await auditLog({entry_id:id,action:'UPDATE',field_changed:'installed_date',old_value:String(e.installed_date||''),new_value:''});
+  const no=await writeEntry(id,{installed_date:null});
+  if(no){alert('Install date not cleared — '+no);return}
+  await auditLog({entry_id:id,action:'UPDATE',field_changed:'installed_date',old_value:String((e&&e.installed_date)||''),new_value:''});
   closeOv('weightOv');await loadEntries();renderAdminFixers()}
 
 // ─── Comments column ───
@@ -3209,14 +3223,16 @@ function sfEditComment(id){
 async function sfSaveComment(id){
   const v=($('sfCmtInp').value||'').trim(),nv=v||null;
   const e=entries.find(x=>x.id===id);
-  await sb.from('entries').update({sf_comment:nv}).eq('id',id);
-  await auditLog({entry_id:id,action:'UPDATE',field_changed:'sf_comment',old_value:String(e.sf_comment||''),new_value:String(nv||'')});
+  const no=await writeEntry(id,{sf_comment:nv});
+  if(no){alert('Note not saved — '+no);return}
+  await auditLog({entry_id:id,action:'UPDATE',field_changed:'sf_comment',old_value:String((e&&e.sf_comment)||''),new_value:String(nv||'')});
   closeOv('weightOv');await loadEntries();renderAdminFixers()}
 
 async function sfClearComment(id){
   const e=entries.find(x=>x.id===id);
-  await sb.from('entries').update({sf_comment:null}).eq('id',id);
-  await auditLog({entry_id:id,action:'UPDATE',field_changed:'sf_comment',old_value:String(e.sf_comment||''),new_value:''});
+  const no=await writeEntry(id,{sf_comment:null});
+  if(no){alert('Note not cleared — '+no);return}
+  await auditLog({entry_id:id,action:'UPDATE',field_changed:'sf_comment',old_value:String((e&&e.sf_comment)||''),new_value:''});
   closeOv('weightOv');await loadEntries();renderAdminFixers()}
 
 // ─── Dispute Raised column ───
@@ -3235,7 +3251,8 @@ async function sfToggleDispute(id){
   // Cycle: null → tick → cross → dash → null
   const cur=e.sf_dispute||null;
   const next=cur===null?'tick':cur==='tick'?'cross':cur==='cross'?'dash':null;
-  await sb.from('entries').update({sf_dispute:next}).eq('id',id);
+  const no=await writeEntry(id,{sf_dispute:next});
+  if(no){alert('Dispute mark not saved — '+no);await loadEntries();renderAdminFixers();return}
   await auditLog({entry_id:id,action:'UPDATE',field_changed:'sf_dispute',old_value:String(cur||''),new_value:String(next||'')});
   await loadEntries();renderAdminFixers()}
 
@@ -3926,9 +3943,11 @@ function foremanCardHtml({e,isNew}){
       ${notesHtml}
     </div>`}
 
+// b5.14: every foreman write checks the database took it (writeEntry) before its history line is written.
 async function foremanMarkDelivered(id){
   const e=entries.find(x=>x.id===id);if(!e)return;
-  await sb.from('entries').update({status:'Delivered'}).eq('id',id);
+  const no=await writeEntry(id,{status:'Delivered'});
+  if(no){alert('Not marked delivered — '+no);await loadEntries();renderForeman();return}
   await foremanAudit({entry_id:id,action:'UPDATE',field_changed:'status',old_value:e.status,new_value:'Delivered'});
   await loadEntries();renderForeman();
 }
@@ -3936,7 +3955,8 @@ async function foremanUndoDelivered(id){
   const e=entries.find(x=>x.id===id);if(!e)return;
   // Revert to a sensible prior status: Scheduled if it has a schedule, else Ordered/Not Ordered.
   const revert=e.schedule?'Scheduled':(e.our_delivery_date?'Ordered':'Not Ordered');
-  await sb.from('entries').update({status:revert}).eq('id',id);
+  const no=await writeEntry(id,{status:revert});
+  if(no){alert('Delivered not undone — '+no);await loadEntries();renderForeman();return}
   await foremanAudit({entry_id:id,action:'UPDATE',field_changed:'status',old_value:'Delivered',new_value:revert+' (undo)'});
   await loadEntries();renderForeman();
 }
@@ -3949,8 +3969,9 @@ async function foremanSaveInstall(id){
   const v=$('fmDateInp').value,nv=v||null;const e=entries.find(x=>x.id===id);
   const upd={installed_date:nv};
   if(nv)upd.progress_pct=100;   // installed on site = 100% done
-  await sb.from('entries').update(upd).eq('id',id);
-  await foremanAudit({entry_id:id,action:'UPDATE',field_changed:'installed_date',old_value:String(e.installed_date||''),new_value:String(nv||'')});
+  const no=await writeEntry(id,upd);
+  if(no){alert('Install date not saved — '+no);return}
+  await foremanAudit({entry_id:id,action:'UPDATE',field_changed:'installed_date',old_value:String((e&&e.installed_date)||''),new_value:String(nv||'')});
   closeOv('weightOv');await loadEntries();renderForeman();
 }
 function foremanSetProgress(id){
@@ -3962,8 +3983,9 @@ function foremanSetProgress(id){
 async function foremanSaveProgress(id){
   let v=parseInt($('fmPctInp').value,10);if(isNaN(v))v=0;v=Math.max(0,Math.min(100,v));
   const e=entries.find(x=>x.id===id);
-  await sb.from('entries').update({progress_pct:v}).eq('id',id);
-  await foremanAudit({entry_id:id,action:'UPDATE',field_changed:'progress_pct',old_value:String(e.progress_pct==null?'':e.progress_pct),new_value:String(v)});
+  const no=await writeEntry(id,{progress_pct:v});
+  if(no){alert('Progress not saved — '+no);return}
+  await foremanAudit({entry_id:id,action:'UPDATE',field_changed:'progress_pct',old_value:String(!e||e.progress_pct==null?'':e.progress_pct),new_value:String(v)});
   closeOv('weightOv');await loadEntries();renderForeman();
 }
 function foremanSetInstallDetail(id,sel){
@@ -3980,8 +4002,8 @@ function foremanSetInstallDetail(id,sel){
 async function foremanSaveInstallDetail(id,val){
   const e=entries.find(x=>x.id===id);if(!e)return;
   const nv=val||null;
-  const{error}=await sb.from('entries').update({install_detail:nv}).eq('id',id);
-  if(error){alert('Could not save the REO install detail: '+error.message);return}
+  const no=await writeEntry(id,{install_detail:nv});
+  if(no){alert('Could not save the REO install detail — '+no);await loadEntries();renderForeman();return}
   await foremanAudit({entry_id:id,action:'UPDATE',field_changed:'install_detail',old_value:String(e.install_detail||''),new_value:String(nv||'')});
   await loadEntries();renderForeman();
 }
@@ -3993,10 +4015,11 @@ function foremanAddNote(id){
 }
 async function foremanSaveNote(id){
   const txt=$('fmNoteInp').value.trim();if(!txt)return;
-  const e=entries.find(x=>x.id===id);
+  const e=entries.find(x=>x.id===id);if(!e){alert('This entry is no longer in the list — refresh.');return}
   const chunks=parseChunks(e.foreman_notes);
   chunks.push({text:txt,authors:[foremanName||'Foreman'],created_at:new Date().toISOString()});
-  await sb.from('entries').update({foreman_notes:chunksToJson(chunks)}).eq('id',id);
+  const no=await writeEntry(id,{foreman_notes:chunksToJson(chunks)});
+  if(no){alert('Note not added — '+no);return}
   await foremanAudit({entry_id:id,action:'UPDATE',field_changed:'foreman_notes',new_value:'Note added: '+txt.slice(0,60)});
   closeOv('weightOv');await loadEntries();renderForeman();
 }
@@ -4069,8 +4092,9 @@ function foremanReportCSV(){
 }
 async function foremanClearInstall(id){
   const e=entries.find(x=>x.id===id);
-  await sb.from('entries').update({installed_date:null}).eq('id',id);
-  await foremanAudit({entry_id:id,action:'UPDATE',field_changed:'installed_date',old_value:String(e.installed_date||''),new_value:''});
+  const no=await writeEntry(id,{installed_date:null});
+  if(no){alert('Install date not cleared — '+no);return}
+  await foremanAudit({entry_id:id,action:'UPDATE',field_changed:'installed_date',old_value:String((e&&e.installed_date)||''),new_value:''});
   closeOv('weightOv');await loadEntries();renderForeman();
 }
 
