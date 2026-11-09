@@ -332,3 +332,51 @@ test('a too-long cell card email reaches the panel with its count and galvanised
   a.openMismatchEmail(21);
   assert.deepEqual(plain(r('emailOpts')),{count:null,gal:[]});
 });
+
+// ── a4: the Edit dialog can't place a BLANK ad hoc entry ──
+test('editPairProblem: an unplaced ad hoc row whose form fills a level or area → "Complete this in Master-OPS"; a placed row still moves', ()=>{
+  const{a}=dbccApp();
+  const words='Complete this in Master-OPS — an ad hoc item is placed on REO Schedules there (the lobby → Place ad hoc), and the next pull brings it here.';
+  const loose={project:'Barwon "Res"',level:null,area:null,entry_type:'loose'};
+  assert.equal(a.editPairProblem(loose,{project:'Barwon "Res"',level:'GRD',area:'SLAB'}),words,'even an active pair');
+  assert.equal(a.editPairProblem(loose,{project:'Barwon "Res"',level:'GRD',area:''}),words);
+  assert.equal(a.editPairProblem(loose,{project:'Barwon "Res"',level:'',area:'SLAB'}),words);
+  assert.equal(a.editPairProblem(loose,{project:'Barwon "Res"',level:'',area:''}),null,'both blank: unchanged');
+  assert.equal(a.editPairProblem(loose,{project:'Jacksons Creek',level:'',area:''}),null,'moved to another job, still Ad hoc there');
+  assert.equal(a.editPairProblem({...loose,level:'',area:''},{project:'Barwon "Res"',level:'GRD',area:'SLAB'}),words,'"" and null are the same blank');
+  const placed={project:'Barwon "Res"',level:'L1',area:'WALLS',entry_type:'scheduled'};
+  assert.equal(a.editPairProblem(placed,{project:'Barwon "Res"',level:'GRD',area:'SLAB'}),null,'a placed entry moves to an active pair as b5.14');
+  assert.equal(a.editPairProblem(placed,{project:'Barwon "Res"',level:'GRD',area:'WALLS'}),"GRD / WALLS isn't a level/area on this job — refresh, or send it as Ad hoc.");
+  const placedLoose={project:'Barwon "Res"',level:'GRD',area:'SLAB',entry_type:'loose'};
+  assert.equal(a.editPairProblem(placedLoose,{project:'Barwon "Res"',level:'GRD',area:'COLUMNS'}),null,'an ad hoc entry already placed moves like any other');
+});
+
+test('the Edit dialog (pairs live): an unplaced ad hoc entry\'s level / area are disabled with the hint; a placed entry\'s are enabled; Save refuses a placement', async()=>{
+  const{a,r,els,sb}=dbccApp();
+  a.document.getElementById('ed_proj').value='Barwon "Res"';   // the stub page holds no <option>s: the select's value is set as a browser would from the picked option
+  a.openEditEntry(30);
+  let h=els.editModal.innerHTML;
+  assert.match(h,/<select id="ed_proj">/,'the job can still change');
+  assert.match(h,/<select id="ed_level" disabled>/);assert.match(h,/<select id="ed_area" disabled>/);
+  assert.match(h,/<div class="hint" id="ed_adhoc_hint"[^>]*>Complete this in Master-OPS — an ad hoc item is placed on REO Schedules there \(the lobby → Place ad hoc\), and the next pull brings it here\.<\/div>/);
+  // re-enabled by hand and filled: Save refuses before anything is sent
+  a.document.getElementById('ed_level').value='GRD';a.document.getElementById('ed_area').value='SLAB';
+  await a.saveEdit(30);
+  assert.equal(sb.calls.length,0,'nothing sent');
+  assert.match(els.edErr.innerHTML,/Complete this in Master-OPS — an ad hoc item is placed on REO Schedules there/);
+  // a placed entry: as b5.14
+  a.openEditEntry(21);
+  h=els.editModal.innerHTML;
+  assert.match(h,/<select id="ed_level">/);assert.match(h,/<select id="ed_area">/);
+  assert.ok(!/ed_adhoc_hint/.test(h));
+  // pairs off: nothing of this (the b5.13 dialog)
+  const off=dbccApp({pairsLive:false});
+  off.a.openEditEntry(30);
+  assert.match(off.els.editModal.innerHTML,/<select id="ed_level">/);assert.ok(!/ed_adhoc_hint/.test(off.els.editModal.innerHTML));
+  // a supplier: the b5.14 lock and its words, not the ad hoc ones
+  const s=dbccApp({role:'supplier'});
+  s.a.openEditEntry(30);
+  assert.match(s.els.editModal.innerHTML,/<select id="ed_level" disabled>/);
+  assert.match(s.els.editModal.innerHTML,/Only DBCC can change the job, level or area once an entry is made — ask DBCC\./);
+  assert.ok(!/ed_adhoc_hint/.test(s.els.editModal.innerHTML));
+});

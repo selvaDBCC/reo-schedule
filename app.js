@@ -2037,9 +2037,13 @@ function editPairHtml(pn,opening){
 function onEditLevelChange(){if(!pairsLive)return;const la=editLevelAreaHtml($('ed_proj').value,false);$('ed_area').innerHTML=la.area}
 // Save's pre-check (pairs live): a changed job / level / area must be a pair of the job — the guard's own words. An
 // unchanged one passes even on a retired pair, as in the database.
+// b5.15 (Chris, 5 Nov 2026, a4): a blank Ad hoc entry is placed in Master-OPS, never from this dialog — the selects are
+// disabled with these words, and Save refuses even when they are re-enabled by hand. The database guard still decides.
+const ADHOC_PLACE_WORDS='Complete this in Master-OPS — an ad hoc item is placed on REO Schedules there (the lobby → Place ad hoc), and the next pull brings it here.';
 function editPairProblem(row,form){
   const same=(a,b)=>(a==null?'':String(a))===(b==null?'':String(b));
   if(same(form.project,row.project)&&same(form.level,row.level)&&same(form.area,row.area))return null;
+  if(isUnplaced(row)&&!(blankName(form.level)&&blankName(form.area)))return ADHOC_PLACE_WORDS;   // b5.15 a4
   const p=projects.find(x=>x.name===form.project);
   return pairProblem(p?pairsOf(p.id):[],{level:form.level,area:form.area,entryType:row.entry_type,wasPlaced:!blankName(row.level)&&!blankName(row.area)})}
 function readEditForm(){return{project:$('ed_proj').value,level:$('ed_level').value,area:$('ed_area').value,schedule:$('ed_sched').value.trim(),entry_date:$('ed_date').value,our_delivery_date:$('ed_ourD').value,supplier_delivery_date:$('ed_supD').value,drawing_reference:$('ed_draw').value.trim(),total_weight:$('ed_wt').value.trim(),split_reference:$('ed_split').value.trim()}}
@@ -2110,10 +2114,13 @@ function openEditEntry(id){const e=entries.find(x=>x.id===id);if(!e)return;
   // b5.14: once an entry is made only DBCC changes its job, level or area (Selva Q2). REO 0012's protect rules refuse a
   // supplier's change from the day 0012 is applied — before pairs_live is on — so the dialog never offers it to them.
   const laLock=isSupplier()?' disabled':'';
+  // b5.15 (a4): with pairs live a blank Ad hoc entry's level / area are placed in Master-OPS — for every login the two
+  // selects are disabled (the job can still be changed: it stays Ad hoc there). A placed entry edits as b5.14.
+  const adhocLock=!laLock&&pairsLive&&isUnplaced(e)?' disabled':'';
   $('editModal').innerHTML=`<h3>Edit Entry<button class="modal-close" onclick="closeOv('editOv')">&times;</button></h3>
 <div class="fg"><label>Project</label><select id="ed_proj"${laLock}>${editOptions(projects.map(p=>p.name),e.project,e.project?null:'— no project —','not in the project list')}</select></div>
-<div class="row2"><div class="fg"><label>Level</label><select id="ed_level"${laLock}>${la.level}</select></div><div class="fg"><label>Area</label><select id="ed_area"${laLock}>${la.area}</select></div></div>
-${laLock?'<div class="hint" style="margin:-6px 0 10px">Only DBCC can change the job, level or area once an entry is made — ask DBCC.</div>':''}
+<div class="row2"><div class="fg"><label>Level</label><select id="ed_level"${laLock||adhocLock}>${la.level}</select></div><div class="fg"><label>Area</label><select id="ed_area"${laLock||adhocLock}>${la.area}</select></div></div>
+${laLock?'<div class="hint" style="margin:-6px 0 10px">Only DBCC can change the job, level or area once an entry is made — ask DBCC.</div>':adhocLock?`<div class="hint" id="ed_adhoc_hint" style="margin:-6px 0 10px">${esc(ADHOC_PLACE_WORDS)}</div>`:''}
 <div class="row2"><div class="fg"><label>Schedule</label><input type="text" id="ed_sched" value="${esc(e.schedule||'')}" style="font-family:'JetBrains Mono',monospace"></div><div class="fg"><label>Scheduler Entry Date</label><input type="date" id="ed_date" value="${esc(e.entry_date||'')}"></div></div>
 <div class="row2"><div class="fg"><label>DBCC Requested Delivery Date${isSupplier()?' <span style="font-weight:400;color:var(--muted);font-size:11px">(DBCC only)</span>':''}</label><input type="date" id="ed_ourD" value="${esc(e.our_delivery_date||'')}"${isSupplier()?' disabled title="Only DBCC can change the DBCC requested delivery date"':''}></div><div class="fg"><label>Production Delivery Date</label><input type="date" id="ed_supD" value="${esc(e.supplier_delivery_date||'')}"></div></div>
 <div class="row2"><div class="fg"><label>Drawing Reference</label><input type="text" id="ed_draw" value="${esc(e.drawing_reference||'')}"></div><div class="fg"><label>Weight (T)</label><input type="number" step="0.001" id="ed_wt" value="${esc(e.total_weight??'')}" style="font-family:'JetBrains Mono',monospace"></div></div>
