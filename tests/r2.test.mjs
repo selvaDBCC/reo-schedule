@@ -485,25 +485,30 @@ test('cellCardEmail: one email from everything saved — new orders, date change
   const m=app.cellCardEmail({project:'Barwon Reservoir',supplier:'Aus Reo',log,sender:'Chris',
     files:[{label:'GRD slab marking plan',url:FILE_URL},{label:'Sequence',url:'javascript:alert(1)'}]});
   assert.equal(m.subject,'REO orders — Barwon Reservoir (1 new, 2 date changes, 1 cancelled)');
+  // b5.15 (Chris, 5 Nov 2026, a2 / a3): count line first, CANCELLED → DATE CHANGED → NEW ORDERS, the price reference
+  // under NEW ORDERS, a reply per line asked for. No scheduler passed: the supplier's name in the greeting.
   assert.equal(m.body,
 `Hi Aus Reo,
 
+This email covers 4 orders: 1 new, 2 date changes, 1 cancelled — please confirm you have every line.
+
 The following changes have been made to our REO orders for Barwon Reservoir:
 
-NEW ORDERS — DBCC requested delivery date
-• GRD / COLUMNS (Part 1) — 20/11/2026
+CANCELLED
+• L1 / WALLS · UT2X — reason: wall redesigned — see "RFI 12"
 
 DBCC REQUESTED DELIVERY DATE CHANGED
 • GRD / SLAB (Part 1) · U9AV — 05/11/2026 → 12/11/2026
 • B1 / PILES — not set → 30/11/2026
 
-CANCELLED
-• L1 / WALLS · UT2X — reason: wall redesigned — see "RFI 12"
+NEW ORDERS — DBCC requested delivery date
+• GRD / COLUMNS (Part 1) — 20/11/2026
+Price as per quotation SQ000081216-2
 
 ─── Reference documents ───
 • GRD slab marking plan: ${FILE_URL}
 
-Please confirm receipt and your production delivery dates.
+Please reply confirming each line above (one line per order), and your production delivery dates.
 
 If these changes are not acceptable, please contact a DBCC representative immediately to resolve the matter.
 
@@ -512,7 +517,8 @@ Chris
 Debono Bros Concreting`);
   assert.ok(!/javascript:/.test(m.body),'a link that isn\'t on the REO file store is left out');
   const c=app.cellCardEmail({project:'P',supplier:'ARC',log:{created:[],dates:[],cancels:[{id:1,level:'A',area:'B',reason:'r'}]},files:[],sender:'S'});
-  assert.equal(c.subject,'REO orders — P (1 cancelled)');assert.match(c.body,/^Hi ARC,/);assert.match(c.body,/Please confirm receipt\./,'nothing dated: no dates asked for');
+  assert.equal(c.subject,'REO orders — P (1 cancelled)');assert.match(c.body,/^Hi ARC,/);assert.match(c.body,/Please reply confirming each line above \(one line per order\)\.\n/,'nothing dated: no dates asked for');
+  assert.ok(!/Price as per/.test(c.body),'no new order: no price line');
   assert.equal(app.cellCardEmail({project:'P',supplier:'ARC',log:{created:[{id:1,date:null}],dates:[],cancels:[]},files:[{label:'x',url:FILE_URL}],sender:'S'}),null,'nothing to tell the supplier: no email');
 });
 

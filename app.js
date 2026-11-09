@@ -515,7 +515,32 @@ async function loadProjectFiles(){
 // ═══ PEOPLE / ASSIGNMENTS / SETTINGS ═══
 // Loaded lazily — first time the admin tab is opened. Falls back to empty/defaults on error
 // so the rest of the app keeps working even before the b5.0 SQL migration has been run.
-let people=[],assignments=[],appSettings={overdue_install_days:3};
+// b5.15 — the price reference printed on every order email, per supplier (Chris, 5 Nov 2026, a3). Stored as app_settings
+// rows price_ref_ausreo / price_ref_arc (Admin → Accountability, DBCC only — Chris sets them); these are the words used
+// while the row is empty. A supplier that is neither gets no price line.
+const PRICE_REF_DEFAULTS={'Aus Reo':'Price as per quotation SQ000081216-2','ARC':'Price as per ARC price guide 1 Jul 2026'};
+const PRICE_REF_KEYS={'Aus Reo':'price_ref_ausreo','ARC':'price_ref_arc'};
+function priceRefFor(supplier,settings){const s=settings||appSettings,k=PRICE_REF_KEYS[supplier];
+  const v=k&&s&&typeof s[k]==='string'?s[k].trim():'';return v||PRICE_REF_DEFAULTS[supplier]||''}
+// b5.15 — the greeting on an order email names the job's scheduler(s) where the app knows them (Chris, 5 Nov 2026, a3-5):
+// the contacts' labels are the only name it holds for a scheduler. None known → the supplier's name, as before.
+function greetingFor(schedulers,supplier){
+  const names=(schedulers||[]).map(c=>String((c&&c.label)||'').trim()).filter(Boolean);
+  if(!names.length)return `Hi ${supplier||'team'},`;
+  if(names.length===1)return `Hi ${names[0]},`;
+  return `Hi ${names.slice(0,-1).join(', ')} and ${names[names.length-1]},`}
+// b5.15 — Q7's rule for orders (Chris for Troy, 9 Nov 2026): no galvanised order goes out silently. A REO entry has no
+// description field, so "GAL in the description" is read from what an item does carry: its split label / split reference,
+// drawing reference, schedule, and (for the cell card) the note typed for it. GAL, GALV, GALVANISED, GALVANIZED as words.
+const GAL_RE=/\bGALV?(ANISED|ANIZED)?\b/i;
+function galvanisedItem(r,note){
+  if(!r)return false;
+  return [r.split,r.split_reference,r.drawing_reference,r.schedule,note].some(v=>v!=null&&GAL_RE.test(String(v)))}
+// What the supplier reads on a galvanised NEW ORDERS line, and what the sender is told. The sender's words never go in
+// the email body (they are DBCC's rule to itself).
+const GAL_LINE=' — galvanised — price per your written quotation no. ______ (to be quoted on this order)';
+function galWarning(name){return `Galvanised item ${name} — a written per-project price with its quote number is required before this goes out`}
+let people=[],assignments=[],appSettings={overdue_install_days:3,price_ref_ausreo:'',price_ref_arc:''};
 async function loadPeople(){
   try{const{data,error}=await sb.from('people').select('*').order('role',{ascending:true}).order('name');
     if(error)throw error;people=data||[]}catch(e){console.warn('[REO] loadPeople failed (run migration_b5.0.sql?):',e.message);people=[]}}
@@ -526,8 +551,9 @@ async function loadAppSettings(){
   try{const{data,error}=await sb.from('app_settings').select('*');
     if(error)throw error;
     const map={};(data||[]).forEach(r=>{map[r.key]=r.value});
-    appSettings={overdue_install_days:parseInt(map.overdue_install_days||'3',10)||3}
-  }catch(e){console.warn('[REO] loadAppSettings failed:',e.message);appSettings={overdue_install_days:3}}}
+    appSettings={overdue_install_days:parseInt(map.overdue_install_days||'3',10)||3,
+      price_ref_ausreo:String(map.price_ref_ausreo||''),price_ref_arc:String(map.price_ref_arc||'')}   // b5.15
+  }catch(e){console.warn('[REO] loadAppSettings failed:',e.message);appSettings={overdue_install_days:3,price_ref_ausreo:'',price_ref_arc:''}}}
 async function saveAppSetting(key,value){
   await sb.from('app_settings').upsert({key,value:String(value),updated_at:new Date().toISOString()},{onConflict:'key'});
   await loadAppSettings()}
@@ -2199,6 +2225,9 @@ async function deleteEntry(id){
 // b5.14 — opts (the cell card only; every other caller passes none and nothing changes): files = the reference files to
 // offer (the card puts the ticked ones in the body itself, so it passes []), onSent = told once "Open in Email" opened it.
 let emailAfterSend=null;
+// b5.15: what the dialog was opened with, for the copy-across panel — count = emailCount() of an order email, gal = the
+// galvanised items' names (Q7's rule for orders: the sender is warned; the supplier reads only the price line).
+let emailOpts={count:null,gal:[]};
 // b5.14: Chrome and Edge on Windows drop a mailto: link much over 2,000 characters without a word — the email app never
 // opens, and nothing says so. Above MAILTO_MAX the dialog doesn't open it and doesn't record it as sent: it shows the
 // email to copy across (emailHeld) and records it — and tells the cell card — only when the person says it was sent.
@@ -2208,6 +2237,7 @@ function mailtoUrl(to,sub,body,cc){let u=`mailto:${encodeURIComponent(to)}?subje
 function emailAuditNote(to,cc,sub,nFiles){return 'To: '+to+(cc?' · CC: '+cc:'')+' — '+sub+(nFiles?` · ${nFiles} ref doc${nFiles===1?'':'s'} attached`:'')}
 function emailModal(subject,body,entryId,auditContext,projectName,opts){
   emailAfterSend=opts&&typeof opts.onSent==='function'?opts.onSent:null;
+  emailOpts={count:opts&&opts.count&&opts.count.n?opts.count:null,gal:opts&&Array.isArray(opts.gal)?opts.gal.slice():[]};   // b5.15
   emailHeld=null;
   // Resolve the project so the To field can default to that project's scheduler(s).
   let pname=projectName;
@@ -2261,7 +2291,7 @@ function emailModal(subject,body,entryId,auditContext,projectName,opts){
 <div class="fg"><label>To</label><input type="email" id="em_to" value="${esc(toVal)}" placeholder="Email address">${toWhy?`<div class="hint" id="em_to_why">${toWhy}</div>`:''}</div>
 <div class="fg"><label>CC <span style="font-weight:400;color:var(--muted);font-size:11px">(tick to include, or add custom below)</span></label>${ccCheckboxes}<input type="text" id="em_cc_extra" placeholder="Add another email (optional)" style="margin-top:6px"></div>
 <div class="fg"><label>Subject</label><input type="text" id="em_sub" value="${esc(subject)}"></div>
-${filesHtml}
+${filesHtml}${emailGalHtml(emailOpts.gal)}
 <div class="fg"><label>Message</label><textarea id="em_body" rows="12" style="font-size:13px">${esc(body)}</textarea></div>
 <p style="font-size:11px;color:var(--muted);margin-top:4px">Clicking Send will open your default email app (Outlook, Gmail, etc.) with the message pre-filled. Review and hit Send in your email app.</p>
 <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn btn-sec btn-sm" onclick="closeOv('emailOv')">Cancel</button><button class="btn btn-purple btn-sm" onclick="sendEmail(${jsArg(entryId==null?null:entryId)},${jsArg(auditContext)})" style="width:auto">✉ Open in Email</button></div>
@@ -2330,7 +2360,7 @@ async function sendEmail(id,context){
   }
   const url=mailtoUrl(to,sub,body,cc);
   // b5.14: too long for the browser to hand over — show it to copy across; nothing is opened or recorded yet.
-  if(url.length>MAILTO_MAX){emailHold({id,context,to,cc,sub,body,nFiles:files.length,len:url.length});return}
+  if(url.length>MAILTO_MAX){emailHold({id,context,to,cc,sub,body,nFiles:files.length,len:url.length,count:emailOpts.count,gal:emailOpts.gal});return}
   // IMPORTANT: log the audit entry BEFORE opening the mailto URL.
   // Some browsers (mobile especially) suspend or unfocus the page when mailto: triggers
   // the OS email handler, which can drop the audit log insert if it runs after.
@@ -2344,26 +2374,41 @@ async function sendEmail(id,context){
 // The email to copy across by hand (too long for a mailto: link): To, CC, Subject and the message, each with Copy;
 // "Open a new email" opens one with To / CC / Subject only when that much still fits. Back returns to the dialog as it
 // was typed; "I've sent it" records it (EMAIL_SENT) and tells the cell card — the only way this email counts as sent.
+// b5.15 (Chris, 5 Nov 2026, a2): the panel starts with the order count ("This email: 3 orders — 2 new, 1 cancelled"), shows
+// the galvanised warning for the sender, and has "Copy all" — To, CC, Subject and the message in one copy (emailAllText).
+function emailGalHtml(gal){return gal&&gal.length?`<div class="warn-msg em-gal">${gal.map(n=>esc(galWarning(n))).join('<br>')}</div>`:''}
 function emailHold(h){
   const form=$('emForm'),box=$('emLong');if(!box)return;
   emailHeld=h;if(form)form.style.display='none';
   const canOpen=mailtoUrl(h.to,h.sub,null,h.cc).length<=MAILTO_MAX;
+  const countLine=h.count&&h.count.n?`<p class="em-count"><b>This email: ${esc(h.count.n)} order${h.count.n===1?'':'s'}</b> — ${esc(h.count.parts)}</p>`:'';
   box.innerHTML=`<div class="warn-msg em-long-why">This email is too long for the browser to hand to your email app (${h.len.toLocaleString('en-AU')} characters — about 2,000 is the most it passes on), so it has <b>not</b> been opened and is not recorded as sent. Copy it across instead:</div>
-<ol class="em-steps"><li>Press <b>Copy the message</b>.</li><li>${canOpen?'Press <b>Open a new email</b> — To, CC and Subject are filled in — and paste the message in.':'Start a new email, copy the To and Subject across from here, and paste the message in.'}</li><li>Send it, then press <b>I've sent it</b> here.</li></ol>
+${countLine}${emailGalHtml(h.gal)}
+<ol class="em-steps"><li>Press <b>Copy all</b> (To, Subject and the message in one go) — or copy each part below.</li><li>${canOpen?'Press <b>Open a new email</b> — To, CC and Subject are filled in — and paste the message in.':'Start a new email, paste the To and Subject across from here, and paste the message in.'}</li><li>Send it, then press <b>I've sent it</b> here.</li></ol>
 <div class="fg"><label>To</label><div class="em-copy"><input type="text" id="emL_to" value="${esc(h.to)}" readonly><button class="btn btn-sec btn-sm" onclick="emailCopy('emL_to')">Copy</button></div></div>
 ${h.cc?`<div class="fg"><label>CC</label><div class="em-copy"><input type="text" id="emL_cc" value="${esc(h.cc)}" readonly><button class="btn btn-sec btn-sm" onclick="emailCopy('emL_cc')">Copy</button></div></div>`:''}
 <div class="fg"><label>Subject</label><div class="em-copy"><input type="text" id="emL_sub" value="${esc(h.sub)}" readonly><button class="btn btn-sec btn-sm" onclick="emailCopy('emL_sub')">Copy</button></div></div>
 <div class="fg"><label>Message</label><textarea id="emL_body" rows="12" readonly style="font-size:13px">${esc(h.body)}</textarea></div>
 <div id="emL_msg"></div>
-<div class="em-actions"><button class="btn btn-sec btn-sm" onclick="emailLongBack()">Back</button><button class="btn btn-sec btn-sm" onclick="emailCopy('emL_body')">Copy the message</button>${canOpen?'<button class="btn btn-sec btn-sm" onclick="emailOpenShort()">Open a new email</button>':''}<button class="btn btn-purple btn-sm" onclick="emailLongSent()">I've sent it</button></div>`}
+<div class="em-actions"><button class="btn btn-sec btn-sm" onclick="emailLongBack()">Back</button><button class="btn btn-sec btn-sm" onclick="emailCopyAll()">Copy all</button><button class="btn btn-sec btn-sm" onclick="emailCopy('emL_body')">Copy the message</button>${canOpen?'<button class="btn btn-sec btn-sm" onclick="emailOpenShort()">Open a new email</button>':''}<button class="btn btn-purple btn-sm" onclick="emailLongSent()">I've sent it</button></div>`}
 const EMAIL_COPY_WHAT={emL_to:['to','The To address'],emL_cc:['cc','The CC addresses'],emL_sub:['sub','The subject'],emL_body:['body','The message']};
+// Puts `text` on the clipboard; `id` = the box to select for the older-browser fallback. true when it is copied.
+async function clipboardPut(text,id){
+  let ok=false;
+  try{await navigator.clipboard.writeText(text||'');ok=true}catch(_){ok=false}
+  if(!ok&&id)try{const el=$(id);el.focus();el.select();ok=!!document.execCommand('copy')}catch(_){ok=false}   // older browsers
+  return ok}
+function emailCopySaid(say,ok,what){
+  if(say)say.innerHTML=ok?`<div class="success-msg">${what} is copied — paste it into your email.</div>`
+    :`<div class="warn-msg">The browser wouldn't copy it. Select it above and press Ctrl+C (⌘C on a Mac), then paste it into your email.</div>`}
 async function emailCopy(id){
   const h=emailHeld,w=EMAIL_COPY_WHAT[id],say=$('emL_msg');if(!h||!w)return;
-  let ok=false;
-  try{await navigator.clipboard.writeText(h[w[0]]||'');ok=true}catch(_){ok=false}
-  if(!ok)try{const el=$(id);el.focus();el.select();ok=!!document.execCommand('copy')}catch(_){ok=false}   // older browsers
-  if(say)say.innerHTML=ok?`<div class="success-msg">${w[1]} is copied — paste it into your email.</div>`
-    :`<div class="warn-msg">The browser wouldn't copy it. Select it above and press Ctrl+C (⌘C on a Mac), then paste it into your email.</div>`}
+  emailCopySaid(say,await clipboardPut(h[w[0]]||'',id),w[1])}
+// b5.15 — the whole email as one text to paste (pure): To, CC (only when set), Subject, a blank line, the message.
+function emailAllText(h){return `To: ${h.to||''}\n${h.cc?`CC: ${h.cc}\n`:''}Subject: ${h.sub||''}\n\n${h.body||''}`}
+async function emailCopyAll(){
+  const h=emailHeld,say=$('emL_msg');if(!h)return;
+  emailCopySaid(say,await clipboardPut(emailAllText(h),'emL_body'),'Everything (To, Subject and the message)')}
 function emailOpenShort(){const h=emailHeld;if(h)window.open(mailtoUrl(h.to,h.sub,null,h.cc),'_blank')}
 function emailLongBack(){emailHeld=null;const form=$('emForm'),box=$('emLong');if(box)box.innerHTML='';if(form)form.style.display=''}
 async function emailLongSent(){
@@ -3243,17 +3288,26 @@ async function dpCreate(){const err=$('dpErr'),suc=$('dpSuc');err.innerHTML='';s
   }catch(e){err.innerHTML='<div class="error-msg">'+esc(e.message)+'</div>'}
   btn.disabled=false;btn.textContent='Create Placeholder Entries'}
 
-function openOrderCreatedEmail(rows,projectName){
+// The bulk "orders created" email (pure part: orderCreatedEmail). b5.15 (Chris, 5 Nov 2026, a2 / a3): the same greeting,
+// count line, price reference, confirm-each-line close and galvanised mark as the cell card's email — NEW ORDERS only.
+function orderCreatedEmail(rows,projectName,{supplier,schedulers,priceRef,sender}={}){
   const isBulk=rows.length>1;
   const subject=isBulk
     ? `Orders Created — ${projectName} (${rows.length} entries)`
     : `Order Created — ${projectName} / ${rows[0].level||''} / ${rows[0].area||''}`;
-  const lines=rows.map(r=>{const loc=`${r.level||'—'} / ${r.area||'—'}${r.split_reference?' ('+r.split_reference+')':''}`;return `${r.project} / ${loc} — ${fmtDate(r.our_delivery_date)||'TBC'}`});
+  const lines=rows.map(r=>{const loc=`${r.level||'—'} / ${r.area||'—'}${r.split_reference?' ('+r.split_reference+')':''}`;return `${r.project} / ${loc} — ${fmtDate(r.our_delivery_date)||'TBC'}${galvanisedItem(r)?GAL_LINE:''}`});
+  const gal=rows.filter(r=>galvanisedItem(r)).map(r=>`${r.level||'—'} / ${r.area||'—'}${r.split_reference?' ('+r.split_reference+')':''}`);
   const intro=isBulk
     ? `The following DBCC requested delivery dates have been set:`
     : `A DBCC requested delivery date has been set for the following:`;
-  const body=`Hi,\n\n${intro}\n\n${lines.join('\n')}\n\nPlease confirm receipt and the production delivery ${isBulk?'dates':'date'}.${EMAIL_FOOTER_TEXT}\n\nRegards,\n${userName}\nDebono Bros Concreting`;
-  emailModal(subject,body,null,'order_created',projectName)}
+  const count=emailCount({created:rows,dates:[],cancels:[]});
+  const ref=priceRef===undefined?priceRefFor(supplier):priceRef;
+  const body=`${greetingFor(schedulers,supplier)}\n\n${emailCountLine(count)}\n\n${intro}\n\nNEW ORDERS — DBCC requested delivery date\n${lines.map(s=>'• '+s).join('\n')}${ref?`\n${ref}`:''}\n\n${emailConfirmLine(true)}${EMAIL_FOOTER_TEXT}\n\nRegards,\n${sender||userName}\nDebono Bros Concreting`;
+  return{subject,body,count,gal}}
+function openOrderCreatedEmail(rows,projectName){
+  const supplier=projectSupplier(projectName);
+  const m=orderCreatedEmail(rows,projectName,{supplier,schedulers:schedulersForProject(projectName),sender:userName});
+  emailModal(m.subject,m.body,null,'order_created',projectName,{count:m.count,gal:m.gal})}
 
 /* ═══ DELIVERY PROGRAM — the grid from the job's level / area pairs (b5.14, pairs live only) ═══
    Rows = levels, columns = areas, in Master-OPS order (the order rule). A cell is:
@@ -3465,7 +3519,7 @@ function ccSendHtml(){
   if(pf.length)h+=`<div class="cc-files"><span>Project-wide reference files — tick to put the link in the email:</span>${pf.map(ccFileTickHtml).join('')}</div>`;
   h+='<ul class="cc-sum">';
   h+=rows.length?`<li><b>${rows.length}</b> new placeholder${rows.length===1?'':'s'} to create — ${dated} with a DBCC requested date go in the email${rows.length-dated?`, ${rows.length-dated} without one don't (Not Ordered)`:''}</li>`:'<li>No new placeholders to create</li>';
-  if(saved)h+=`<li>Saved in this card — goes in the email:<ul>${li(L.created.map(s=>'New: '+s))}${li(L.dates.map(s=>'Date: '+s))}${li(L.cancels.map(s=>'Cancelled: '+s))}</ul></li>`;
+  if(saved)h+=`<li>Saved in this card — goes in the email:<ul>${li(L.created.map(s=>'New: '+s))}${li(L.dates.map(s=>'Date: '+s))}${li(L.cancels.map(s=>'Cancelled: '+s))}</ul>${L.gal.length?`<div class="warn-msg cc-gal">${L.gal.map(n=>esc(galWarning(n))).join('<br>')}</div>`:''}</li>`;   // b5.15: Q7's rule for orders, for the sender
   const nf=ccTickedFiles().length;if(nf)h+=`<li><b>${nf}</b> reference file${nf===1?'':'s'} ticked</li>`;
   h+='</ul>';
   if(cc.failed.length)h+=`<div class="error-msg cc-failed"><b>Not saved — left out of the email:</b><ul>${cc.failed.map(f=>`<li>${esc(f.what)} — ${esc(f.words)}</li>`).join('')}</ul></div>`;
@@ -3553,26 +3607,44 @@ function ccAfterCancel(e,reason){const cc=cellCard;if(!cc||e.project!==cc.projec
   delete cc.notes[e.id];delete cc.dateDraft[e.id];if(cc.dateBase)delete cc.dateBase[e.id];delete cc.lost['date:'+e.id];   // a date note, draft or unanswered date save before it no longer holds
   ccClearFailure(cc,'cancel:'+e.id);ccClearFailure(cc,'date:'+e.id)}   // cancelled: an earlier refusal of either no longer matters
 // The email's lines (pure) — the same lines the card shows under "Saved in this card".
+// b5.15: a galvanised new order (galvanisedItem) carries GAL_LINE for the supplier; `gal` lists those items' names for the
+// sender's warning (never in the body).
 function cellCardLines(log){
   const sch=r=>r.schedule?' · '+r.schedule:'';
-  return{created:(log.created||[]).filter(r=>r.date).map(r=>`${ccLoc(r)} — ${fmtDate(r.date)}`),
+  const made=(log.created||[]).filter(r=>r.date);
+  return{created:made.map(r=>`${ccLoc(r)} — ${fmtDate(r.date)}${galvanisedItem(r,r.note)?GAL_LINE:''}`),
+    gal:made.filter(r=>galvanisedItem(r,r.note)).map(r=>ccLoc(r)),
     dates:(log.dates||[]).map(r=>`${ccLoc(r)}${sch(r)} — ${fmtDate(r.old)||'not set'} → ${fmtDate(r.new)||'not set'}`),
     cancels:(log.cancels||[]).map(r=>`${ccLoc(r)}${sch(r)} — reason: ${r.reason}`)}}
+// b5.15 — the order count, for the top of the email body (Chris, 5 Nov 2026, a2: "so the supplier can confirm they got
+// every line") and the copy-across panel (pure). n = every line; words = "3 orders: 2 new, 1 date change, 1 cancelled".
+function emailCount(L){
+  const n=L.created.length+L.dates.length+L.cancels.length;
+  const parts=[L.created.length&&`${L.created.length} new`,L.dates.length&&`${L.dates.length} date change${L.dates.length===1?'':'s'}`,L.cancels.length&&`${L.cancels.length} cancelled`].filter(Boolean).join(', ');
+  return{n,parts,words:`${n} order${n===1?'':'s'}: ${parts}`}}
+function emailCountLine(c){return `This email covers ${c.words} — please confirm you have every line.`}
+// b5.15 — the fixed lines every order email ends its sections with (Chris, 5 Nov 2026, a3-3 and the price reference).
+const EMAIL_CONFIRM_EACH='Please reply confirming each line above (one line per order)';
+function emailConfirmLine(dated){return `${EMAIL_CONFIRM_EACH}${dated?', and your production delivery dates':''}.`}
 // The card's one email (pure): to the job's supplier, from everything saved in the card; the ticked reference files as
 // links (only links on the REO file store). null when there is nothing to tell the supplier.
-function cellCardEmail({project,supplier,log,files,sender}){
+// b5.15 (Chris, 5 Nov 2026, a2 / a3): the greeting names the scheduler(s) (greetingFor), the count line comes first, the
+// sections run CANCELLED → DATE CHANGED → NEW ORDERS, the price reference sits under NEW ORDERS, and the close asks
+// for a reply per line. Returns {subject, body, count, gal}.
+function cellCardEmail({project,supplier,log,files,sender,schedulers,priceRef}){
   const L=cellCardLines(log);
   if(!L.created.length&&!L.dates.length&&!L.cancels.length)return null;
   const parts=[],bul=a=>a.map(s=>'• '+s).join('\n');
-  if(L.created.length)parts.push('NEW ORDERS — DBCC requested delivery date\n'+bul(L.created));
-  if(L.dates.length)parts.push('DBCC REQUESTED DELIVERY DATE CHANGED\n'+bul(L.dates));
   if(L.cancels.length)parts.push('CANCELLED\n'+bul(L.cancels));
+  if(L.dates.length)parts.push('DBCC REQUESTED DELIVERY DATE CHANGED\n'+bul(L.dates));
+  const ref=priceRef===undefined?priceRefFor(supplier):priceRef;
+  if(L.created.length)parts.push('NEW ORDERS — DBCC requested delivery date\n'+bul(L.created)+(ref?`\n${ref}`:''));
   const links=(files||[]).map(f=>({label:f.label,url:safeUrl(f.url)})).filter(f=>f.url);
-  const count=[L.created.length&&`${L.created.length} new`,L.dates.length&&`${L.dates.length} date change${L.dates.length===1?'':'s'}`,L.cancels.length&&`${L.cancels.length} cancelled`].filter(Boolean).join(', ');
-  let body=`Hi ${supplier||'team'},\n\nThe following changes have been made to our REO orders for ${project}:\n\n${parts.join('\n\n')}`;
+  const count=emailCount(L);
+  let body=`${greetingFor(schedulers,supplier)}\n\n${emailCountLine(count)}\n\nThe following changes have been made to our REO orders for ${project}:\n\n${parts.join('\n\n')}`;
   if(links.length)body+='\n\n─── Reference documents ───\n'+links.map(f=>`• ${f.label}: ${f.url}`).join('\n');
-  body+=`\n\nPlease confirm receipt${L.created.length||L.dates.length?' and your production delivery dates':''}.${EMAIL_FOOTER_TEXT}\n\nRegards,\n${sender}\nDebono Bros Concreting`;
-  return{subject:`REO orders — ${project} (${count})`,body}}
+  body+=`\n\n${emailConfirmLine(L.created.length||L.dates.length)}${EMAIL_FOOTER_TEXT}\n\nRegards,\n${sender}\nDebono Bros Concreting`;
+  return{subject:`REO orders — ${project} (${count.parts})`,body,count,gal:L.gal}}
 // The first keystroke in a date box also notes the date the person started from (dateBase): Save checks it still holds.
 function ccDateDraft(id,v){const cc=cellCard;if(!cc||cc.saving.has(id))return;const e=entries.find(x=>x.id===id),b=$('ccDateBtn_'+id);
   const base=cc.dateBase||(cc.dateBase={});if(!Object.prototype.hasOwnProperty.call(base,id))base[id]=e?(e.our_delivery_date||''):'';
@@ -3664,7 +3736,7 @@ async function ccCreateAndEmail(){
     cc.msg=`<div class="error-msg">Stopped part-way (${esc(String((err&&err.message)||err))}). What was made is under "Saved in this card" — check the cells before pressing again.</div>`}
   finally{cc.busy=false}
   if(cellCard===cc)ccRefresh();
-  if(mail)emailModal(mail.subject,mail.body,null,'cell_card',cc.project,{files:[],onSent:ccAfterEmail})}
+  if(mail)emailModal(mail.subject,mail.body,null,'cell_card',cc.project,{files:[],onSent:ccAfterEmail,count:mail.count,gal:mail.gal})}
 // A cell's insert is all or none. When its answer is lost on the way back (the connection dropped) the rows may still
 // have been made, so the card looks for them by the try's batch before it says "not saved", keeps that batch for the
 // cell (cc.lost) while it can't tell, and on the next press looks again before inserting anything — a cell's rows are
@@ -3701,7 +3773,7 @@ async function ccCreateRun(cc,proj){
   if(made.length)await auditLog({action:'BULK_CREATE',new_value:`${made.length} placeholders for ${cc.project}`});
   for(const f of failed)ccAddFailure(cc,`${f.n} new placeholder${f.n===1?'':'s'} at ${f.level} / ${f.area}`,f.words,'cell:'+f.key);
   const ticked=ccTickedFiles(),unsafe=ticked.filter(f=>!safeUrl(f.url)).length;
-  const mail=cellCardEmail({project:cc.project,supplier:cc.supplier,log:cc.log,files:ticked,sender:userName});
+  const mail=cellCardEmail({project:cc.project,supplier:cc.supplier,log:cc.log,files:ticked,sender:userName,schedulers:schedulersForProject(cc.project),priceRef:priceRefFor(cc.supplier)});
   const undated=made.filter(r=>!r.our_delivery_date).length,said=[];
   if(made.length)said.push(`Created ${made.length} placeholder${made.length===1?'':'s'}${undated?` (${undated} with no DBCC requested date — Not Ordered, not in the email)`:''}.`);
   for(const x of earlier)said.push(`${x.level} / ${x.area}: the earlier press had already made ${x.n===1?'its placeholder':'its '+x.n+' placeholders'} (its answer was lost on the way back), so ${x.n===1?'it was':'they were'} not made again.`);
@@ -4387,6 +4459,7 @@ async function renderAdminAccount(){
         <div style="display:flex;align-items:center;gap:6px"><input type="number" id="overdueThresholdInp" value="${esc(appSettings.overdue_install_days)}" min="1" max="60" style="width:60px;padding:6px;border:1px solid var(--border);border-radius:6px;font-size:12px"><span style="font-size:11px;color:var(--muted)">days</span><button class="btn btn-sm" onclick="saveOverdueThreshold()" style="width:auto;padding:5px 10px;font-size:11px">Save</button></div>
       </div>
     </div>
+    ${isDbcc()?priceRefSettingsHtml():''}
   </div>
   <div id="accountBody"></div>`;
   renderAccountBody();
@@ -4401,6 +4474,22 @@ function applyAccountRange(){
   _accountRange={from:$('accFrom').value,to:$('accTo').value};
   renderAccountBody();
 }
+// b5.15 — "Price reference on order emails" (Chris, 5 Nov 2026, a3; Chris sets them): one box per supplier, saved as the
+// app_settings rows PRICE_REF_KEYS; an empty box means the default words (PRICE_REF_DEFAULTS). DBCC admin only.
+function priceRefSettingsHtml(){
+  const box=sup=>`<div><label style="display:block;font-size:11px;color:var(--gray-dk);font-weight:600;margin-bottom:4px">Price reference on order emails — ${esc(sup)}</label>
+        <div style="display:flex;align-items:center;gap:6px"><input type="text" id="priceRefInp_${esc(PRICE_REF_KEYS[sup])}" value="${esc(appSettings[PRICE_REF_KEYS[sup]]||'')}" placeholder="${esc(PRICE_REF_DEFAULTS[sup])}" style="width:300px;padding:6px;border:1px solid var(--border);border-radius:6px;font-size:12px"><button class="btn btn-sm" onclick="savePriceRef(${jsArg(sup)})" style="width:auto;padding:5px 10px;font-size:11px">Save</button></div>
+        <div style="font-size:11px;color:var(--muted);margin-top:3px">Printed under NEW ORDERS on every order email to ${esc(sup)}. Now: ${esc(priceRefFor(sup))}</div></div>`;
+  return `<div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:12px;padding-top:12px;border-top:1px solid var(--border)">${Object.keys(PRICE_REF_KEYS).map(box).join('')}</div>`}
+async function savePriceRef(sup){
+  if(!isDbcc())return;
+  const key=PRICE_REF_KEYS[sup];if(!key)return;
+  const el=$('priceRefInp_'+key),v=(el?el.value:'').trim();
+  if(v.length>200)return alert('Keep the price reference under 200 characters.');
+  const old=appSettings[key]||'';
+  await saveAppSetting(key,v);
+  await auditLog({action:'UPDATE',field_changed:key,old_value:old,new_value:v});
+  alert(`Saved. Order emails to ${sup} will say: ${priceRefFor(sup)}`)}
 async function saveOverdueThreshold(){
   const n=parseInt($('overdueThresholdInp').value,10);
   if(isNaN(n)||n<1||n>60)return alert('Enter a number between 1 and 60');
