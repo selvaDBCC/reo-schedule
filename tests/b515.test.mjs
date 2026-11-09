@@ -380,3 +380,135 @@ test('the Edit dialog (pairs live): an unplaced ad hoc entry\'s level / area are
   assert.match(s.els.editModal.innerHTML,/Only DBCC can change the job, level or area once an entry is made — ask DBCC\./);
   assert.ok(!/ed_adhoc_hint/.test(s.els.editModal.innerHTML));
 });
+
+// ── a5: the conflict names the fields and who changed them; what was typed survives "Reload the entry" ──
+// A page whose Edit dialog behaves like a browser's: when the dialog is drawn, each ed_* input / select takes the value
+// (or the selected option) the HTML gives it, and `disabled` is honoured — so the snapshot openEditEntry takes is real.
+function formPage(a,els){
+  const sync=h=>{for(const m of h.matchAll(/<(input|select) [^>]*?id="(ed_\w+)"([^>]*)>/g)){const[,tag,id,rest]=m,el=a.document.getElementById(id);
+      el.disabled=/\bdisabled\b/.test(rest);
+      if(tag==='input'){const v=/ value="([^"]*)"/.exec(m[0]);el.value=v?decodeAttr(v[1]):''}
+      else{const body=h.slice(m.index+m[0].length,h.indexOf('</select>',m.index));const s=/<option value="([^"]*)" selected>/.exec(body)||/<option value="([^"]*)"/.exec(body);el.value=s?decodeAttr(s[1]):''}}};
+  els.editModal={id:'editModal',_h:'',get innerHTML(){return this._h},set innerHTML(h){this._h=h;sync(h)},style:{},classList:{add(){},remove(){},contains:()=>false}};
+  return els;
+}
+const todayAt=(h,m)=>{const n=new Date();return new Date(n.getFullYear(),n.getMonth(),n.getDate(),h,m).toISOString()};
+
+test('editConflictWords: each field with who and when from the history since the dialog opened; no / refused / stale history → "changed meanwhile"; never throws', ()=>{
+  const since=todayAt(9,0);
+  const hist=[{field_changed:'supplier_delivery_date',user_identifier:'Maryanne',created_at:todayAt(9,58)},
+    {field_changed:'level',user_identifier:'Old Hand',created_at:todayAt(8,0)},   // before the dialog opened: an earlier change, not this one
+    {field_changed:'level',user_identifier:'Drew',created_at:todayAt(10,12)}];
+  const W=s=>`This entry changed while you were editing — ${s}. Nothing was saved.`;
+  assert.equal(app.editConflictWords(['level','supplier_delivery_date'],hist,since),W('Level (by Drew, 10:12), Production delivery date (by Maryanne, 09:58)'));
+  assert.equal(app.editConflictWords(['level','status'],hist,since),W('Level (by Drew, 10:12), Status (changed meanwhile)'),'a field with no history row');
+  for(const h of [[],null,undefined,{data:'not rows'},'x'])assert.equal(app.editConflictWords(['level'],h,since),W('Level (changed meanwhile)'),'history '+JSON.stringify(h));
+  assert.equal(app.editConflictWords(['level'],[hist[1]],since),W('Level (changed meanwhile)'),'a row older than the dialog is not this change');
+  assert.equal(app.editConflictWords(['level'],[hist[1]],null),W('Level (by Old Hand, 08:00)'),'with no opening time every row counts');
+  assert.equal(app.editConflictWords(['level'],[{field_changed:'level',user_identifier:'',created_at:todayAt(10,0)}],since),W('Level (changed meanwhile)'),'no name on the row');
+  assert.equal(app.editConflictWords(['level'],[{field_changed:'level',user_identifier:'Drew',created_at:'garbage'}],null),W('Level (by Drew)'),'a bad time: the name alone');
+  assert.equal(app.editConflictWords(['level'],[{field_changed:'level',user_identifier:'Drew',created_at:'2026-11-03T10:12:00'}],null,new Date(2026,10,9,12,0)),W('Level (by Drew, 03/11 10:12)'),'another day carries its date');
+  // no field named (the conditional update landed nowhere): the fresh history says which fields moved
+  assert.equal(app.editConflictWords([],hist,since),W('Level (by Drew, 10:12), Production delivery date (by Maryanne, 09:58)'));
+  assert.equal(app.editConflictWords([],[{field_changed:'schedule_removed',user_identifier:'X',created_at:todayAt(10,0)}],since),'This entry changed while you were editing. Nothing was saved.','only the dialog\'s fields are named');
+  assert.equal(app.editConflictWords([],[],since),'This entry changed while you were editing. Nothing was saved.');
+  assert.equal(app.editConflictWords(null,null,null),'This entry changed while you were editing. Nothing was saved.');
+});
+
+test('saveEdit on a conflict: the refusal names the field and who (DBCC reads the history); a refused or thrown history read still shows it', async()=>{
+  let audit=()=>({data:[{field_changed:'level',user_identifier:'Drew <b>',created_at:todayAt(10,12)}],error:null});
+  const{a,els,sb}=dbccApp({answer:q=>q.table==='entries'&&q.op==='select'?{data:{...ENTRIES[0],level:'L1'},error:null}:q.table==='audit_log'&&q.op==='select'?audit():q.op==='update'?{data:[{id:21}],error:null}:null});
+  formPage(a,els);
+  a.openEditEntry(21);
+  const g=id=>a.document.getElementById(id);
+  assert.equal(g('ed_sched').value,'U9AV','the page reads the dialog\'s values');assert.equal(g('ed_level').value,'GRD');
+  g('ed_sched').value='U9AV-2';
+  await a.saveEdit(21);
+  assert.deepEqual(sb.calls.map(c=>c.table+':'+c.op),['entries:select','audit_log:select'],'nothing written');
+  const hq=sb.calls[1];assert.equal(hq.cols,'field_changed,user_identifier,created_at');assert.deepEqual([...hq.filters[0]],['eq','entry_id',21]);assert.deepEqual(plain(hq.order),['created_at',{ascending:false}]);assert.equal(hq.limit,30);
+  assert.match(els.edErr.innerHTML,/^<div class="error-msg">This entry changed while you were editing — Level \(by Drew &lt;b&gt;, 10:12\)\. Nothing was saved\.<div style="margin-top:8px"><button class="btn btn-sec btn-sm" onclick="reloadEditEntry\(21\)"/,'escaped');
+  assert.ok(!/Drew <b>/.test(els.edErr.innerHTML));
+  // refused (a supplier login can't read audit_log): the dialog still shows, "changed meanwhile"
+  audit=()=>({data:null,error:{message:'permission denied for table audit_log'}});
+  await a.saveEdit(21);
+  assert.match(els.edErr.innerHTML,/— Level \(changed meanwhile\)\. Nothing was saved\./);
+  assert.match(els.edErr.innerHTML,/onclick="reloadEditEntry\(21\)"/);
+  // the read throws: the same
+  audit=()=>{throw new Error('boom')};
+  await a.saveEdit(21);
+  assert.match(els.edErr.innerHTML,/— Level \(changed meanwhile\)\. Nothing was saved\./);
+});
+
+test('editReapply: only the fields the person changed that the reloaded entry doesn\'t already hold; never the job / level / area of an unplaced row', ()=>{
+  const shown={project:'P',level:'GRD',area:'SLAB',schedule:'U9AV',entry_date:'2026-11-01',our_delivery_date:'',supplier_delivery_date:'',drawing_reference:'',total_weight:'2.5',split_reference:''};
+  const typed={...shown,schedule:'U9AV-2',total_weight:'3.1',supplier_delivery_date:'2026-11-06'};
+  const reloaded={...shown,level:'L1',supplier_delivery_date:'2026-11-06'};
+  const row={entry_type:'scheduled',level:'GRD',area:'SLAB'};
+  const reapply=(...x)=>plain(app.editReapply(...x));   // the vm realm's arrays, as plain values
+  assert.deepEqual(reapply(typed,shown,reloaded,row),['schedule','total_weight'],'the typed date equals the reloaded one: dropped; the level the person never touched: never re-applied over Drew\'s');
+  assert.deepEqual(reapply(shown,shown,reloaded,row),[]);
+  assert.deepEqual(reapply({...shown,level:'L1'},shown,{...shown,level:'GRD'},row),['level'],'a placed row\'s level the person changed is kept');
+  const loose={entry_type:'loose',level:null,area:null},s2={...shown,level:'',area:''};
+  assert.deepEqual(reapply({...s2,project:'Q',level:'GRD',area:'SLAB',schedule:'X'},s2,s2,loose),['schedule'],'an unplaced row: its job / level / area never');
+  assert.deepEqual(reapply(null,shown,reloaded,row),[]);assert.deepEqual(reapply(typed,null,reloaded,row),[]);assert.deepEqual(reapply(typed,shown,null,row),[]);
+});
+
+test('"Reload the entry" keeps what was typed (not saved), writes it back over the reloaded entry, lists it, and Save then sends only the real changes', async()=>{
+  const changed={...ENTRIES[0],level:'L1',area:'SLAB',supplier_delivery_date:'2026-11-06'};   // Drew moved it to L1 / SLAB and set the production date
+  const{a,r,els,sb}=dbccApp({answer:q=>q.table==='entries'&&q.op==='select'?{data:{...changed},error:null}:q.table==='audit_log'&&q.op==='select'?{data:[{field_changed:'level',user_identifier:'Drew',created_at:todayAt(10,12)}],error:null}:q.op==='update'?{data:[{id:21}],error:null}:null});
+  formPage(a,els);
+  a.__db=changed;r(`loadEntries=async()=>{__loads++;entries=__db?entries.map(e=>e.id===21?JSON.parse(JSON.stringify(__db)):e):entries.filter(e=>e.id!==21)}`);
+  a.openEditEntry(21);
+  const g=id=>a.document.getElementById(id);
+  g('ed_sched').value='U9AV-2';g('ed_wt').value='3.1';g('ed_draw').value='S-100';g('ed_supD').value='2026-11-06';
+  await a.saveEdit(21);
+  assert.match(els.edErr.innerHTML,/Level \(by Drew, 10:12\)/);
+  await a.reloadEditEntry(21);
+  assert.equal(r('__loads'),1);
+  assert.equal(g('ed_level').value,'L1','the reloaded entry\'s level (Drew\'s change), not the stale one');
+  assert.equal(g('ed_area').value,'SLAB');
+  assert.equal(g('ed_sched').value,'U9AV-2');assert.equal(g('ed_wt').value,'3.1');assert.equal(g('ed_draw').value,'S-100');
+  assert.equal(els.ed_kept.innerHTML,'<div class="hint" style="margin-top:8px">Your typed values are kept (not saved yet): Schedule, Drawing reference, Weight</div>','the typed date equals the reloaded one: not listed');
+  assert.equal(r('editSnap.form.schedule'),'U9AV','Save compares against the database\'s values, not the typed ones');
+  assert.equal(r('editSnap.form.level'),'L1');assert.equal(r('editSnap.row.level'),'L1');
+  assert.equal(r('editKeep'),null);
+  sb.calls.length=0;
+  await a.saveEdit(21);
+  const upd=sb.calls.find(c=>c.op==='update');
+  assert.ok(upd,'saved');
+  assert.deepEqual({...upd.payload},{schedule:'U9AV-2',drawing_reference:'S-100',total_weight:3.1},'only the real changes');
+  const guard=Object.fromEntries(upd.filters.filter(f=>f[1]!=='id').map(f=>[f[1],f[0]==='is'?null:f[2]]));
+  assert.equal(guard.level,'L1','guarded by the reloaded values');assert.equal(guard.supplier_delivery_date,'2026-11-06');
+  // a plain open (no Reload before it) keeps nothing and lists nothing
+  els.ed_kept.innerHTML='';
+  a.openEditEntry(21);
+  assert.equal(els.ed_kept.innerHTML,'');assert.equal(r('editKeep'),null);
+  // the entry gone on reload: the dialog closes, nothing is kept
+  g('ed_sched').value='GONE';a.__db=null;
+  await a.reloadEditEntry(21);
+  assert.deepEqual(plain(r('__alerts')),['This entry is no longer there — it may have been deleted.']);
+  assert.equal(r('editKeep'),null);
+});
+
+test('a typed value for a disabled select is never written back: an unplaced ad hoc entry stays unplaced after Reload', async()=>{
+  const{a,r,els}=dbccApp({answer:q=>q.table==='entries'&&q.op==='select'?{data:{...ENTRIES[2],status:'Cancelled'},error:null}:q.table==='audit_log'?{data:[],error:null}:null});
+  formPage(a,els);
+  a.__db={...ENTRIES[2],status:'Cancelled'};r(`loadEntries=async()=>{entries=entries.map(e=>e.id===30?JSON.parse(JSON.stringify(__db)):e)}`);
+  a.openEditEntry(30);
+  const g=id=>a.document.getElementById(id);
+  assert.equal(g('ed_level').disabled,true);
+  g('ed_level').value='GRD';g('ed_area').value='SLAB';g('ed_split').value='Part 9';   // the selects re-enabled by hand and filled
+  g('ed_level').disabled=false;g('ed_area').disabled=false;
+  await a.saveEdit(30);
+  assert.match(els.edErr.innerHTML,/Complete this in Master-OPS/,'a4 refuses first');
+  g('ed_level').disabled=true;g('ed_area').disabled=true;
+  r(`editSnap.row.status='Ordered'`);   // make the next Save reach the database and conflict on status
+  g('ed_level').disabled=false;g('ed_area').disabled=false;g('ed_level').value='';g('ed_area').value='';
+  await a.saveEdit(30);
+  assert.match(els.edErr.innerHTML,/Status \(changed meanwhile\)/);
+  g('ed_level').value='GRD';g('ed_area').value='SLAB';
+  await a.reloadEditEntry(30);
+  assert.equal(g('ed_level').value,'','never placed from here');assert.equal(g('ed_area').value,'');
+  assert.equal(g('ed_split').value,'Part 9');
+  assert.equal(els.ed_kept.innerHTML,'<div class="hint" style="margin-top:8px">Your typed values are kept (not saved yet): Split reference</div>');
+});

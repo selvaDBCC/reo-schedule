@@ -277,14 +277,16 @@ test('Edit Save: an entry changed underneath is not saved — "changed while you
   const sb=fakeSb(q=>q.op==='select'?{data:{...CUR,level:'L1',status:'Ordered'},error:null}:{data:[{id:7}],error:null});
   app.__sb=sb;withApp('sb=__sb');
   await app.saveEdit(7);
-  assert.deepEqual(sb.calls.map(c=>c.op),['select'],'no update, no history');
-  assert.match(els.edErr.innerHTML,/This entry changed while you were editing — reload\. Nothing was saved — changed meanwhile: Level, Status\./);
+  assert.deepEqual(sb.calls.map(c=>c.op),['select','select'],'no update, no history — the second select is the history read (b5.15 a5)');
+  assert.equal(sb.calls[1].table,'audit_log');
+  // b5.15 a5: the fields are named one by one; this fake answers the history read with an object, not rows → "changed meanwhile"
+  assert.match(els.edErr.innerHTML,/This entry changed while you were editing — Level \(changed meanwhile\), Status \(changed meanwhile\)\. Nothing was saved\./);
   assert.match(els.edErr.innerHTML,/onclick="reloadEditEntry\(7\)"/);
 });
 
 test('Edit Save: a row that changed between the check and the write (0 rows) or a refusal writes no history', async()=>{
   for(const [answer,words] of [
-    [{data:[],error:null},/This entry changed while you were editing — reload/],
+    [{data:[],error:null},/This entry changed while you were editing\. Nothing was saved\./],   // b5.15 a5: no field named, no fresh history
     [{data:null,error:{message:'Suppliers cannot change the ordered (DBCC) delivery date'}},/Not saved — the database refused it: Suppliers cannot change the ordered \(DBCC\) delivery date/],
     [{data:null,error:{message:'TypeError: Failed to fetch'}},/Not saved — couldn&#39;t reach the database/],
   ]){
@@ -292,7 +294,7 @@ test('Edit Save: a row that changed between the check and the write (0 rows) or 
     const sb=fakeSb(q=>q.op==='select'?{data:{...CUR},error:null}:q.op==='update'?answer:{data:null,error:null});
     app.__sb=sb;withApp('sb=__sb');
     await app.saveEdit(7);
-    assert.deepEqual(sb.calls.map(c=>c.op),['select','update']);
+    assert.deepEqual(sb.calls.map(c=>c.op),answer.data?['select','update','select']:['select','update'],'0 rows: the history is read for the words (b5.15 a5); a refusal: not');
     assert.match(els.edErr.innerHTML,words);
   }
 });

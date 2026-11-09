@@ -2069,15 +2069,50 @@ function refusalWords(e){
   const m=String((e&&e.message)||e||'').trim();
   if(!m||/failed to fetch|networkerror|network request failed|load failed/i.test(m))return NET_WORDS;
   return 'the database refused it: '+m}
-function showEditConflict(id,fields){
-  const what=fields.length?' — changed meanwhile: '+fields.map(f=>EDIT_FIELD_NAMES[f]||f).join(', '):'';
-  $('edErr').innerHTML=`<div class="error-msg">This entry changed while you were editing — reload. Nothing was saved${esc(what)}.<div style="margin-top:8px"><button class="btn btn-sec btn-sm" onclick="reloadEditEntry(${id})" style="width:auto">Reload the entry</button></div></div>`}
+/* b5.15 (Chris, 5 Nov 2026, a5) — the refusal names the fields that changed and who changed them, from the entry's own
+   history rows (audit_log: one row per field per save, with the login that saved it). Only rows written since the
+   dialog opened (less a minute of clock slack) count — an older row is an earlier change, not the one that got in the
+   way. A supplier login can't read audit_log (reo-schedule-db 0004: suppliers insert only; DBCC reads it), so the read
+   sits inside try/catch and a refused or empty read is normal: the field then reads "changed meanwhile" — a supplier
+   never sees who, only DBCC does. With no field named (the conditional update landed nowhere), the fresh history rows
+   say which fields moved. Pure: editConflictWords (tests/b515.test.mjs). */
+const EDIT_HISTORY_SLACK_MS=60*1000;
+function whenWords(iso,now){const d=new Date(iso);if(isNaN(d))return '';const n=now||new Date();
+  const hm=`${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+  return d.toDateString()===n.toDateString()?hm:`${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')} ${hm}`}
+function editConflictWords(fields,history,since,now){
+  const rows=(Array.isArray(history)?history:[]).filter(h=>h&&typeof h==='object'&&h.field_changed)
+    .sort((a,b)=>new Date(b.created_at||0)-new Date(a.created_at||0));   // newest first
+  const sinceMs=since?new Date(since).getTime()-EDIT_HISTORY_SLACK_MS:NaN;
+  const fresh=rows.filter(h=>isNaN(sinceMs)||new Date(h.created_at||0).getTime()>=sinceMs);
+  let list=(fields||[]).slice();
+  if(!list.length)list=[...new Set(fresh.map(h=>h.field_changed).filter(f=>EDIT_FIELD_NAMES[f]))];
+  const parts=list.map(f=>{const h=fresh.find(x=>x.field_changed===f),who=h?String(h.user_identifier||'').trim():'',when=h?whenWords(h.created_at,now):'';
+    return `${EDIT_FIELD_NAMES[f]||f} (${who?`by ${who}${when?', '+when:''}`:'changed meanwhile'})`});
+  return parts.length?`This entry changed while you were editing — ${parts.join(', ')}. Nothing was saved.`:'This entry changed while you were editing. Nothing was saved.'}
+async function showEditConflict(id,fields){
+  let history=null;
+  try{const{data,error}=await sb.from('audit_log').select('field_changed,user_identifier,created_at').eq('entry_id',id).order('created_at',{ascending:false}).limit(30);
+    history=error?null:(data||null)}catch(e){history=null}   // refused (a supplier) or failed: normal — "changed meanwhile"
+  const since=editSnap&&editSnap.id===id?editSnap.openedAt:null;
+  $('edErr').innerHTML=`<div class="error-msg">${esc(editConflictWords(fields,history,since))}<div style="margin-top:8px"><button class="btn btn-sec btn-sm" onclick="reloadEditEntry(${id})" style="width:auto">Reload the entry</button></div></div>`}
+// b5.15 (a5): what the person typed survives "Reload the entry" — kept here while the entry reloads, written back into
+// the rebuilt dialog by openEditEntry (NOT saved: Save still sends only what differs from the reloaded entry).
+let editKeep=null;   // {id, typed: the dialog's values when Reload was pressed, shown: its values when it had opened}
+const EDIT_INPUT_IDS={project:'ed_proj',level:'ed_level',area:'ed_area',schedule:'ed_sched',entry_date:'ed_date',our_delivery_date:'ed_ourD',supplier_delivery_date:'ed_supD',drawing_reference:'ed_draw',total_weight:'ed_wt',split_reference:'ed_split'};
+// The fields to write back: the person changed them (typed ≠ what the dialog showed when it opened) AND the reloaded
+// entry doesn't already hold the typed value (then there is nothing to keep). A field the person never touched is never
+// re-applied over another login's change. Never the job / level / area of an unplaced row (a4 places it in Master-OPS).
+function editReapply(typed,shown,reloaded,row){
+  if(!typed||!shown||!reloaded)return [];
+  return EDIT_FIELDS.filter(k=>typed[k]!==shown[k]&&typed[k]!==reloaded[k]&&!(isUnplaced(row)&&['project','level','area'].includes(k)))}
 async function reloadEditEntry(id){
+  editKeep=editSnap&&editSnap.id===id&&editSnap.form?{id,typed:readEditForm(),shown:editSnap.form}:null;   // b5.15 a5
   await loadEntries();renderDash();
-  if(entries.some(x=>x.id===id))openEditEntry(id);else{closeOv('editOv');alert('This entry is no longer there — it may have been deleted.')}}
+  if(entries.some(x=>x.id===id))openEditEntry(id);else{editKeep=null;closeOv('editOv');alert('This entry is no longer there — it may have been deleted.')}}
 
 function openEditEntry(id){const e=entries.find(x=>x.id===id);if(!e)return;
-  editSnap={id,row:JSON.parse(JSON.stringify(e)),form:null};
+  editSnap={id,row:JSON.parse(JSON.stringify(e)),form:null,openedAt:new Date().toISOString()};   // openedAt: b5.15 a5 (history since)
   // Build the "Danger Zone" section that lets the user surgically delete:
   //   - the attached schedule only (schedule file + extracted data — keeps markup plans)
   //   - individual markup plans (one at a time, no impact on schedule)
@@ -2127,12 +2162,21 @@ ${laLock?'<div class="hint" style="margin:-6px 0 10px">Only DBCC can change the 
 <div class="fg"><label>Split Reference</label><input type="text" id="ed_split" value="${esc(e.split_reference||'')}"></div>
 <div class="info-msg" style="margin-top:8px;font-size:12px;background:#F0F5FF;border-color:#C7D2FE;color:var(--info)">💡 Comments are now edited directly on the dashboard — click the Supplier Comments or DBCC Comments cell on the row.</div>
 ${dangerSection}
+<div id="ed_kept"></div>
 <div id="edErr"></div>
 <div style="margin-top:16px;display:flex;gap:8px;justify-content:flex-end"><button class="btn btn-sec btn-sm" onclick="closeOv('editOv')">Cancel</button><button class="btn btn-sm" id="edSaveBtn" onclick="saveEdit(${id})" style="width:auto">Save</button></div>`;
   $('editOv').classList.add('show');
   $('ed_proj').onchange=onEditProjChange;
   $('ed_level').onchange=onEditLevelChange;   // b5.14: with pairs live the areas follow the level (off: nothing happens)
-  editSnap.form=readEditForm()}   // what the dialog showed — Save compares against this
+  editSnap.form=readEditForm();   // what the dialog showed — Save compares against this
+  if(editKeep&&editKeep.id===id){   // b5.15 a5: the values typed before "Reload the entry" go back in — not saved yet
+    const keep=editKeep;editKeep=null;
+    const kept=editReapply(keep.typed,keep.shown,editSnap.form,editSnap.row);
+    for(const k of kept){const el=$(EDIT_INPUT_IDS[k]);if(!el||el.disabled)continue;el.value=keep.typed[k];
+      if(k==='project')onEditProjChange();else if(k==='level')onEditLevelChange()}   // the level / area lists follow the job / level
+    const now=readEditForm(),held=kept.filter(k=>now[k]===keep.typed[k]);   // a select with no such option drops it — not listed
+    if(held.length)$('ed_kept').innerHTML=`<div class="hint" style="margin-top:8px">Your typed values are kept (not saved yet): ${esc(held.map(k=>EDIT_FIELD_NAMES[k]).join(', '))}</div>`}
+  if(editKeep)editKeep=null}
 
 function removeScheduleFromEntry(id){
   const e=entries.find(x=>x.id===id);if(!e)return;
@@ -2194,7 +2238,7 @@ async function saveEdit(id){const err=$('edErr');err.innerHTML='';
     if(rErr){err.innerHTML=`<div class="error-msg">Couldn't check the entry before saving — ${esc(refusalWords(rErr))} Nothing was saved.</div>`;return}
     if(!cur){err.innerHTML='<div class="error-msg">This entry is no longer there — it may have been deleted. Nothing was saved.</div>';return}
     const moved=EDIT_GUARD.filter(k=>!sameDbValue(cur[k],snap.row[k]));
-    if(moved.length){showEditConflict(id,moved);return}
+    if(moved.length){await showEditConflict(id,moved);return}
     // 2. Only the person's changes (+ the status rules they trigger), judged on the entry as it is now.
     const{changed,patch}=editPatch(cur,snap.form,form1,isSupplier());
     // 3. One conditional update: it lands only while the guarded fields still hold what the dialog showed.
@@ -2202,7 +2246,7 @@ async function saveEdit(id){const err=$('edErr');err.innerHTML='';
     for(const k of EDIT_GUARD){const v=snap.row[k];q=v==null?q.is(k,null):q.eq(k,v)}
     const{data:done,error}=await q.select('id');
     if(error){err.innerHTML=`<div class="error-msg">Not saved — ${esc(refusalWords(error))}</div>`;return}
-    if(!done||!done.length){showEditConflict(id,[]);return}
+    if(!done||!done.length){await showEditConflict(id,[]);return}
     // 4. History — one line per field that changed (and the status a rule moved), written only now the save landed.
     const hist=[...changed,...(patch.status?['status']:[])].map(k=>({entry_id:id,action:'UPDATE',field_changed:k,old_value:String(cur[k]??''),new_value:String(patch[k]??''),user_identifier:userName}));
     const{error:hErr}=await sb.from('audit_log').insert(hist);
