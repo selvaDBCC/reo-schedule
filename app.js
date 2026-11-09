@@ -531,7 +531,10 @@ function greetingFor(schedulers,supplier){
   return `Hi ${names.slice(0,-1).join(', ')} and ${names[names.length-1]},`}
 // b5.15 — Q7's rule for orders (Chris for Troy, 9 Nov 2026): no galvanised order goes out silently. A REO entry has no
 // description field, so "GAL in the description" is read from what an item does carry: its split label / split reference,
-// drawing reference, schedule, and (for the cell card) the note typed for it. GAL, GALV, GALVANISED, GALVANIZED as words.
+// drawing reference, schedule, and a note when the caller has one. GAL, GALV, GALVANISED, GALVANIZED as words.
+// ⚠ fidelity review F2 (9 Nov 2026): a cell card NEW order carries only its split label — a new placeholder has no
+// schedule, drawing reference or note — so there the mark fires only when GAL is typed in the split label (a per-order
+// "galvanised" tick is owed; Master-OPS DECISIONS #195).
 const GAL_RE=/\bGALV?(ANISED|ANIZED)?\b/i;
 function galvanisedItem(r,note){
   if(!r)return false;
