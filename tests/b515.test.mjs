@@ -393,6 +393,11 @@ function formPage(a,els){
   return els;
 }
 const todayAt=(h,m)=>{const n=new Date();return new Date(n.getFullYear(),n.getMonth(),n.getDate(),h,m).toISOString()};
+// fidelity review F4 (9 Nov 2026): a history row for a dialog the test opens NOW is stamped from the clock, never a fixed
+// 10:12 — editConflictWords keeps only rows from the dialog's opening (less a minute), so a fixed time passed only near
+// 10:12. `justNow` = one second from now; `hhmm` = how the refusal prints it (a date before it if the day turned over).
+const justNow=()=>new Date(Date.now()+1000);
+const hhmm=d=>'(?:\\d\\d/\\d\\d )?'+String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
 
 test('editConflictWords: each field with who and when from the history since the dialog opened; no / refused / stale history → "changed meanwhile"; never throws', ()=>{
   const since=todayAt(9,0);
@@ -416,7 +421,8 @@ test('editConflictWords: each field with who and when from the history since the
 });
 
 test('saveEdit on a conflict: the refusal names the field and who (DBCC reads the history); a refused or thrown history read still shows it', async()=>{
-  let audit=()=>({data:[{field_changed:'level',user_identifier:'Drew <b>',created_at:todayAt(10,12)}],error:null});
+  const at=justNow();
+  let audit=()=>({data:[{field_changed:'level',user_identifier:'Drew <b>',created_at:at.toISOString()}],error:null});
   const{a,els,sb}=dbccApp({answer:q=>q.table==='entries'&&q.op==='select'?{data:{...ENTRIES[0],level:'L1'},error:null}:q.table==='audit_log'&&q.op==='select'?audit():q.op==='update'?{data:[{id:21}],error:null}:null});
   formPage(a,els);
   a.openEditEntry(21);
@@ -426,7 +432,7 @@ test('saveEdit on a conflict: the refusal names the field and who (DBCC reads th
   await a.saveEdit(21);
   assert.deepEqual(sb.calls.map(c=>c.table+':'+c.op),['entries:select','audit_log:select'],'nothing written');
   const hq=sb.calls[1];assert.equal(hq.cols,'field_changed,user_identifier,created_at');assert.deepEqual([...hq.filters[0]],['eq','entry_id',21]);assert.deepEqual(plain(hq.order),['created_at',{ascending:false}]);assert.equal(hq.limit,30);
-  assert.match(els.edErr.innerHTML,/^<div class="error-msg">This entry changed while you were editing — Level \(by Drew &lt;b&gt;, 10:12\)\. Nothing was saved\.<div style="margin-top:8px"><button class="btn btn-sec btn-sm" onclick="reloadEditEntry\(21\)"/,'escaped');
+  assert.match(els.edErr.innerHTML,new RegExp('^<div class="error-msg">This entry changed while you were editing — Level \\(by Drew &lt;b&gt;, '+hhmm(at)+'\\)\\. Nothing was saved\\.<div style="margin-top:8px"><button class="btn btn-sec btn-sm" onclick="reloadEditEntry\\(21\\)"'),'escaped');
   assert.ok(!/Drew <b>/.test(els.edErr.innerHTML));
   // refused (a supplier login can't read audit_log): the dialog still shows, "changed meanwhile"
   audit=()=>({data:null,error:{message:'permission denied for table audit_log'}});
@@ -455,14 +461,15 @@ test('editReapply: only the fields the person changed that the reloaded entry do
 
 test('"Reload the entry" keeps what was typed (not saved), writes it back over the reloaded entry, lists it, and Save then sends only the real changes', async()=>{
   const changed={...ENTRIES[0],level:'L1',area:'SLAB',supplier_delivery_date:'2026-11-06'};   // Drew moved it to L1 / SLAB and set the production date
-  const{a,r,els,sb}=dbccApp({answer:q=>q.table==='entries'&&q.op==='select'?{data:{...changed},error:null}:q.table==='audit_log'&&q.op==='select'?{data:[{field_changed:'level',user_identifier:'Drew',created_at:todayAt(10,12)}],error:null}:q.op==='update'?{data:[{id:21}],error:null}:null});
+  const at=justNow();
+  const{a,r,els,sb}=dbccApp({answer:q=>q.table==='entries'&&q.op==='select'?{data:{...changed},error:null}:q.table==='audit_log'&&q.op==='select'?{data:[{field_changed:'level',user_identifier:'Drew',created_at:at.toISOString()}],error:null}:q.op==='update'?{data:[{id:21}],error:null}:null});
   formPage(a,els);
   a.__db=changed;r(`loadEntries=async()=>{__loads++;entries=__db?entries.map(e=>e.id===21?JSON.parse(JSON.stringify(__db)):e):entries.filter(e=>e.id!==21)}`);
   a.openEditEntry(21);
   const g=id=>a.document.getElementById(id);
   g('ed_sched').value='U9AV-2';g('ed_wt').value='3.1';g('ed_draw').value='S-100';g('ed_supD').value='2026-11-06';
   await a.saveEdit(21);
-  assert.match(els.edErr.innerHTML,/Level \(by Drew, 10:12\)/);
+  assert.match(els.edErr.innerHTML,new RegExp('Level \\(by Drew, '+hhmm(at)+'\\)'));
   await a.reloadEditEntry(21);
   assert.equal(r('__loads'),1);
   assert.equal(g('ed_level').value,'L1','the reloaded entry\'s level (Drew\'s change), not the stale one');
